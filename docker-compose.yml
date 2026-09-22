@@ -1,0 +1,42 @@
+# Studio 自托管编排。
+#
+# 用法：
+#   cp .env.example .env   # 至少填 STUDIO_PASSWORD
+#   docker compose up -d --build
+#   浏览器打开 http://服务器IP:8080
+#
+# 生产环境请通过反向代理套上 TLS，并设置 STUDIO_SECURE_COOKIES=1，
+# 否则浏览器的 Secure Cookie 策略会让你「密码正确却登录不上」。
+
+services:
+  studio:
+    build:
+      context: .
+      args:
+        # Docker Hub 不可达时，在 .env 里把 NODE_IMAGE 指向可达的镜像源。
+        NODE_IMAGE: "${NODE_IMAGE:-node:24-alpine}"
+    image: studio:local
+    container_name: studio
+    restart: unless-stopped
+    ports:
+      - "${STUDIO_PORT:-8080}:8080"
+    environment:
+      # 访问密码；留空会关闭登录门，只适合本机开发。
+      STUDIO_PASSWORD: "${STUDIO_PASSWORD:-}"
+      # 会话签名密钥；多实例或需要重启后保持登录时必须固定。
+      STUDIO_SECRET: "${STUDIO_SECRET:-}"
+      # 图片后端：stub（占位图）| comfyui | ark
+      STUDIO_IMAGE_DRIVER: "${STUDIO_IMAGE_DRIVER:-stub}"
+      # 本地 ComfyUI；容器内访问宿主机用 host.docker.internal
+      COMFYUI_URL: "${COMFYUI_URL:-http://host.docker.internal:8188}"
+      # 火山方舟（即梦）图像生成
+      ARK_API_KEY: "${ARK_API_KEY:-}"
+      ARK_BASE_URL: "${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}"
+      ARK_MODEL: "${ARK_MODEL:-doubao-seedream-4-0-250828}"
+      STUDIO_SECURE_COOKIES: "${STUDIO_SECURE_COOKIES:-0}"
+    volumes:
+      # 数据库与素材都在这里；备份这一个目录就够了。
+      - ./data:/data
+    extra_hosts:
+      # Linux 宿主机上也能用 host.docker.internal 访问本地 ComfyUI。
+      - "host.docker.internal:host-gateway"

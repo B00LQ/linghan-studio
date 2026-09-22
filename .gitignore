@@ -1,0 +1,17 @@
+node_modules/
+dist/
+lib/
+*.log
+data/
+.DS_Store
+
+# 凭据：只有模板可以入库。
+# .env 里有访问密码和会话签名密钥；顺着它还能派生 ARK_API_KEY。
+.env
+.env.*
+!.env.example
+
+# 构建/工具缓存
+*.tsbuildinfo
+.vite/
+coverage/

@@ -1,0 +1,20 @@
+{
+  "name": "studio",
+  "private": true,
+  "license": "UNLICENSED",
+  "version": "0.1.0",
+  "description": "自托管 AI 创作台：自研无限画布 + 本地 ComfyUI / 云端模型聚合",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "dev:server": "pnpm --filter @studio/server dev",
+    "dev:web": "pnpm --filter @studio/web dev",
+    "build": "pnpm --filter @studio/web build",
+    "start": "pnpm --filter @studio/server start",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

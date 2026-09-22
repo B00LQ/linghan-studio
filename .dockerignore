@@ -1,0 +1,11 @@
+# 依赖与产物都在镜像内重新生成，绝不要进入构建上下文。
+node_modules
+**/node_modules
+apps/web/dist
+data
+.git
+.gitignore
+*.log
+.env
+.env.local
+e2e-*.mjs

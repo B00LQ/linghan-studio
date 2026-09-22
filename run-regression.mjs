@@ -1,0 +1,145 @@
+/**
+ * Studio 全量回归。
+ *
+ * 用法:
+ *   node run-regression.mjs [baseUrl] [password] [--only=a,b] [--skip=a,b]
+ *
+ * 这些用例是「一次做完、按顺序跑」的：先跑不依赖浏览器的（快、定位准），
+ * 再跑需要 Edge/CDP 的（慢），最后跑会真的调用 ComfyUI 出图的（最慢）。
+ * 每个用例都在自己的子进程里跑，一个挂了不影响后面的。
+ */
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'))
+const BASE = positional[0] || 'http://127.0.0.1:8080'
+const PASSWORD = positional[1] || process.env.STUDIO_PASSWORD || 'studio-demo-2026'
+
+const listArg = (flag) => (process.argv.find((a) => a.startsWith(`--${flag}=`)) ?? '').replace(`--${flag}=`, '')
+const only = listArg('only').split(',').map((s) => s.trim()).filter(Boolean)
+const skip = listArg('skip').split(',').map((s) => s.trim()).filter(Boolean)
+
+/** 顺序 = 依赖从少到多；`slow: true` 的用例会真的走一遍出图。 */
+const SUITES = [
+  { name: 'layout', script: 'layout-test.mjs', args: [] },
+  { name: 'progress', script: 'progress-test.mjs', args: [] },
+  { name: 'workflow-engine', script: 'workflow-engine-test.mjs', args: [] },
+  { name: 'workflow-api', script: 'workflow-api-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'take-pipeline', script: 'take-pipeline-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'agent-canvas', script: 'agent-canvas-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'site-routing', script: 'site-routing-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'projects', script: 'projects-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'project-layout', script: 'project-layout-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'image-edit', script: 'image-edit-test.mjs', args: [BASE, PASSWORD] },
+  // 单测而不是浏览器：只算裁剪/旋转的算术，不需要容器，也不碰 ComfyUI。
+  { name: 'crop', script: 'crop-test.mjs', args: [] },
+  { name: 'assets', script: 'assets-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'workflows', script: 'workflow-library-test.mjs', args: [BASE, PASSWORD], slow: true },
+  { name: 'canvas-typing', script: 'canvas-typing-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'canvas-connect', script: 'canvas-connect-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'canvas-sidebar', script: 'canvas-sidebar-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'canvas-prompt-window', script: 'canvas-prompt-window-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'canvas-interaction', script: 'canvas-interaction-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'canvas-selection', script: 'canvas-selection-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'canvas-ux', script: 'canvas-ux-test.mjs', args: [BASE, PASSWORD], slow: true },
+  { name: 'generation-progress', script: 'generation-progress-test.mjs', args: [BASE, PASSWORD], slow: true },
+  { name: 'agent-live-sync', script: 'agent-live-sync-test.mjs', args: [BASE, PASSWORD] },
+  { name: 'e2e-studio', script: 'e2e-studio.mjs', args: [BASE, PASSWORD], slow: true },
+]
+
+const wanted = SUITES.filter((s) => (only.length === 0 || only.includes(s.name)) && !skip.includes(s.name))
+if (wanted.length === 0) {
+  console.error('[regression] 没有匹配的用例:', { only, skip })
+  process.exit(2)
+}
+
+/**
+ * Delete the canvases a suite created.
+ *
+ * Most suites build a canvas to work on and never delete it, so a full run used
+ * to leave ~20 behind and the workspace filled up with 「提示词窗口验收」 every
+ * day. Cleaning up per suite (rather than per test file) means a new suite gets
+ * this for free.
+ *
+ * Two rules keep this from ever touching real work:
+ *
+ * 1. **Only ids that appeared during that suite** are candidates.
+ * 2. **Only names that match a known test prefix** are deleted. Time alone is not
+ *    evidence of authorship: an earlier version deleted everything created while
+ *    a suite ran, and swept up a canvas the user had just made. It went to the
+ *    trash, not to oblivion, but the rule was still wrong.
+ *
+ * Deletion is `?purge=1` — a sweep that only trashes just moves the mess.
+ */
+const TEST_PREFIXES = [
+  '交互验收', '提示词窗口验收', '连线手势验收', '布局回归', '切换项目回归',
+  '外壳验收', 'Agent 双入口验收', 'Agent 实时同步验收', '端到端验收',
+  '验收文件夹', '改名后的文件夹', '验收画布', '别的工作区画布',
+  '孤立画布', '列表验收', '进度验收', '框选验收', '探针项目', '接口探针', '播种',
+  'Take 流水线验收', 'DAG 引擎验收', '打字复现', '未命名项目（曾经乱码，已修复）',
+  '在文件夹里的画布', '副本源头', '卡片改名', '待删画布', '迁移探针',
+]
+
+let cachedCookie = ''
+/** Log in once and reuse the cookie for cleanup. */
+const sessionCookie = async () => {
+  if (cachedCookie !== '') return cachedCookie
+  const raw = await fetch(`${BASE}/api/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }),
+  })
+  cachedCookie = (raw.headers.getSetCookie?.() ?? []).map((item) => item.split(';')[0]).join('; ')
+  return cachedCookie
+}
+
+const listProjects = async () => {
+  const cookie = await sessionCookie()
+  const response = await fetch(`${BASE}/api/projects`, { headers: { cookie } })
+  if (!response.ok) return null
+  return (await response.json()).projects ?? []
+}
+
+/** Purge every test-named canvas created since `before`. */
+const sweep = async (before) => {
+  if (before === null) return
+  const cookie = await sessionCookie()
+  const fresh = (await listProjects() ?? []).filter((project) =>
+    !before.includes(project.id) && TEST_PREFIXES.some((prefix) => project.name.startsWith(prefix)))
+  for (const project of fresh) {
+    await fetch(`${BASE}/api/projects/${encodeURIComponent(project.id)}?purge=1`, { method: 'DELETE', headers: { cookie } })
+  }
+  if (fresh.length > 0) {
+    console.log(`[regression] 🧹 收尾：彻底删除这个用例建过的 ${String(fresh.length)} 个画布（${fresh.map((p) => p.name).join('、')}）`)
+  }
+}
+
+const runOne = (suite) => new Promise((resolve) => {
+  const started = Date.now()
+  const child = spawn(process.execPath, [join(HERE, suite.script), ...suite.args], {
+    cwd: HERE, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let out = ''
+  child.stdout.on('data', (d) => { out += d; process.stdout.write(d) })
+  child.stderr.on('data', (d) => { out += d; process.stderr.write(d) })
+  child.on('close', (code) => resolve({ ...suite, code, ms: Date.now() - started, out }))
+})
+
+console.log(`[regression] base=${BASE} 用例=${wanted.length} 个\n`)
+const results = []
+for (const suite of wanted) {
+  console.log(`\n${'='.repeat(72)}\n[regression] ▶ ${suite.name} (${suite.script})\n${'='.repeat(72)}`)
+  const before = await listProjects()
+  const r = await runOne(suite)
+  await sweep(before === null ? null : before.map((project) => project.id))
+  console.log(`[regression] ${r.code === 0 ? '✅ 通过' : '❌ 失败'} ${suite.name} — ${(r.ms / 1000).toFixed(1)}s`)
+  results.push(r)
+}
+
+const failed = results.filter((r) => r.code !== 0)
+console.log(`\n${'='.repeat(72)}\n[regression] 汇总：${results.length - failed.length}/${results.length} 通过`)
+for (const r of results) {
+  const bad = r.code === 0 ? '' : (r.out.split('\n').filter((l) => l.includes('❌') || l.includes('未通过')).slice(-3).join(' / ') || `exit ${r.code}`)
+  console.log(`  ${r.code === 0 ? '✅' : '❌'} ${r.name.padEnd(22)} ${(r.ms / 1000).toFixed(1).padStart(6)}s  ${bad}`)
+}
+process.exit(failed.length === 0 ? 0 : 1)
