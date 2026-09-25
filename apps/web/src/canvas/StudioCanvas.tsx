@@ -41,7 +41,7 @@ import { CompareView } from './CompareView.tsx'
 import { NodeTools } from './NodeTools.tsx'
 import { transformImage, type EditOps } from './imageEdit.ts'
 import type { BrowserAsset } from '../components/AssetBrowser.tsx'
-import { CANVAS_NODES, candidatesFor, initialData, nodeLabel, portKind, specOf, type CanvasNodeKind, type PortKind } from './ports.ts'
+import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, specOf, type CanvasNodeKind, type PortKind } from './ports.ts'
 import { describeProgress, type NodeProgress } from './progress.ts'
 
 /** Data carried by every Studio node. */
@@ -1871,6 +1871,18 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
             onNodesChange={(changes) => { markDirty(); onNodesChange(changes) }}
             onEdgesChange={(changes) => { markDirty(); onEdgesChange(changes) }}
             onConnect={onConnect}
+            // 端口有类型，连线就按类型拦一道：把文本接到视频的「首帧」上不该画出
+            // 一条线来 —— 一条连上却什么都不做的线，比连不上更让人困惑
+            // （视频节点现在有三个入边：提示词、首帧、尾帧）。
+            isValidConnection={(connection) => {
+              const kindAt = (id: string | null | undefined): string => {
+                const node = nodesRef.current.find((item) => item.id === id)
+                return typeof node?.data.kind === 'string' ? node.data.kind : ''
+              }
+              const from = portKind(kindAt(connection.source), connection.sourceHandle ?? null, 'source')
+              const to = portKind(kindAt(connection.target), connection.targetHandle ?? null, 'target')
+              return from !== undefined && to !== undefined && canConnect(from, to)
+            }}
             // 从端口拖线、松手在空白处 → 「引用该节点生成」。菜单按端口类型筛选。
             onConnectEnd={(event, connectionState) => {
               const state = connectionState as unknown as {

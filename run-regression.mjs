@@ -25,6 +25,7 @@ const skip = listArg('skip').split(',').map((s) => s.trim()).filter(Boolean)
 const SUITES = [
   { name: 'layout', script: 'layout-test.mjs', args: [] },
   { name: 'progress', script: 'progress-test.mjs', args: [] },
+  { name: 'ports', script: 'ports-test.mjs', args: [] },
   { name: 'workflow-engine', script: 'workflow-engine-test.mjs', args: [] },
   { name: 'workflow-api', script: 'workflow-api-test.mjs', args: [BASE, PASSWORD] },
   { name: 'take-pipeline', script: 'take-pipeline-test.mjs', args: [BASE, PASSWORD] },

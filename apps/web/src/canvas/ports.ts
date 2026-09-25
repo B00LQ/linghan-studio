@@ -78,11 +78,16 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
   {
     kind: 'video',
     title: '视频',
-    description: '文字生视频（带声音）；慢，一条要好几分钟',
-    // 「首帧」这一版**故意没有**：MiniMax H3 是图生视频模型，接首帧要把画布上的图
-    // 先传到 ComfyUI 的 input 目录再用 LoadImage 引用，这条链路还没做。
-    // 放一个拖进去却什么都不做的端口，比不放它更糟。
-    inputs: [{ id: 'prompt', kind: 'text', label: '提示词' }],
+    description: '文字生视频（带声音）；接一张图就是图生视频；慢，一条要好几分钟',
+    // 首帧/尾帧是**可选**入边：接上就是图生视频，不接就是文生视频。
+    // 传输这条路走服务端：生成时服务端从画布解析入边、把那张图的字节读出来，
+    // 再让驱动送进 ComfyUI 的 input 目录（`LoadImage` 只认那边的文件名）。
+    // 所以画布这一侧不需要为它做任何搬运，只负责把线连上。
+    inputs: [
+      { id: 'prompt', kind: 'text', label: '提示词' },
+      { id: 'first', kind: 'image', label: '首帧' },
+      { id: 'last', kind: 'image', label: '尾帧' },
+    ],
     outputs: [{ id: 'video', kind: 'video', label: '视频' }],
     placeholder: '描述镜头与声音。例如：雨夜霓虹街头，纸灯笼在雨中轻晃，镜头缓慢推近，环境雨声',
     picture: true,

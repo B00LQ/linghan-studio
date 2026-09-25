@@ -83,6 +83,15 @@ export interface StudioWorkflow {
    * default workflow, so it is carried through every path.
    */
   models?: Record<string, string>
+  /**
+   * `$name` 占位符中**可选**的那些：没人给值时，那个节点连同指向它的连线一起被删掉。
+   *
+   * 存在的理由很具体：图生视频的首帧是一条 `LoadImage → i2v.first_frame` 的支路，
+   * 而首帧是可选的（不接图就是文生视频）。没接图时如果照旧提交，`LoadImage` 会拿着
+   * 一个不存在的文件名让 ComfyUI 在校验阶段拒绝——整条生成都跑不起来。
+   * 声明成 optional 之后，「没有首帧」就变成「那条支路不存在」，而这正是它的语义。
+   */
+  optional?: string[]
 }
 
 /** Guess what a graph produces from the classes it uses. */
@@ -224,6 +233,32 @@ export function suggestBindings(graph: Record<string, WorkflowNode>): {
 }
 
 /**
+ * Drop the graph nodes that belong to an optional branch nobody filled in.
+ *
+ * 只删一层：被删节点的**下游**保留其余输入（比如 `i2v` 的 `first_frame` 是可选的，
+ * 所以删掉它正好）。如果某个下游的**必填**输入依赖被删的节点，ComfyUI 会在校验时
+ * 明确说出「哪个节点缺哪个输入」——那比我们在这里猜要好。
+ * @param graph - resolved graph, mutated in place.
+ * @param optional - placeholder names declared optional by the workflow.
+ */
+function pruneOptional(graph: Record<string, WorkflowNode>, optional: string[]): void {
+  if (optional.length === 0) return
+  const wanted = new Set(optional.map((name) => `$${name}`))
+  const dropped = new Set<string>()
+  for (const [id, node] of Object.entries(graph)) {
+    const unresolved = Object.values(node.inputs ?? {}).some((value) => typeof value === 'string' && wanted.has(value))
+    if (unresolved) dropped.add(id)
+  }
+  if (dropped.size === 0) return
+  for (const id of dropped) delete graph[id]
+  for (const node of Object.values(graph)) {
+    for (const [input, value] of Object.entries(node.inputs ?? {})) {
+      if (isLink(value) && dropped.has(value[0])) delete node.inputs[input]
+    }
+  }
+}
+
+/**
  * Fill a workflow's graph with this request's values.
  *
  * Values are applied through the binding map; anything left over is applied to
@@ -257,6 +292,8 @@ export function resolveGraph(workflow: StudioWorkflow, values: Record<string, un
       if (name.startsWith('$') && all[name.slice(1)] !== undefined) node.inputs[input] = all[name.slice(1)]
     }
   }
+  // 可选支路：留在图里的 `$name` 已经确定没人给值了（上面两轮都没解析掉它们）。
+  pruneOptional(graph, workflow.optional ?? [])
   return graph
 }
 
@@ -334,6 +371,7 @@ export function loadWorkflows(dataDir: string, builtInDir: string): StudioWorkfl
         bindings,
         defaults: parsed.defaults ?? {},
         models: parsed.models ?? {},
+        optional: parsed.optional ?? [],
       }
     } catch {
       return undefined

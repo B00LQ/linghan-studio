@@ -9,7 +9,7 @@
  * Every tool returns plain JSON, and every failure comes back as a message an
  * Agent can act on rather than a stack trace.
  */
-import { applyOps, readDocument, resolvePrompt, writeDocument, type CanvasDocument, type CanvasOp } from './ops.ts'
+import { applyOps, readDocument, resolvePrompt, writeDocument, CONNECTABLE_PORTS, type CanvasDocument, type CanvasOp } from './ops.ts'
 import type { JobRequest, StudioJob } from './jobs.ts'
 import type { StudioStore } from './store.ts'
 import type { StudioWorkflow, WorkflowCapability } from './workflow-library.ts'
@@ -90,10 +90,19 @@ export const AGENT_TOOLS: AgentTool[] = [
   },
   {
     name: 'canvas_connect',
-    description: '把两个节点连起来。提示词节点 → 生成配置节点，表示后者用前者的文本作为提示词。',
+    description:
+      '把两个节点连起来：文本节点 → 图片/视频节点表示「拿它的文本当提示词」，'
+      + '图片节点 → 视频节点表示「拿它当首帧」（图生视频）。'
+      + '视频节点有三个入边（提示词 / 首帧 / 尾帧），默认按上游类型选：文本进提示词、图片进首帧；'
+      + '要接尾帧就显式给 port="last"。',
     inputSchema: {
       type: 'object',
-      properties: { projectId: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' } },
+      properties: {
+        projectId: { type: 'string' },
+        from: { type: 'string', description: '起点节点 id（产物来自它）' },
+        to: { type: 'string', description: '终点节点 id（产物进它）' },
+        port: { type: 'string', enum: [...CONNECTABLE_PORTS], description: '进哪个入边；省略则按上游类型挑' },
+      },
       required: ['from', 'to'],
     },
   },
@@ -325,7 +334,12 @@ export function createAgentFace(deps: AgentDeps): {
       const projectId = project(input)
       let edgeId = ''
       mutate(projectId, 'connect', (doc) => {
-        const [result] = applyOps(doc, [{ type: 'connect', from: text(input.from), to: text(input.to) }])
+        const [result] = applyOps(doc, [{
+          type: 'connect',
+          from: text(input.from),
+          to: text(input.to),
+          ...(text(input.port).trim() === '' ? {} : { port: text(input.port).trim() }),
+        }])
         edgeId = result?.edgeId ?? ''
       })
       return { projectId, edgeId, ok: true }

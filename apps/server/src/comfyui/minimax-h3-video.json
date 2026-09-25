@@ -11,6 +11,7 @@
     "PrimitiveFloat",
     "ComfyMathExpression",
     "MiniMaxH3ImageToVideo",
+    "LoadImage",
     "BasicGuider",
     "KSamplerSelect",
     "BasicScheduler",
@@ -41,6 +42,7 @@
     "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
     "weightDtype": "default"
   },
+  "optional": ["firstFrame", "lastFrame"],
   "graph": {
     "unet": {
       "class_type": "UNETLoader",
@@ -73,6 +75,14 @@
         "values.a": ["duration", 0]
       }
     },
+    "loadFirst": {
+      "class_type": "LoadImage",
+      "inputs": { "image": "$firstFrame" }
+    },
+    "loadLast": {
+      "class_type": "LoadImage",
+      "inputs": { "image": "$lastFrame" }
+    },
     "i2v": {
       "class_type": "MiniMaxH3ImageToVideo",
       "inputs": {
@@ -81,7 +91,9 @@
         "prompt": "$prompt",
         "width": "$width",
         "height": "$height",
-        "length": ["length", 1]
+        "length": ["length", 1],
+        "first_frame": ["loadFirst", 0],
+        "last_frame": ["loadLast", 0]
       }
     },
     "guider": {

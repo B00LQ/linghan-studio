@@ -6,7 +6,7 @@
  * in the browser so a project survives a device change and can be shared.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
@@ -246,6 +246,16 @@ export interface StudioStore {
   deleteAsset: (id: string) => boolean
   /** Absolute path of one asset's bytes. */
   assetPath: (asset: StudioAsset) => string
+  /**
+   * Read one asset's bytes, when it exists and is still on disk.
+   *
+   * 存在的理由很具体：**图生视频要把画布上那张图送进 ComfyUI 的 input 目录**
+   * （`LoadImage` 只认那边的文件名）。素材是内容寻址的，所以「按 id 取字节」这件事
+   * 归 store 管，调用方不该自己拼路径。
+   * @param id - asset id.
+   * @returns the bytes, or undefined when the row or the file is gone.
+   */
+  readAsset: (id: string) => Buffer | undefined
   /** Close the underlying database. */
   close: () => void
 }
@@ -803,6 +813,16 @@ export function openStore(dataDir: string): StudioStore {
     },
     assetPath(asset) {
       return join(assetRoot, asset.relPath)
+    },
+    readAsset(id) {
+      const asset = this.getAsset(id)
+      if (asset === undefined) return undefined
+      try {
+        return readFileSync(join(assetRoot, asset.relPath))
+      } catch {
+        // 索引还在、文件没了（被人从磁盘上删掉）——那不是崩溃，是「读不到」。
+        return undefined
+      }
     },
     assetInUse(id) {
       // A canvas document holds `/api/assets/<id>` in its node data, so a LIKE

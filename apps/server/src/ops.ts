@@ -52,7 +52,7 @@ export type CanvasOp =
   | { type: 'add_node'; kind: 'text' | 'image' | 'video' | 'config' | 'grid'; text?: string; size?: string; count?: number; duration?: number; x?: number; y?: number }
   | { type: 'set_text'; nodeId: string; text: string }
   | { type: 'set_config'; nodeId: string; size?: string; count?: number }
-  | { type: 'connect'; from: string; to: string }
+  | { type: 'connect'; from: string; to: string; port?: string }
   | { type: 'delete_node'; nodeId: string }
 
 /** What one operation produced. */
@@ -235,7 +235,18 @@ export function applyOps(doc: CanvasDocument, ops: CanvasOp[]): OpResult[] {
         results.push({ type: op.type, edgeId: existing.id, note: '连线已存在' })
         continue
       }
-      const edge: CanvasEdge = { id: `edge-${randomUUID()}`, source: op.from, target: op.to }
+      // 端口按**上游产品的类型**挑默认入口（见 TARGET_PORT_BY_SOURCE）：Agent 没有
+      // 端口这个概念，而视频节点有三个入边。想接尾帧就显式给 `port`。
+      // 这里只写一个 handle id，不校验目标节点有没有这个入口——目标节点有哪些入边是
+      // **画布目录**（前端 ports.ts）的事，客户端加载时会照它解释；写错的那条边不会
+      // 被 resolvePrompt / inboundImageUrl 采用，所以最多是一条不生效的线，不会出错图。
+      const port = op.port ?? TARGET_PORT_BY_SOURCE[String(from.data.kind ?? '')]
+      const edge: CanvasEdge = {
+        id: `edge-${randomUUID()}`,
+        source: op.from,
+        target: op.to,
+        ...(port === undefined ? {} : { targetHandle: port }),
+      }
       doc.edges.push(edge)
       results.push({ type: op.type, edgeId: edge.id, note: '已连线' })
       continue
@@ -261,12 +272,73 @@ export function applyOps(doc: CanvasDocument, ops: CanvasOp[]): OpResult[] {
   return results
 }
 
-/** Read the prompt a config node would use: its own text, else its inbound text node. */
+/**
+ * Read the prompt a node would use: its own text, else its inbound text node.
+ *
+ * **只看文本那条入边。** 从前这里取「第一条入边」，在只有文本一种入边时没错；
+ * 但视频节点现在还能接首帧/尾帧（图片），接了图之后「第一条入边」很可能就是那张图，
+ * 于是上游的文本节点被漏掉——提示词悄悄变成空。
+ * @param doc - canvas document.
+ * @param node - the node asking.
+ * @returns the prompt text, or empty.
+ */
 export function resolvePrompt(doc: CanvasDocument, node: CanvasNode): string {
   const own = typeof node.data.text === 'string' ? node.data.text.trim() : ''
   if (own !== '') return own
-  const source = doc.edges.find((edge) => edge.target === node.id)?.source
-  if (source === undefined) return ''
-  const upstream = doc.nodes.find((item) => item.id === source)
-  return upstream?.data.kind === 'text' && typeof upstream.data.text === 'string' ? upstream.data.text.trim() : ''
+  for (const edge of doc.edges.filter((item) => item.target === node.id)) {
+    const upstream = doc.nodes.find((item) => item.id === edge.source)
+    const text = typeof upstream?.data.text === 'string' ? upstream.data.text.trim() : ''
+    if (upstream?.data.kind === 'text' && text !== '') return text
+  }
+  return ''
+}
+
+/**
+ * Which inbound port receives a given kind of upstream product.
+ *
+ * 服务端也得知道「端口」这件事：Agent 的 `canvas_connect` 没有端口这个概念，而视频
+ * 节点现在有三个入边（提示词 / 首帧 / 尾帧）。没有这张表，Agent 把图片接到视频节点上
+ * 会落到**第一个**入边（提示词）上——那是一条连了却什么都不做的线。
+ *
+ * 这份映射**必须**与 `apps/web/src/canvas/ports.ts` 的目录一致，所以
+ * `ports-test.mjs` 会拿两边的目录对一遍：不一致就红，而不是等一个人肉发现。
+ */
+export const TARGET_PORT_BY_SOURCE: Record<string, string | undefined> = {
+  text: 'prompt',
+  image: 'first',
+}
+
+/**
+ * Port ids an Agent may name explicitly on a connection.
+ *
+ * 「首帧」有默认值（图片自动进首帧），「尾帧」没有——所以它只能被显式点名。
+ * 这份常量同时是**工具 schema 的枚举**与测试的判据，避免枚举在 schema 里另抄一遍。
+ */
+export const CONNECTABLE_PORTS = ['prompt', 'first', 'last'] as const
+
+/**
+ * The asset url feeding one inbound image port of a node.
+ *
+ * 图生视频的首帧/尾帧就是这么来的：入边指向的那个图片节点带什么素材，就用什么当首帧。
+ * 解析发生在**服务端**，所以画布点击、Agent 调用、作业运行器三条路都自动支持，
+ * 不需要客户端把图再传一遍（它已经在素材库里了）。
+ * @param doc - canvas document.
+ * @param nodeId - the consuming node.
+ * @param handle - inbound handle id (`first` / `last`).
+ * @returns the upstream image's asset url, or empty when nothing usable is connected.
+ */
+export function inboundImageUrl(doc: CanvasDocument, nodeId: string, handle: string): string {
+  // 没有 targetHandle 的边（旧文档，以及 Agent 用 canvas_connect 建的）也算候选：
+  // Agent 没有「端口」这个概念，它的边只会是「把某个节点的产物接到这个节点上」。
+  // 真正决定能不能当首帧的是**上游有没有画面**（`data.url`），所以这里不必先判类型——
+  // 接到视频节点上的文本节点没有 url，自然被排除。
+  // 同一个口上有多条时取**最后一条**：后连的那条是人的最新意图。
+  const edges = doc.edges.filter((edge) => edge.target === nodeId
+    && (String(edge.targetHandle ?? '') === handle || edge.targetHandle === undefined))
+  const edge = edges[edges.length - 1]
+  if (edge === undefined) return ''
+  const source = doc.nodes.find((item) => item.id === edge.source)
+  const url = source?.data.url
+  // 上游节点存在但还没出图（url 为空）时也返回空：那时「没有首帧」才是事实。
+  return typeof url === 'string' ? url : ''
 }

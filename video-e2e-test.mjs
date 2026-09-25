@@ -21,6 +21,14 @@ const PASSWORD = process.argv[3] ?? process.env.STUDIO_PASSWORD ?? ''
 const WORKFLOW = process.env.VIDEO_WORKFLOW ?? 'minimax-h3-video'
 const SIZE = process.env.VIDEO_SIZE ?? '1344x768'
 const DURATION = Number(process.env.VIDEO_DURATION ?? 5)
+/**
+ * 首帧素材 id：给了就跑**图生视频**（否则文生视频）。
+ *
+ * 拿一张已有的图当首帧，走 `/v1/images/generations` 的 `first_frame` 字段。
+ * 断言它真的被用上了：take 里要记下这个文件名，而且**生成片的第一帧应当长得像那张图**
+ * （这一条只能靠眼睛，脚本只能把两帧取出来给人看）。
+ */
+const FIRST_FRAME = process.env.VIDEO_FIRST_FRAME ?? ''
 /** 留足余量：11 分钟是实测，冷启动或换更大的片子会更久。 */
 const GENERATE_TIMEOUT_MS = 45 * 60 * 1000
 
@@ -107,6 +115,7 @@ const response = await postJson('/v1/images/generations', {
   shotId: shot.id,
   workflow: WORKFLOW,
   duration: DURATION,
+  ...(FIRST_FRAME === '' ? {} : { first_frame: FIRST_FRAME }),
 }, cookie)
 const payload = response.json
 const seconds = Math.round((Date.now() - started) / 1000)
@@ -135,6 +144,12 @@ console.log('\n=== take 与 ETA 统计 ===')
 const takes = (await call(`/api/shots/${shot.id}/takes`)).json.takes ?? []
 check('记了一条成功的 take', takes.length === 1 && takes[0]?.status === 'succeeded', JSON.stringify(takes.map((t) => t.status)))
 check('take 上有耗时', (takes[0]?.latencyMs ?? 0) > 60_000, `${String(Math.round((takes[0]?.latencyMs ?? 0) / 1000))}s`)
+// 图生视频时，首帧是哪张图必须落在 take 里：光看提示词分不出「这一版是从哪张图起的」。
+if (FIRST_FRAME !== '') {
+  const recorded = takes[0]?.params?.firstFrame
+  check('take 里记下了首帧', typeof recorded === 'string' && recorded.startsWith(FIRST_FRAME),
+    `${String(recorded)}（用的是 ${FIRST_FRAME}）`)
+}
 const stats = (await call('/api/generation/stats')).json
 check('ETA 统计里有 video 这一档', stats.estimate?.byKind?.video !== undefined, JSON.stringify(stats.estimate?.byKind ?? {}))
 check('video 的中位数明显大于 image 那一档（没有被混在一起）',

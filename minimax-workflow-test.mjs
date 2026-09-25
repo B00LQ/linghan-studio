@@ -76,6 +76,9 @@ for (const video of videos) {
   const declared = new Set([
     ...Object.keys(video.models ?? {}),
     ...Object.keys(video.defaults),
+    // 声明为**可选**的占位符（图生视频的首帧/尾帧）：没人给值时那条支路会被整条剪掉
+    // （见 workflow-library 的 pruneOptional），所以「没有提供者」对它们是正常状态。
+    ...(video.optional ?? []),
     // 驱动按请求传的
     'prompt', 'seed', 'prefix', 'width', 'height', 'steps', 'duration',
   ])
@@ -87,6 +90,11 @@ for (const video of videos) {
   }
   const orphans = [...placeholders].filter((name) => !declared.has(name))
   check(`${tag}没有无人提供的占位符`, orphans.length === 0, orphans.join(', '))
+  // optional 里写错一个名字（firstframe）不会有任何症状——那条支路照样被提交，
+  // 只是没人剪它。所以「声明的可选名必须是图里真有的占位符」要单独守一条。
+  for (const name of video.optional ?? []) {
+    check(`${tag}optional 的 ${name} 确实是图里的占位符`, placeholders.has(name), [...placeholders].join(','))
+  }
   // 这条要单独说：模型文件名写错的话 ComfyUI 会报「缺模型」，
   // 但那是运行时的报错；这里保证的是「名字确实来自 models 段」。
   // 蒸馏那一格按工作流**实际挂的是哪个**来查：社区 turbo 那份挂 `$lora`，
@@ -143,6 +151,35 @@ for (const video of videos) {
   const uncovered = variables.filter((name) => mathValues[name] === undefined)
   check(`${tag}算式里确实用到了变量（不是空检查）`, variables.length > 0, variables.join(','))
   check(`${tag}算式变量没有漏提供的`, uncovered.length === 0, `用到 ${variables.join(',')}；缺 ${uncovered.join(',')}`)
+
+  // 可选支路（图生视频的首帧/尾帧）。不接图时那条 `LoadImage → first_frame` 必须
+  // **整条消失**：留在图里的话，ComfyUI 会拿一个不存在的文件名在校验阶段拒掉整次生成。
+  // 上面那条「没有残留 $占位符」其实已经在守这件事了——被剪掉的节点不会留下 `$firstFrame`。
+  console.log(`\n--- ${video.id}：可选支路（首帧/尾帧）---`)
+  check(`${tag}没接首帧时不提交 loadFirst`, resolved.loadFirst === undefined, Object.keys(resolved).filter((key) => key.startsWith('load')).join(',') || '（已剪掉）')
+  check(`${tag}没接首帧时 i2v 也没有 first_frame 输入`, resolved.i2v?.inputs.first_frame === undefined, JSON.stringify(resolved.i2v?.inputs.first_frame))
+  const framed = resolveGraph(video, {
+    ...video.defaults,
+    prompt: '探针提示词',
+    seed: 4242,
+    prefix: 'studio',
+    width: 1344,
+    height: 768,
+    duration: 5,
+    firstFrame: 'probe-first.png',
+    lastFrame: 'probe-last.png',
+  })
+  check(`${tag}接了首帧就带上那条支路`,
+    framed.loadFirst?.inputs.image === 'probe-first.png' && framed.i2v?.inputs.first_frame?.[0] === 'loadFirst',
+    JSON.stringify({ loadFirst: framed.loadFirst?.inputs, link: framed.i2v?.inputs.first_frame }))
+  check(`${tag}尾帧同理`,
+    framed.loadLast?.inputs.image === 'probe-last.png' && framed.i2v?.inputs.last_frame?.[0] === 'loadLast',
+    JSON.stringify({ loadLast: framed.loadLast?.inputs, link: framed.i2v?.inputs.last_frame }))
+  check(`${tag}requiredNodes 里写了 LoadImage`, video.requiredNodes.includes('LoadImage'), video.requiredNodes.join(','))
+  // LoadImage 的 `image` 是**动态**下拉（本机 input 目录里的文件列表），所以不能像别的
+  // 枚举那样比对取值：那个名字要等驱动**上传之后**才存在。这里只确认本机有这类节点，
+  // 真正的校验在运行时（上传先于提交，见 comfyui.ts 的 uploadImage）。
+  check(`${tag}本机有 LoadImage 节点`, info === null || info.LoadImage !== undefined, info === null ? '（未连 ComfyUI，跳过）' : '')
 
   if (info === null) continue
   for (const [id, node] of Object.entries(resolved)) {

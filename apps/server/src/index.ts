@@ -19,7 +19,7 @@ import { loadConfig } from './config.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
-import { applyGeneration, applyOps, readDocument, writeDocument } from './ops.ts'
+import { applyGeneration, applyOps, inboundImageUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
 import { makeZip, type ZipEntry } from './zip.ts'
@@ -124,6 +124,12 @@ const jobs = createJobRegistry({
       shotId = store.addShot(request.projectId, request.prompt.slice(0, 40), request.prompt).id
     }
     const history = store.listTakes(shotId)
+    // 首帧/尾帧从画布上解析：入边指向的那张图的素材地址。**只在这里读一次文档**，
+    // 而且只为解析连线——落盘前会再读一次，因为渲染这十几分钟里别人可能改了画布，
+    // 拿旧的这份去写会把他的改动覆盖掉。
+    const before = readDocument(store, request.projectId)
+    const firstFrameUrl = inboundImageUrl(before, request.nodeId, 'first')
+    const lastFrameUrl = inboundImageUrl(before, request.nodeId, 'last')
     const files = await gateway.renderImage({
       prompt: request.prompt,
       shotId,
@@ -131,6 +137,8 @@ const jobs = createJobRegistry({
       ...(request.count === undefined ? {} : { count: request.count }),
       ...(request.workflowId === undefined ? {} : { workflowId: request.workflowId }),
       ...(request.duration === undefined ? {} : { duration: request.duration }),
+      ...(firstFrameUrl === '' ? {} : { firstFrameUrl }),
+      ...(lastFrameUrl === '' ? {} : { lastFrameUrl }),
     }, {
       onQueued: hooks.queued,
       onProgress: (progress) => { hooks.progress(progress as unknown as Record<string, unknown>) },

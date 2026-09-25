@@ -98,6 +98,15 @@ export interface ComfyUiRequest {
   duration?: number
   /** Which stored workflow to run; the driver's default when omitted. */
   workflowId?: string
+  /**
+   * 首帧 / 尾帧的字节。
+   *
+   * 驱动负责把它们**上传到 ComfyUI 的 input 目录**，再把返回的文件名当
+   * `$firstFrame` / `$lastFrame` 交给工作流 —— `LoadImage` 只认那边的文件名，
+   * 而「那边的目录在哪」是驱动才知道的事，所以上传这一趟归这里，不归上层。
+   */
+  firstFrame?: { bytes: Buffer; name: string }
+  lastFrame?: { bytes: Buffer; name: string }
 }
 
 /**
@@ -353,6 +362,28 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
   }
 
   /**
+   * Put one picture into ComfyUI's input directory.
+   *
+   * `LoadImage` 只接受「已经在 ComfyUI input 里的文件名」，所以画布上的图必须先过去
+   * 一趟。文件名由调用方给（我们用素材 id）：内容寻址，同一张图重复用不会在那边堆副本，
+   * 而且 `overwrite=true` 让重传同名文件是幂等的。
+   * @param frame - bytes plus the file name to store it under.
+   * @returns the name ComfyUI reports back (it may live in a subfolder).
+   */
+  const uploadImage = async (frame: { bytes: Buffer; name: string }): Promise<string> => {
+    const form = new FormData()
+    form.append('image', new Blob([frame.bytes]), frame.name)
+    form.append('overwrite', 'true')
+    const response = await fetchWithTimeout(`${base}/upload/image`, { method: 'POST', body: form }, 120_000)
+    if (!response.ok) throw new Error(`把首帧送到 ComfyUI 失败：HTTP ${String(response.status)}`)
+    const saved = (await response.json()) as { name?: string; subfolder?: string }
+    if (typeof saved.name !== 'string' || saved.name === '') throw new Error('ComfyUI 上传成功但没回文件名')
+    // subfolder 非空时，`LoadImage` 要的是「子目录/文件名」。丢掉它就会去找一个
+    // 不存在的文件，而报错只说「找不到图」——那种错最难查。
+    return saved.subfolder === undefined || saved.subfolder === '' ? saved.name : `${saved.subfolder}/${saved.name}`
+  }
+
+  /**
    * Submit one graph and wait for the files it produced.
    * @param libraryWorkflow - template to run.
    * @param request - normalized request.
@@ -368,10 +399,17 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     report: (progress: GenerationProgress) => void,
     onQueued?: (comfyPromptId: string) => void,
   ): Promise<{ bytes: Buffer; mime: string; kind: string }[]> => {
+    // 首帧/尾帧先送过去。顺序在这里是**故意**的：提交之前必须已经在 input 目录里，
+    // 否则 ComfyUI 会在校验阶段就拒绝（找不到图）。
+    const frameValues: Record<string, string> = {}
+    if (request.firstFrame !== undefined) frameValues.firstFrame = await uploadImage(request.firstFrame)
+    if (request.lastFrame !== undefined) frameValues.lastFrame = await uploadImage(request.lastFrame)
+
     // 一套机制运行所有工作流：上传的用显式绑定，内置的用 $占位符，
     // 两条路都收敛到 resolveGraph，驱动不需要分支。
     const graph = resolveGraph(libraryWorkflow, {
       ...libraryWorkflow.defaults,
+      ...frameValues,
       width: request.width,
       height: request.height,
       ...(request.steps === undefined ? {} : { steps: request.steps }),
