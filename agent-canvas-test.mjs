@@ -102,8 +102,8 @@ const run = async () => {
     `当前工具：${names.join(', ')}`)
   check('每个工具都带 JSON Schema', (catalogue.payload.tools ?? []).every((t) => t.inputSchema?.type === 'object'))
   const kinds = catalogue.payload.tools?.find((t) => t.name === 'canvas_add_node')?.inputSchema?.properties?.kind?.enum ?? []
-  check('节点类型是 文本 / 图片 / 视频 / 裁切 / 拼接',
-    kinds.length === 5 && ['text', 'image', 'video', 'trim', 'concat'].every((k) => kinds.includes(k)), kinds.join(','))
+  check('节点类型是 文本 / 图片 / 视频 / 裁切 / 拼接 / 音频',
+    kinds.length === 6 && ['text', 'image', 'video', 'trim', 'concat', 'audio'].every((k) => kinds.includes(k)), kinds.join(','))
 
   log('④ 建一个干净的项目')
   const project = await call('/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Agent 双入口验收' }) })

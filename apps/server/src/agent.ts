@@ -64,13 +64,13 @@ export const AGENT_TOOLS: AgentTool[] = [
     description:
       '在画布上添加节点。kind=text 是文本节点（写故事/设定），kind=image 是图片节点（自带提示词，可自己出图），'
       + 'kind=video 是视频节点（自带提示词，出片带声音；**一条可能十几分钟**），'
-      + 'kind=trim 是裁切节点（接一段视频，cut 出其中一段；秒级），kind=concat 是拼接节点（接两段视频接成一条；秒级）。'
-      + '返回新节点 id。',
+      + 'kind=trim 是裁切节点（接一段视频，cut 出其中一段；秒级），kind=concat 是拼接节点（接两段视频接成一条；秒级），'
+      + 'kind=audio 是音频节点（把文字念成人声；秒级）。返回新节点 id。',
     inputSchema: {
       type: 'object',
       properties: {
         projectId: { type: 'string' },
-        kind: { type: 'string', enum: ['text', 'image', 'video', 'trim', 'concat'] },
+        kind: { type: 'string', enum: ['text', 'image', 'video', 'trim', 'concat', 'audio'] },
         text: { type: 'string', description: '文本内容或提示词' },
         size: { type: 'string', description: '生成尺寸：图片如 1024x1024，视频只有 1344x768 / 768x448' },
         count: { type: 'number', description: '一次生成几张（只对图片有意义）' },
@@ -306,14 +306,15 @@ export function createAgentFace(deps: AgentDeps): {
     if (name === 'canvas_add_node') {
       const projectId = project(input)
       const kind = text(input.kind)
-      if (!['text', 'image', 'video', 'trim', 'concat'].includes(kind)) {
-        throw new Error(`kind 必须是 text / image / video / trim / concat，收到：${kind}`)
+      const canvasKinds = ['text', 'image', 'video', 'trim', 'concat', 'audio'] as const
+      if (!canvasKinds.includes(kind as typeof canvasKinds[number])) {
+        throw new Error(`kind 必须是 ${canvasKinds.join(' / ')}，收到：${kind}`)
       }
       let created = ''
       mutate(projectId, 'add_node', (doc) => {
         const op: CanvasOp = {
           type: 'add_node',
-          kind: kind as 'text' | 'image' | 'video' | 'trim' | 'concat',
+          kind: kind as typeof canvasKinds[number],
           ...(input.text === undefined ? {} : { text: text(input.text) }),
           ...(input.size === undefined ? {} : { size: text(input.size) }),
           ...(typeof input.count === 'number' ? { count: input.count } : {}),

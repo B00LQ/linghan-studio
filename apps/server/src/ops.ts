@@ -49,7 +49,7 @@ export interface CanvasDocument {
 
 /** One operation to apply. */
 export type CanvasOp =
-  | { type: 'add_node'; kind: 'text' | 'image' | 'video' | 'trim' | 'concat' | 'config' | 'grid'; text?: string; size?: string; count?: number; duration?: number; start?: number; x?: number; y?: number }
+  | { type: 'add_node'; kind: 'text' | 'image' | 'video' | 'trim' | 'concat' | 'audio' | 'config' | 'grid'; text?: string; size?: string; count?: number; duration?: number; start?: number; x?: number; y?: number }
   | { type: 'set_text'; nodeId: string; text: string }
   | { type: 'set_config'; nodeId: string; size?: string; count?: number }
   | { type: 'connect'; from: string; to: string; port?: string }
@@ -105,7 +105,7 @@ export function writeDocument(store: StudioStore, projectId: string, doc: Canvas
 }
 
 /** Build one node with the canvas's real shape. */
-export function makeNode(kind: 'text' | 'image' | 'video' | 'trim' | 'concat' | 'config' | 'grid', options: {
+export function makeNode(kind: 'text' | 'image' | 'video' | 'trim' | 'concat' | 'audio' | 'config' | 'grid', options: {
   text?: string
   size?: string
   count?: number
@@ -141,7 +141,10 @@ export function makeNode(kind: 'text' | 'image' | 'video' | 'trim' | 'concat' | 
             ? { kind, url: options.url ?? '', start: options.start ?? 0, duration: options.duration ?? 3, status: 'idle' }
             : kind === 'concat'
               ? { kind, url: options.url ?? '', status: 'idle' }
-              : { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1 }
+              // 音频：给它文字就念；没有画幅、没有张数。
+              : kind === 'audio'
+                ? { kind, text: options.text ?? '', url: options.url ?? '', status: 'idle' }
+                : { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1 }
   if (options.shotId !== undefined) base.shotId = options.shotId
   if (options.takeId !== undefined) base.takeId = options.takeId
   if (options.takeNumber !== undefined) base.takeNumber = options.takeNumber
