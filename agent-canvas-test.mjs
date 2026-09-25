@@ -35,6 +35,27 @@ function check(label, condition, detail = '') {
 /** Invoke one agent tool. */
 const tool = (name, input = {}) => call('/api/agent/call', { method: 'POST', body: JSON.stringify({ name, input }) })
 
+/**
+ * Poll a submitted job to a terminal state.
+ *
+ * 生成是作业：提交返回 jobId，结果用 job_status 收。图片冷启动要 70–90 秒
+ * （第一次出图要装载权重），所以等待上限给足；已经在终态的直接返回。
+ * @param submitted - the result of `canvas_generate` (or already a job status).
+ * @param seconds - how long to keep asking.
+ * @returns the last status seen.
+ */
+const settle = async (submitted, seconds = 240) => {
+  let status = submitted
+  const jobId = submitted?.jobId
+  if (typeof jobId !== 'string' || jobId === '') return status
+  const deadline = Date.now() + seconds * 1000
+  while ((status?.status === 'queued' || status?.status === 'running') && Date.now() < deadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 500) })
+    status = (await tool('job_status', { jobId })).payload.result
+  }
+  return status
+}
+
 const run = async () => {
   log('① 登录并建立会话')
   const raw = await fetch(`${BASE}/api/login`, {
@@ -73,12 +94,15 @@ const run = async () => {
   // 8 个：画布读写 5 个（state / add_node / set_text / connect / generate）、
   // 人类指定的 Agent 上下文 1 个、镜头历史 2 个。断言确切数字是为了让
   // 「工具悄悄多一个或少一个」必须被人看见，而不是被 includes 蒙过去。
-  check('工具清单可读', catalogue.ok && names.length === 8, `${names.length} 个：${names.join(', ')}`)
+  // 10 个 = 8 个画布/版本工具 + job_status / job_cancel（生成改成作业之后补的）。
+  check('工具清单可读', catalogue.ok && names.length === 10, `${names.length} 个：${names.join(', ')}`)
   check('工具面带「人类指的上下文」这一个', names.includes('canvas_context'),
+    `当前工具：${names.join(', ')}`)
+  check('工具面带查作业与取消作业', names.includes('job_status') && names.includes('job_cancel'),
     `当前工具：${names.join(', ')}`)
   check('每个工具都带 JSON Schema', (catalogue.payload.tools ?? []).every((t) => t.inputSchema?.type === 'object'))
   const kinds = catalogue.payload.tools?.find((t) => t.name === 'canvas_add_node')?.inputSchema?.properties?.kind?.enum ?? []
-  check('节点类型只有 文本 / 图片', kinds.length === 2 && kinds.includes('text') && kinds.includes('image'), kinds.join(','))
+  check('节点类型是 文本 / 图片 / 视频', kinds.length === 3 && ['text', 'image', 'video'].every((k) => kinds.includes(k)), kinds.join(','))
 
   log('④ 建一个干净的项目')
   const project = await call('/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Agent 双入口验收' }) })
@@ -101,17 +125,26 @@ const run = async () => {
   const edge = await tool('canvas_connect', { projectId, from: textId, to: imageId })
   check('连线已建立', edge.payload.result?.ok === true, String(edge.payload.result?.edgeId))
 
-  log('⑥ 出图（唯一耗算力的一步，约 6 秒）')
-  const first = await tool('canvas_generate', { projectId, nodeId: imageId })
-  const shotId = first.payload.result?.shotId
-  check('生成成功', first.ok && first.payload.result?.produced === 1, JSON.stringify(first.payload).slice(0, 160))
-  check('自动建立了版本历史', typeof shotId === 'string' && shotId.length > 0, String(shotId))
-  check('提示词从上游文本节点解析出来', first.payload.result?.prompt === prompt)
-  check('产出了 take', typeof first.payload.result?.images?.[0]?.takeId === 'string')
+  log('⑥ 生成：提交立刻返回，结果用 job_status 收（冷启动出图要 70–90 秒）')
+  // waitMs 默认图片 20 秒、视频 0。**20 秒不够冷启动**（第一次出图要装载权重），
+  // 所以用例必须照真实用法来：先提交拿 jobId，再轮询到终态。
+  // 这不是测试的将就——工具的描述里就是这么要求调用方的。
+  const firstSubmitted = await tool('canvas_generate', { projectId, nodeId: imageId })
+  check('立刻返回了 jobId（没把 HTTP 请求挂在渲染上）',
+    firstSubmitted.ok && typeof firstSubmitted.payload.result?.jobId === 'string',
+    JSON.stringify(firstSubmitted.payload).slice(0, 160))
+  check('提示词从上游文本节点解析出来', firstSubmitted.payload.result?.prompt === prompt)
 
-  const second = await tool('canvas_generate', { projectId, nodeId: imageId, prompt: `${prompt}（第二版：更暗）` })
-  check('第二次生成成功，累计两张', second.payload.result?.takesSoFar === 2, `takesSoFar=${String(second.payload.result?.takesSoFar)}`)
-  check('两次用的是同一个节点的历史', second.payload.result?.shotId === shotId)
+  const first = await settle(firstSubmitted.payload.result)
+  const shotId = first?.shotId
+  check('出图成功', first?.status === 'succeeded' && (first?.files ?? []).length === 1, JSON.stringify(first).slice(0, 160))
+  check('自动建立了版本历史', typeof shotId === 'string' && shotId.length > 0, String(shotId))
+  check('产出了 take', typeof first?.files?.[0]?.takeId === 'string')
+
+  const secondSubmitted = await tool('canvas_generate', { projectId, nodeId: imageId, prompt: `${prompt}（第二版：更暗）` })
+  const second = await settle(secondSubmitted.payload.result)
+  check('第二次生成成功，累计两张', second?.takesSoFar === 2, `takesSoFar=${String(second?.takesSoFar)}`)
+  check('两次用的是同一个节点的历史', second?.shotId === shotId)
 
   log('⑦ 版本与选用')
   const takes = await tool('shot_takes', { projectId, nodeId: imageId })
@@ -139,7 +172,7 @@ const run = async () => {
 
   log('⑨ 错误必须是可读的答案，不是 500')
   const badNode = await tool('canvas_generate', { projectId, nodeId: textId })
-  check('对文本节点出图 → 400 且说明原因', badNode.status === 400 && /只有图片节点能出图/u.test(badNode.payload.error ?? ''), String(badNode.payload.error))
+  check('对文本节点生成 → 400 且说明原因', badNode.status === 400 && /只有图片或视频节点能生成/u.test(badNode.payload.error ?? ''), String(badNode.payload.error))
 
   const noPrompt = await tool('canvas_add_node', { projectId, kind: 'image' })
   const emptyGen = await tool('canvas_generate', { projectId, nodeId: noPrompt.payload.result.nodeId })
@@ -151,8 +184,47 @@ const run = async () => {
   const badProject = await tool('canvas_state', { projectId: 'not-a-project' })
   check('不存在的项目 → 400', badProject.status === 400 && /项目不存在/u.test(badProject.payload.error ?? ''))
 
-  const badKind = await tool('canvas_add_node', { projectId, kind: 'video' })
-  check('非法节点类型 → 400', badKind.status === 400 && /kind 必须是/u.test(badKind.payload.error ?? ''))
+  const badKind = await tool('canvas_add_node', { projectId, kind: 'audio' })
+  check('非法节点类型 → 400', badKind.status === 400 && /kind 必须是/u.test(badKind.payload.error ?? ''), String(badKind.payload.error))
+
+  log('⑩ 生成是作业：不等到出完也能接着查（Agent 出视频靠这条）')
+  // waitMs=0：立刻返回 jobId。从前这条路会把 HTTP 请求挂到渲染结束 ——
+  // 图片 6 秒还行，让 Agent 出一段视频就必超时，而且「调用方失败」与「活干完了」
+  // 会同时为真。现在提交与结果是两件事。
+  const submitted = await tool('canvas_generate', { projectId, nodeId: imageId, prompt: `${prompt}（异步这一版）`, waitMs: 0 })
+  const jobId = submitted.payload.result?.jobId
+  check('立即返回了 jobId', typeof jobId === 'string' && jobId.length > 0, String(jobId))
+  check('没有假装出完（不带 produced）', submitted.payload.result?.produced === undefined,
+    JSON.stringify(submitted.payload.result).slice(0, 140))
+  check('返回里明说还没出结果', /job_status/u.test(submitted.payload.result?.note ?? ''), String(submitted.payload.result?.note).slice(0, 80))
+
+  const status = await settle(submitted.payload.result)
+  check('轮询到了 succeeded', status?.status === 'succeeded', JSON.stringify(status).slice(0, 160))
+  check('结果里有素材地址', (status?.files ?? []).length === 1 && String(status.files[0].url).startsWith('/api/assets/'),
+    JSON.stringify(status?.files ?? []).slice(0, 120))
+  check('版本数跟着涨到 3', status?.takesSoFar === 3, `takesSoFar=${String(status?.takesSoFar)}`)
+
+  // 这条是关键：Agent 一次都没写画布，画面仍然出现在节点上 —— 因为写画布是**服务端**
+  // 在作业里做的（也就是「没有浏览器开着也算数」的同一件事）。
+  const afterAsync = await tool('canvas_state', { projectId })
+  const asyncNode = (afterAsync.payload.result?.nodes ?? []).find((n) => n.id === imageId)
+  check('服务端把新画面写进了画布', asyncNode?.url === status?.files?.[0]?.url, String(asyncNode?.url))
+
+  const cancelDone = await tool('job_cancel', { jobId })
+  check('取消一个已结束的作业 → 如实拒绝', cancelDone.payload.result?.ok === false && /已经结束/u.test(cancelDone.payload.result?.reason ?? ''),
+    JSON.stringify(cancelDone.payload.result))
+  const noJob = await tool('job_status', { jobId: 'job-nope' })
+  check('查不存在的作业 → 400 且说明作业不落盘', noJob.status === 400 && /没有这个作业/u.test(noJob.payload.error ?? ''), String(noJob.payload.error))
+
+  log('⑪ Agent 也能建视频节点（从前服务端连这个 kind 都没有）')
+  const videoNode = await tool('canvas_add_node', { projectId, kind: 'video', text: '雨夜霓虹街头，纸灯笼在雨中轻晃', duration: 3 })
+  const videoId = videoNode.payload.result?.nodeId
+  check('视频节点已建', typeof videoId === 'string' && videoId.startsWith('video-'), String(videoId))
+  const withVideo = await call(`/api/projects/${projectId}/canvas`)
+  const videoData = (withVideo.payload.doc?.nodes ?? []).find((n) => n.id === videoId)?.data
+  check('默认值和人建的视频节点一致（1344x768、片长按传入的 3 秒）',
+    videoData?.size === '1344x768' && videoData?.duration === 3,
+    JSON.stringify({ size: videoData?.size, duration: videoData?.duration }))
 
   log(failures === 0 ? '\n全部通过：Agent 在无人值守下完成了与人点击等价的创作流程' : `\n有 ${failures} 项未通过`)
   process.exit(failures === 0 ? 0 : 1)

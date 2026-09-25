@@ -74,12 +74,6 @@ const gateway = createGateway({
 const builtInWorkflowDir = join(import.meta.dirname, 'comfyui')
 const workflowList = (): StudioWorkflow[] => loadWorkflows(config.dataDir, builtInWorkflowDir)
 
-const agent = createAgentFace({
-  store,
-  gateway,
-  onDocumentChanged: (projectId, reason) => { bridge.broadcastDocument(projectId, reason) },
-  log: (message) => { console.log(`[studio] ${message}`) },
-})
 const workflowRegistry = createStudioRegistry({
   renderImage: async (request) => {
     const images = await gateway.renderImage({
@@ -165,6 +159,25 @@ const jobs = createJobRegistry({
   },
 })
 
+/**
+ * Agent 的生成走**同一个作业注册表**。
+ *
+ * 从前它直接 `await gateway.renderImage`：图片 6 秒还行，让 Agent 出一段视频就会
+ * 撞上和画布点击同一个超时，而「调用方失败」和「活干完了」会同时为真。
+ * 现在它只负责「提交 + 有上限地等」，干活、写回文档、记 take 全在这一个注册表里 ——
+ * 所以 Agent 不必也不该自己握着网关（`AgentDeps` 里已经没有它了）。
+ *
+ * 装配顺序也因此变了：作业注册表要先于 Agent 建好。
+ */
+const agent = createAgentFace({
+  store,
+  submitRender: (request) => jobs.submit(request),
+  findJob: (id) => jobs.get(id),
+  cancelJob: async (id) => jobs.cancel(id),
+  workflows: workflowList,
+  onDocumentChanged: (projectId, reason) => { bridge.broadcastDocument(projectId, reason) },
+  log: (message) => { console.log(`[studio] ${message}`) },
+})
 /** Largest upload accepted; the canvas only needs stills and short clips so far. */
 const UPLOAD_LIMIT_BYTES = 64 * 1024 * 1024
 

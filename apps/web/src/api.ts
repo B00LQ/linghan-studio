@@ -127,6 +127,13 @@ export interface GenerationStats {
      * wrong for both: a 5 秒视频 takes minutes and a picture takes seconds.
      */
     byKind: Record<string, { samples: number; medianMs: number; p90Ms: number }>
+    /**
+     * 再按 `kind/workflow` 分一层，键如 `video/minimax-h3-video-fast`。
+     *
+     * 同一个视频节点换一套工作流，耗时能差近一倍（8 步 vs 4 步），只按类型分档会
+     * 让两边的样本混在一起、对两边都偏。样本不够时按 `byKind` 退，而不是拿别档冒充。
+     */
+    byWorkflow: Record<string, { samples: number; medianMs: number; p90Ms: number }>
   }
 }
 

@@ -154,6 +154,14 @@ export interface GenerationStats {
    * median covering both is wrong for both.
    */
   byKind: Record<string, { samples: number; medianMs: number; p90Ms: number }>
+  /**
+   * The same numbers per `kind/workflow`, keyed e.g. `video/minimax-h3-video-fast`.
+   *
+   * 为什么还要再分一层：同是视频，8 步和工作流 4 步的耗时差着近一倍。只按类型分档时
+   * 它们的样本会算进同一个中位数，于是**两边都偏**——这正是「拿图片的中位数去预计
+   * 视频」那个错误的小号版本。样本不够时**不要**退回这一档，退回的是 `byKind`。
+   */
+  byWorkflow: Record<string, { samples: number; medianMs: number; p90Ms: number }>
 }
 
 /** Domain surface used by the HTTP layer. */
@@ -729,7 +737,10 @@ export function openStore(dataDir: string): StudioStore {
       // 素材类型来自 asset 表（join），不新加列：视频 take 的资产本来就是 video，
       // 这个事实数据库里已经有了。
       const rows = db.prepare(
-        `SELECT t.latency_ms AS latency_ms, a.kind AS asset_kind
+        // `workflow` 从 params_json 里取（key 用 kind/workflow）。用 json_valid 兜一层：
+        // 一行坏 JSON 不该让整个统计端点挂掉——那个端点还担着画布上的进度显示。
+        `SELECT t.latency_ms AS latency_ms, a.kind AS asset_kind,
+                CASE WHEN json_valid(t.params_json) THEN json_extract(t.params_json, '$.workflow') END AS workflow_id
          FROM take t LEFT JOIN asset a ON a.id = t.asset_id
          WHERE t.status = 'succeeded' AND t.latency_ms IS NOT NULL AND t.latency_ms > 0
          ORDER BY t.created_at DESC LIMIT ?`,
@@ -740,7 +751,14 @@ export function openStore(dataDir: string): StudioStore {
         if (durations.length === 0) return { samples: 0, medianMs: 0, p90Ms: 0, recentMs: [] }
         const sorted = [...durations].sort((a, b) => a - b)
         const at = (fraction: number): number => sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))] ?? 0
-        return { samples: durations.length, medianMs: at(0.5), p90Ms: at(0.9), recentMs: durations.slice(0, 5) }
+        // 偶数个样本时中位数是**中间两个的平均**。从前这里直接用 `at(0.5)`，
+        // 取到的是上中位（样本 2 个时等于最大值）——那是分位数估计，不是中位数，
+        // 在样本很少的视频档上会稳定偏悲观。
+        const middle = sorted.length / 2
+        const medianMs = sorted.length % 2 === 0 && sorted.length > 1
+          ? Math.round(((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2)
+          : at(0.5)
+        return { samples: durations.length, medianMs, p90Ms: at(0.9), recentMs: durations.slice(0, 5) }
       }
 
       // 按类型分开统计，因为**混在一起的答案是错的**：视频一条十几分钟、图片几秒，
@@ -753,7 +771,24 @@ export function openStore(dataDir: string): StudioStore {
         if (shaped.samples > 0) byKind[kind] = { samples: shaped.samples, medianMs: shaped.medianMs, p90Ms: shaped.p90Ms }
       }
 
-      return { ...shape(durationsOf(rows)), byKind }
+      // 再按「类型 + 工作流」分一层：同一个视频节点换一套工作流，耗时能差近一倍。
+      const groups = new Map<string, Row[]>()
+      for (const row of rows) {
+        const kind = text(row, 'asset_kind')
+        const workflowId = text(row, 'workflow_id')
+        // 没记工作流的（旧 take、或「服务端自己挑的默认那套」）只进 byKind 那一档。
+        if (kind === '' || workflowId === '') continue
+        const bucket = groups.get(`${kind}/${workflowId}`)
+        if (bucket === undefined) groups.set(`${kind}/${workflowId}`, [row])
+        else bucket.push(row)
+      }
+      const byWorkflow: Record<string, { samples: number; medianMs: number; p90Ms: number }> = {}
+      for (const [key, subset] of groups) {
+        const shaped = shape(durationsOf(subset))
+        if (shaped.samples > 0) byWorkflow[key] = { samples: shaped.samples, medianMs: shaped.medianMs, p90Ms: shaped.p90Ms }
+      }
+
+      return { ...shape(durationsOf(rows)), byKind, byWorkflow }
     },
     listAssets(limit = 200) {
       return (db.prepare('SELECT id, kind, mime, bytes, rel_path, created_at FROM asset ORDER BY created_at DESC LIMIT ?').all(limit) as Row[])

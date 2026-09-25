@@ -9,9 +9,10 @@
  * Every tool returns plain JSON, and every failure comes back as a message an
  * Agent can act on rather than a stack trace.
  */
-import { applyGeneration, applyOps, makeNode, readDocument, resolvePrompt, writeDocument, type CanvasDocument, type CanvasOp } from './ops.ts'
-import type { StudioGateway } from './gateway.ts'
+import { applyOps, readDocument, resolvePrompt, writeDocument, type CanvasDocument, type CanvasOp } from './ops.ts'
+import type { JobRequest, StudioJob } from './jobs.ts'
 import type { StudioStore } from './store.ts'
+import type { StudioWorkflow, WorkflowCapability } from './workflow-library.ts'
 
 /** One tool the agent face exposes. */
 export interface AgentTool {
@@ -27,8 +28,20 @@ export interface AgentTool {
 export interface AgentDeps {
   /** Domain store holding the document, shots, and takes. */
   store: StudioStore
-  /** Gateway used to render images. */
-  gateway: StudioGateway
+  /**
+   * Submit a render job.
+   *
+   * **不是**「直接渲染」：这条函数就是画布点「生成」和 `POST /api/jobs` 用的那一条，
+   * 三处共用一份提交逻辑。Agent 因此不需要（也不该）自己握着网关 —— 从前它直接
+   * `await gateway.renderImage`，图片 6 秒还行，视频十几分钟就和画布点击撞上同一个超时。
+   */
+  submitRender: (request: JobRequest) => StudioJob
+  /** Read one job back, for the polling tool. */
+  findJob: (id: string) => StudioJob | undefined
+  /** Cancel one job. */
+  cancelJob: (id: string) => Promise<boolean>
+  /** Workflows this machine knows about, for kind-aware defaulting. */
+  workflows: () => StudioWorkflow[]
   /** Called after a tool changes a project's document. */
   onDocumentChanged: (projectId: string, reason: string) => void
   /** Diagnostics sink. */
@@ -48,15 +61,18 @@ export const AGENT_TOOLS: AgentTool[] = [
   },
   {
     name: 'canvas_add_node',
-    description: '在画布上添加节点。kind=text 是文本节点（写故事/设定），kind=image 是图片节点（自带提示词，可自己出图）。返回新节点 id。',
+    description:
+      '在画布上添加节点。kind=text 是文本节点（写故事/设定），kind=image 是图片节点（自带提示词，可自己出图），'
+      + 'kind=video 是视频节点（自带提示词，出片带声音；**一条可能十几分钟**）。返回新节点 id。',
     inputSchema: {
       type: 'object',
       properties: {
         projectId: { type: 'string' },
-        kind: { type: 'string', enum: ['text', 'image'] },
+        kind: { type: 'string', enum: ['text', 'image', 'video'] },
         text: { type: 'string', description: '文本内容或提示词' },
-        size: { type: 'string', description: '生成尺寸，如 1024x1024' },
-        count: { type: 'number', description: '一次生成几张' },
+        size: { type: 'string', description: '生成尺寸：图片如 1024x1024，视频只有 1344x768 / 768x448' },
+        count: { type: 'number', description: '一次生成几张（只对图片有意义）' },
+        duration: { type: 'number', description: '片长（秒），只对视频节点有意义，默认 5' },
         x: { type: 'number' },
         y: { type: 'number' },
       },
@@ -84,18 +100,45 @@ export const AGENT_TOOLS: AgentTool[] = [
   {
     name: 'canvas_generate',
     description:
-      '用某个节点的提示词出图。图片节点自己就是生成目标：出图后画面落在该节点上，并成为它的一个版本。' +
-      '这是唯一会耗时和消耗算力的工具，生成一张约 6 秒。',
+      '用某个节点的提示词生成画面。图片和视频节点都能出（视频一条可能十几分钟）。' +
+      '**它不等出完**：图片默认最多等 20 秒、视频立刻返回，返回里带 jobId。' +
+      '没出完就用 job_status 接着查——在 job_status 说 succeeded 之前，' +
+      '不要对用户说「已经生成好了」。',
     inputSchema: {
       type: 'object',
       properties: {
         projectId: { type: 'string' },
-        nodeId: { type: 'string', description: '图片节点 id' },
+        nodeId: { type: 'string', description: '图片或视频节点 id' },
         prompt: { type: 'string', description: '覆盖提示词；省略则用节点自身或它上游文本节点的内容' },
-        size: { type: 'string' },
-        count: { type: 'number' },
+        size: { type: 'string', description: 'WxH；省略则用节点上选的那档' },
+        count: { type: 'number', description: '出几张（只对图片有意义）' },
+        workflow: { type: 'string', description: '用哪套工作流；省略则用节点上选的那套' },
+        duration: { type: 'number', description: '片长（秒），只对视频工作流有意义' },
+        waitMs: { type: 'number', description: '最多等多久拿结果（毫秒，上限 50000；图片默认 20000、视频默认 0）' },
       },
       required: ['nodeId'],
+    },
+  },
+  {
+    name: 'job_status',
+    description:
+      '查一次生成作业的状态与进度。status 为 queued/running 时还没出结果，' +
+      'succeeded 时画布上的节点已经被服务端更新好了（不用再调用别的工具写画布）。',
+    inputSchema: {
+      type: 'object',
+      properties: { jobId: { type: 'string' } },
+      required: ['jobId'],
+    },
+  },
+  {
+    name: 'job_cancel',
+    description:
+      '中止一个还在跑的生成作业（比如方向错了的视频）。取消是尽力而为：' +
+      '如果那一刻它刚好渲染完，结果会作为新版本留下，note 里会说清楚。',
+    inputSchema: {
+      type: 'object',
+      properties: { jobId: { type: 'string' } },
+      required: ['jobId'],
     },
   },
   {
@@ -132,6 +175,51 @@ export const AGENT_TOOLS: AgentTool[] = [
 /** Coerce a value to a string. */
 function text(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+/**
+ * Which workflow a generated node should run.
+ *
+ * 和画布上 `workflowFor` 同一条规矩：**先看节点自己选的那套，再退到同类里第一套**。
+ * 关键是「同类」——空 id 交给服务端会解析成「第一套工作流」，那是出图的那套，
+ * 放在视频节点上会出一张放不出来的 PNG（画布上正是这么错过一次）。
+ * @param workflows - every workflow this machine knows about.
+ * @param capability - what the node produces.
+ * @param wanted - the id the node (or the caller) picked; may be empty.
+ * @returns a workflow id, or empty when this machine has none of that kind.
+ */
+export function resolveWorkflowId(workflows: StudioWorkflow[], capability: WorkflowCapability, wanted: string): string {
+  const ofKind = workflows.filter((workflow) => workflow.capability === capability)
+  if (wanted !== '' && ofKind.some((workflow) => workflow.id === wanted)) return wanted
+  return ofKind[0]?.id ?? ''
+}
+
+/** Waiting is bounded on purpose: see the note in `canvas_generate`. */
+const MAX_WAIT_MS = 50_000
+
+/** Clamp a caller-supplied wait into `[0, MAX_WAIT_MS]`. */
+function clampWait(ms: number): number {
+  if (!Number.isFinite(ms)) return 0
+  return Math.max(0, Math.min(MAX_WAIT_MS, Math.round(ms)))
+}
+
+/**
+ * Wait for a job to leave `queued`/`running`, up to `waitMs`.
+ * @param find - registry lookup.
+ * @param id - job id.
+ * @param waitMs - how long to wait; 0 checks once and returns.
+ * @returns the settled job, or undefined when it is still running (or unknown).
+ */
+async function waitForJob(find: (id: string) => StudioJob | undefined, id: string, waitMs: number): Promise<StudioJob | undefined> {
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    const job = find(id)
+    if (job === undefined) return undefined
+    if (job.status !== 'queued' && job.status !== 'running') return job
+    if (Date.now() >= deadline) return undefined
+    // 250 ms 一跳：6 秒的图片最多多等 0.25 秒，而十几分钟的视频本来就不等。
+    await new Promise((resolve) => { setTimeout(resolve, 250) })
+  }
 }
 
 /**
@@ -205,7 +293,7 @@ export function createAgentFace(deps: AgentDeps): {
     if (name === 'canvas_add_node') {
       const projectId = project(input)
       const kind = text(input.kind)
-      if (kind !== 'text' && kind !== 'image') throw new Error(`kind 必须是 text / image，收到：${kind}`)
+      if (kind !== 'text' && kind !== 'image' && kind !== 'video') throw new Error(`kind 必须是 text / image / video，收到：${kind}`)
       let created = ''
       mutate(projectId, 'add_node', (doc) => {
         const op: CanvasOp = {
@@ -214,6 +302,7 @@ export function createAgentFace(deps: AgentDeps): {
           ...(input.text === undefined ? {} : { text: text(input.text) }),
           ...(input.size === undefined ? {} : { size: text(input.size) }),
           ...(typeof input.count === 'number' ? { count: input.count } : {}),
+          ...(typeof input.duration === 'number' ? { duration: input.duration } : {}),
           ...(typeof input.x === 'number' ? { x: input.x } : {}),
           ...(typeof input.y === 'number' ? { y: input.y } : {}),
         }
@@ -249,70 +338,113 @@ export function createAgentFace(deps: AgentDeps): {
       const node = doc.nodes.find((item) => item.id === nodeId)
       if (node === undefined) throw new Error(`节点不存在：${nodeId}`)
       const kind = String(node.data.kind)
-      // 图片节点自己就是生成目标；`config` 是旧文档里的镜头节点，仍然支持，
-      // 但它的产物要新开画面节点（它自己不是一张图）。
-      if (kind !== 'image' && kind !== 'config') {
-        throw new Error(`只有图片节点能出图，${nodeId} 是 ${kind}`)
+      // 只有「自己就是一张画面」的节点能生成。旧文档里的 `config`（镜头）节点曾经
+      // 走一条单独的路（产物新开图片节点），但本机含回收站一个都没有 —— 与其长期
+      // 维护两条生成路径（两套行为要一直对齐），不如只留一条，让它也走作业。
+      if (kind !== 'image' && kind !== 'video') {
+        throw new Error(`只有图片或视频节点能生成，${nodeId} 是 ${kind}`)
       }
 
       const prompt = text(input.prompt).trim() || resolvePrompt(doc, node)
       if (prompt === '') throw new Error('提示词为空：给这个节点写提示词，或连一个文本节点到它')
 
-      // The history is created lazily and remembered on the node, exactly as the
-      // canvas does it — an Agent-driven generation must be indistinguishable
-      // from a human-driven one.
-      let shotId = typeof node.data.shotId === 'string' ? node.data.shotId : ''
-      if (shotId === '' || deps.store.getShot(shotId) === undefined) {
-        shotId = deps.store.addShot(projectId, prompt.slice(0, 40), prompt).id
-      }
+      // 工作流按**节点类型**挑。空 id 直接交给服务端会拿到「第一套」——那是出图的
+      // 那套，放在视频节点上就会出一张放不出来的 PNG（画布上正是这么错过一次）。
+      const wanted = text(input.workflow).trim() || (typeof node.data.workflow === 'string' ? node.data.workflow : '')
+      const capability: WorkflowCapability = kind === 'video' ? 'video' : 'image'
+      const workflowId = resolveWorkflowId(deps.workflows(), capability, wanted)
+      const size = text(input.size).trim() || (typeof node.data.size === 'string' ? node.data.size : '')
+      const count = typeof input.count === 'number' ? input.count : (typeof node.data.count === 'number' ? node.data.count : undefined)
+      const duration = typeof input.duration === 'number'
+        ? input.duration
+        : (kind === 'video' && typeof node.data.duration === 'number' ? node.data.duration : undefined)
 
-      const history = deps.store.listTakes(shotId)
-      const size = text(input.size).trim() || (typeof node.data.size === 'string' ? node.data.size : '1024x1024')
-      const count = typeof input.count === 'number' ? input.count : (typeof node.data.count === 'number' ? node.data.count : 1)
-
-      deps.log(`agent: 生成 ${prompt.slice(0, 30)}… (history ${shotId.slice(0, 8)}, ${String(count)} 张)`)
-      const images = await deps.gateway.renderImage({ prompt, size, count, shotId })
-
-      mutate(projectId, 'generate', (target) => {
-        // 落点逻辑与作业运行器共用（见 ops.applyGeneration）：
-        // 「生成好了之后画布上应该发生什么」只能有一个答案。
-        const anchor = target.nodes.find((item) => item.id === nodeId)
-        if (anchor === undefined) return
-        if (kind === 'image') {
-          applyGeneration(target, {
-            nodeId,
-            shotId,
-            prompt,
-            historyLength: history.length,
-            files: images.map((image) => ({ url: image.url, ...(image.takeId === undefined ? {} : { takeId: image.takeId }) })),
-          })
-          return
-        }
-        anchor.data.shotId = shotId
-        anchor.data.status = 'idle'
-        if (anchor.data.text === '') anchor.data.text = prompt
-        const originX = anchor.position.x + 460
-        const originY = anchor.position.y
-        images.forEach((image, index) => {
-          target.nodes.push(makeNode('image', {
-            text: prompt,
-            url: image.url,
-            x: originX,
-            y: originY + index * 300,
-            ...(image.takeId === undefined ? {} : { takeId: image.takeId }),
-            takeNumber: history.length + index + 1,
-          }))
-        })
+      deps.log(`agent: 提交生成 ${prompt.slice(0, 30)}…（${kind}${workflowId === '' ? '' : `，${workflowId}`}）`)
+      // **复用节点上已有的镜头。** 不传的话作业运行器每次都会新建一个，于是同一个
+      // 节点的第二张图会落到另一条版本线上——旧实现是在这里读 `node.data.shotId` 的，
+      // 改走作业时我漏了这一步，是旧用例（「两次用的是同一个节点的历史」）把它抓出来的。
+      const existingShot = typeof node.data.shotId === 'string' ? node.data.shotId : ''
+      const reuse = existingShot !== '' && deps.store.getShot(existingShot) !== undefined
+      // **走作业，不再同步等。** 镜头与版本由运行器去建、结果由运行器写回画布文档，
+      // 与画布点击完全同一条路 —— 「生成好了之后画布上应该发生什么」只有一个答案。
+      const job = deps.submitRender({
+        projectId,
+        nodeId,
+        prompt,
+        ...(reuse ? { shotId: existingShot } : {}),
+        ...(size === '' ? {} : { size }),
+        ...(count === undefined ? {} : { count }),
+        ...(workflowId === '' ? {} : { workflowId }),
+        ...(duration === undefined ? {} : { duration }),
       })
 
+      // 有上限地等：图片默认 20 秒（够出完，调用方不用在两步之间折腾自己），
+      // 视频默认 0（十几分钟的活儿，等 20 秒纯粹是白等）。上限 50 秒是因为
+      // nginx 默认 60 秒就 504 —— 等得比它久，等于没等。
+      const waitMs = clampWait(typeof input.waitMs === 'number' ? input.waitMs : (kind === 'video' ? 0 : 20_000))
+      const settled = await waitForJob(deps.findJob, job.id, waitMs)
+
+      if (settled === undefined) {
+        return {
+          projectId,
+          nodeId,
+          jobId: job.id,
+          status: job.status,
+          kind,
+          prompt,
+          note: `还没出结果（${kind === 'video' ? '视频一条要十几分钟' : '这次比平时久'}）：用 job_status 查 jobId=${job.id}。`
+            + '画布上的节点会在出完之后自己更新，所以**不要**说「已经生成好了」。',
+        }
+      }
+      if (settled.status === 'failed') throw new Error(`生成失败：${settled.error ?? '未知原因'}`)
+
+      const files = settled.files ?? []
       return {
         projectId,
-        shotId,
-        prompt,
-        produced: images.length,
         nodeId,
-        images: images.map((image) => ({ url: image.url, takeId: image.takeId })),
-        takesSoFar: deps.store.listTakes(shotId).length,
+        jobId: settled.id,
+        status: settled.status,
+        kind,
+        prompt,
+        ...(settled.shotId === undefined ? {} : { shotId: settled.shotId }),
+        produced: files.length,
+        files: files.map((file) => ({ url: file.url, ...(file.takeId === undefined ? {} : { takeId: file.takeId }) })),
+        takesSoFar: settled.takes ?? 0,
+      }
+    }
+
+    if (name === 'job_status') {
+      const jobId = text(input.jobId).trim()
+      const job = deps.findJob(jobId)
+      // 作业只活在服务进程里：重启会丢掉未完成的那些（已完成的 take 与素材都在库里）。
+      if (job === undefined) throw new Error(`没有这个作业：${jobId}（作业不落盘，服务重启会丢）`)
+      const running = job.status === 'queued' || job.status === 'running'
+      return {
+        jobId: job.id,
+        projectId: job.request.projectId,
+        nodeId: job.request.nodeId,
+        status: job.status,
+        progress: job.progress ?? null,
+        ...(job.error === undefined ? {} : { error: job.error }),
+        ...(job.note === undefined ? {} : { note: job.note }),
+        ...(job.shotId === undefined ? {} : { shotId: job.shotId }),
+        files: (job.files ?? []).map((file) => ({ url: file.url, ...(file.takeId === undefined ? {} : { takeId: file.takeId }) })),
+        takesSoFar: job.takes ?? 0,
+        hint: running
+          ? '还在跑：过一会儿再查一次，别对用户说已经生成好了'
+          : '已结束，画布上的节点已经由服务端更新过（不需要再调用工具写画布）',
+      }    }
+
+    if (name === 'job_cancel') {
+      const jobId = text(input.jobId).trim()
+      const accepted = await deps.cancelJob(jobId)
+      const job = deps.findJob(jobId)
+      return {
+        jobId,
+        ok: accepted,
+        status: job?.status ?? 'unknown',
+        ...(job?.note === undefined ? {} : { note: job.note }),
+        ...(accepted ? {} : { reason: job === undefined ? '没有这个作业（作业不落盘，服务重启会丢）' : '它已经结束了，取消不了' }),
       }
     }
 

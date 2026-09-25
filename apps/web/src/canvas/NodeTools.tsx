@@ -47,12 +47,23 @@ export function NodeTools({ takeCount, onQuickEdit, onCrop, onCompare }: NodeToo
 
   // A bar above the card is invisible when the card is at the top of the
   // viewport, and 「点了节点但没出现菜单」 reads as a broken button. Measure the
-  // card once when the bar appears and flip under it if there is no room.
+  // card and flip under it if there is no room.
+  //
+  // **平移/缩放之后要重新量。** 从前只在挂载时量一次，于是「打开着工具条把卡片拖到
+  // 顶部」会把它裁掉，只能关掉再点一下。xyflow 把 pan/zoom 写成
+  // `.react-flow__viewport` 的 transform，所以盯它的 style 就够了 —— 不用为了这一条
+  // 把视口状态穿过整个 context。观察者是按帧合并的，且值没变时 React 不会重渲染。
   useLayoutEffect(() => {
     const host = barRef.current?.closest('.studio-node')
     if (host === null || host === undefined) return
     // 52px covers the bar's own height plus the gap.
-    setBelow(host.getBoundingClientRect().top < 52)
+    const measure = (): void => { setBelow(host.getBoundingClientRect().top < 52) }
+    measure()
+    const viewport = host.closest('.react-flow__viewport')
+    if (viewport === null) return
+    const observer = new MutationObserver(measure)
+    observer.observe(viewport, { attributes: true, attributeFilter: ['style'] })
+    return () => { observer.disconnect() }
   }, [])
 
   const rotate: MenuAction[] = [

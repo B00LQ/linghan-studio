@@ -613,7 +613,9 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     medianMs: number
     /** 按产物类型分开的历史耗时；视频和图片不能共用一个中位数。 */
     byKind: Record<string, { samples: number; medianMs: number; p90Ms: number }>
-  }>({ medianMs: 0, byKind: {} })
+    /** 再按 `kind/workflow` 分开；同类的不同工作流耗时差近一倍，混在一起两边都偏。 */
+    byWorkflow: Record<string, { samples: number; medianMs: number; p90Ms: number }>
+  }>({ medianMs: 0, byKind: {}, byWorkflow: {} })
   /**
    * 重取历史耗时。挂载时一次、每跑完一条活儿再一次 —— 失败只是「暂时没有估计」，
    * 下一次还有机会，不会把这一页钉死在初始状态。
@@ -621,7 +623,11 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   const refreshStats = useCallback(() => {
     void fetchGenerationStats()
       .then((result) => {
-        setStats({ medianMs: result.estimate.medianMs, byKind: result.estimate.byKind ?? {} })
+        setStats({
+          medianMs: result.estimate.medianMs,
+          byKind: result.estimate.byKind ?? {},
+          byWorkflow: result.estimate.byWorkflow ?? {},
+        })
       })
       .catch(() => { /* 没有估计也是一种正常状态：标签少说一句话而已 */ })
   }, [])
@@ -1649,15 +1655,18 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       const report = progress[nodeId] ?? null
       const node = nodes.find((item) => item.id === nodeId)
       /**
-       * 预计时间按**这个节点产出什么**来取，而且**只用同类的历史**。
+       * 预计时间按**这个节点产出什么、用哪套工作流**来取，而且只用同类同工作流的历史。
        *
-       * 从前这里会退回全局中位数（几乎全是图片的），于是一条 10 分钟的视频
-       * 显示「预计 十几秒」，然后在接下来的十分钟里一直停在超时状态。
-       * 没有同类样本时宁可**不说**——步数与进度条已经在如实报进展了。
+       * 两个层次都不能省：从前这里会退回全局中位数（几乎全是图片的），于是一条 10 分钟
+       * 的视频显示「预计 十几秒」，然后在接下来的十分钟里一直停在超时状态；只按类型分
+       * 也还不够——同是视频，8 步和 4 步差着近一倍，混在一个中位数里两边都偏。
+       * 没有样本时宁可**不说**——步数与进度条已经在如实报进展了。
        */
       const kind = String(node?.data.kind ?? '')
       const known = kind === 'video' || kind === 'image'
-      const estimateMs = (known ? stats.byKind[kind]?.medianMs : stats.medianMs) ?? (known ? 0 : stats.medianMs)
+      // 先精确到「这一类 + 这一套工作流」，没有才退到「这一类」，再没有就不说。
+      const exact = known && node !== undefined ? stats.byWorkflow[`${kind}/${workflowFor(node.data)}`] : undefined
+      const estimateMs = exact?.medianMs ?? (known ? (stats.byKind[kind]?.medianMs ?? 0) : stats.medianMs)
       // 开始时间按节点记：两件活同时跑时，一个全局时间戳会让两边的倒计时都错。
       const startedAt = runStartedAt.current.get(nodeId) ?? 0
       const view = describeProgress({
@@ -1898,6 +1907,16 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
             }}
             onNodeDoubleClick={(_event, node) => { selectOnly(node.id); focusNodes([node.id]) }}
             onNodeClick={(_event, node) => { selectOnly(node.id) }}
+            // 框住**恰好一个**节点时，等同于「点它一下」：打开它的提示词窗口。
+            // 从前框住一个什么都不会发生——多选工具条只在 2 个以上出现，于是「框住一个」
+            // 看起来像没选中（而人接着要做的就是给它写提示词）。
+            // 用 onSelectionEnd 而不是 onSelectionChange：后者在 mousedown 阶段就会发一次
+            // 仍含旧节点的选择（见下面的说明），采纳它会把刚关掉的窗口又打开。
+            // 框住多个不动 selection：那是「操作这一批」，归多选工具条管。
+            onSelectionEnd={() => {
+              const picked = (flowRef.current?.getNodes() ?? []).filter((node) => node.selected === true)
+              if (picked.length === 1 && picked[0] !== undefined) selectOnly(picked[0].id)
+            }}
             // 刻意**不**监听 onSelectionChange：xyflow 在处理 mousedown 时会先发一次
             // 仍含旧节点的选中事件，而「点空白关窗口」的捕获监听已经先跑过，
             // 采纳那个事件会把刚关掉的窗口又打开。窗口只认显式动作：

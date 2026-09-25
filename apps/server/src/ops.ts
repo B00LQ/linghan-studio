@@ -49,7 +49,7 @@ export interface CanvasDocument {
 
 /** One operation to apply. */
 export type CanvasOp =
-  | { type: 'add_node'; kind: 'text' | 'image' | 'config' | 'grid'; text?: string; size?: string; count?: number; x?: number; y?: number }
+  | { type: 'add_node'; kind: 'text' | 'image' | 'video' | 'config' | 'grid'; text?: string; size?: string; count?: number; duration?: number; x?: number; y?: number }
   | { type: 'set_text'; nodeId: string; text: string }
   | { type: 'set_config'; nodeId: string; size?: string; count?: number }
   | { type: 'connect'; from: string; to: string }
@@ -105,10 +105,12 @@ export function writeDocument(store: StudioStore, projectId: string, doc: Canvas
 }
 
 /** Build one node with the canvas's real shape. */
-export function makeNode(kind: 'text' | 'image' | 'config' | 'grid', options: {
+export function makeNode(kind: 'text' | 'image' | 'video' | 'config' | 'grid', options: {
   text?: string
   size?: string
   count?: number
+  /** Clip length in seconds; video nodes only. */
+  duration?: number
   x?: number
   y?: number
   url?: string
@@ -119,13 +121,19 @@ export function makeNode(kind: 'text' | 'image' | 'config' | 'grid', options: {
   // `config` and `grid` are legacy kinds. Documents written by earlier versions
   // still contain them, so creating one must stay possible; the canvas converts
   // `config` to `image` on load so the operator sees the two-kind model.
+  //
+  // `video` 的默认值要和前端 `ports.ts` 的 `initialData('video')` **逐字一致**
+  // （1344×768、5 秒、没有 count）—— 否则 Agent 建的视频节点和人在画布上建的
+  // 会长得不一样，而这两条路本来就该等价。
   const base: Record<string, unknown> = kind === 'text'
     ? { kind, text: options.text ?? '' }
     : kind === 'grid'
       ? { kind, shotId: options.shotId ?? '' }
       : kind === 'config'
         ? { kind, text: options.text ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1, status: 'idle' }
-        : { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1 }
+        : kind === 'video'
+          ? { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1344x768', duration: options.duration ?? 5, status: 'idle' }
+          : { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1 }
   if (options.shotId !== undefined) base.shotId = options.shotId
   if (options.takeId !== undefined) base.takeId = options.takeId
   if (options.takeNumber !== undefined) base.takeNumber = options.takeNumber
@@ -195,6 +203,7 @@ export function applyOps(doc: CanvasDocument, ops: CanvasOp[]): OpResult[] {
         ...(op.text === undefined ? {} : { text: op.text }),
         ...(op.size === undefined ? {} : { size: op.size }),
         ...(op.count === undefined ? {} : { count: op.count }),
+        ...(op.duration === undefined ? {} : { duration: op.duration }),
         x: op.x ?? 80 + index * 40,
         y: op.y ?? 80 + index * 30,
       })

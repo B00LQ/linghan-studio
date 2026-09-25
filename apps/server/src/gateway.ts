@@ -323,6 +323,14 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     prompt: string
     size: { width: number; height: number }
     count: number
+    /**
+     * Which workflow produced it.
+     *
+     * 记下来有两个用处：**按「类型 + 工作流」分开估时**（8 步与 4 步差近一倍，
+     * 混在一个中位数里对两边都错），以及以后让版本条说出「这一版是几步出的」。
+     * 空字符串表示「服务端自己挑的默认那套」，那就什么都不记。
+     */
+    workflowId?: string
     error?: string
   }): string => {
     if (input.shotId === '') return ''
@@ -341,6 +349,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         prompt: input.prompt,
         size: `${String(input.size.width)}x${String(input.size.height)}`,
         count: input.count,
+        ...(input.workflowId === undefined || input.workflowId === '' ? {} : { workflow: input.workflowId }),
       },
       ...(input.seed === undefined ? {} : { seed: input.seed }),
       latencyMs: input.latencyMs,
@@ -376,7 +385,16 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // A failed attempt is still a take — without it the version history lies by omission.
-      recordTake({ shotId, status: 'failed', latencyMs: Date.now() - started, prompt, size, count, error: message })
+      recordTake({
+        shotId,
+        status: 'failed',
+        latencyMs: Date.now() - started,
+        prompt,
+        size,
+        count,
+        workflowId: request.workflowId ?? '',
+        error: message,
+      })
       throw error
     }
     const latencyMs = Date.now() - started
@@ -394,6 +412,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         prompt,
         size,
         count,
+        workflowId: request.workflowId ?? '',
       })
       return {
         url: `/api/assets/${asset.id}`,
