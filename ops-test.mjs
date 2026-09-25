@@ -183,6 +183,32 @@ async function startModerationStub(mode) {
   return { url: `http://127.0.0.1:${String(port)}`, close: () => { server.close() } }
 }
 
+/** 一个假的告警接收端：把收到的正文记下来，`GET /hits` 取。 */
+async function startAlertStub() {
+  const port = await freePort(8760)
+  const hits = []
+  const server = createServer((req, res) => {
+    if (req.url === '/hits') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ hits }))
+      return
+    }
+    let body = ''
+    req.on('data', (chunk) => { body += String(chunk) })
+    req.on('end', () => {
+      hits.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+  })
+  await new Promise((resolve) => { server.listen(port, '127.0.0.1', resolve) })
+  return {
+    url: `http://127.0.0.1:${String(port)}/alert`,
+    seen: async () => (await (await fetch(`http://127.0.0.1:${String(port)}/hits`)).json()).hits,
+    close: () => { server.close() },
+  }
+}
+
 const run = async () => {
   // ── ① 主实例：配额 1 MB，没配机审 ──────────────────────────────────────
   log('① 主实例（配额 1 MB、没配机审）')
@@ -272,7 +298,8 @@ const run = async () => {
 
   // ── ② 只读实例 ────────────────────────────────────────────────────────
   log('⑧ 只读降级：写被拒、读照常、登录与备份还活着')
-  const ro = await startServer({ STUDIO_READONLY: '1' })
+  const alertStub = await startAlertStub()
+  const ro = await startServer({ STUDIO_READONLY: '1', STUDIO_ALERT_WEBHOOK: alertStub.url })
   check('只读实例起来了', ro.failed !== true, ro.failed === true ? ro.output.join('').slice(-300) : '')
   if (ro.failed !== true) {
     const roClient = client(ro.base)
@@ -285,10 +312,29 @@ const run = async () => {
     check('主页照常能看', (await roClient.call('/')).status === 200)
     const login = await roClient.call('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email: 'nobody@ops.test', password: 'whatever-1' }) })
     check('登录没有被只读挡住（走的是 401 而不是 503）', login.status === 401, `HTTP ${String(login.status)}`)
-    check('备份接口没有被挡住', (await roClient.call('/api/backup')).status !== 503)
+    // 备份是运维的活路：只读时也要能用，而且**云模式下也要能访问**
+    // （它曾经被「cloud 模式一律 404」那条挡掉了，只读白名单等于白写）。
+    check('云模式下备份接口也能用', (await roClient.call('/api/backup')).status === 200)
+    // 云端备份**真的在跑**：启动 8 秒后会做一次「每天自动」。
+    // 这一条以前是错的（那段代码写着"cloud 模式没有自己的数据"就跳过了）——
+    // 它现在装着所有人的作品与上传的成品，那台机器坏了主页就没了。
+    await sleep(11_000)
+    const backupState = await roClient.call('/api/backup')
+    check('云端实例自己做出了第一份备份',
+      Array.isArray(backupState.json.points) && backupState.json.points.length >= 1,
+      `points=${String(backupState.json.points?.length ?? 'n/a')}`)
+    // 告警：进入只读要**自己找到你**（而不是等你哪天打开设置页才发现）。
+    const alerts = await alertStub.seen()
+    check('进入只读时发了告警', alerts.length >= 1, `hits=${String(alerts.length)}`)
+    check('告警正文里说清了原因', alerts[0]?.includes('只读') === true, String(alerts[0] ?? '').slice(0, 120))
+    // 再摸几次 health：状态没变就不该重复喊（否则告警渠道会被刷爆、然后被忽略）。
+    await roClient.call('/api/health')
+    await roClient.call('/api/health')
+    check('状态没变就不重复喊', (await alertStub.seen()).length === alerts.length, `hits=${String((await alertStub.seen()).length)}`)
     ro.child.kill()
     await sleep(400)
   }
+  alertStub.close()
 
   // ── ③ 机审实例（放行策略 / 拒绝策略）──────────────────────────────────
   log('⑨ 机审：命中的挡在人工之前；接口挂了默认放行')

@@ -52,6 +52,14 @@ export function createDegrade(opts: {
   /** 磁盘可用字节；默认用 `statfsSync`，拿不到就返回 undefined。 */
   freeBytes?: (dir: string) => number | undefined
   now?: () => number
+  /**
+   * 进入只读时喊一声（告警 webhook）。
+   *
+   * **只喊一次**（状态没变就不重复喊）：「磁盘满了」这种事每 30 秒报一次，
+   * 除了把告警渠道刷爆、让人开始忽略告警之外没有任何作用。
+   * 恢复正常之后再进只读会重新喊 —— 那是新的一次事故。
+   */
+  onAlert?: (state: DegradeState) => void
 }): Degrader {
   const now = opts.now ?? Date.now
   const read = opts.freeBytes ?? ((dir: string): number | undefined => {
@@ -72,20 +80,30 @@ export function createDegrade(opts: {
     automatic: false,
   }
   let checkedAt = 0
+  /** 这一次只读**喊过**没有（恢复之后重置）。 */
+  let announced = false
+
+  const announce = (state: DegradeState): DegradeState => {
+    if (!state.readonly) { announced = false; return state }
+    if (announced) return state
+    announced = true
+    try { opts.onAlert?.(state) } catch { /* 告警失败不该影响服务本身 */ }
+    return state
+  }
 
   const probe = (): DegradeState => {
     const free = read(opts.dataDir)
     const freeMb = free === undefined ? -1 : Math.floor(free / 1024 / 1024)
     if (opts.forced) {
       cached = { readonly: true, reason: '运维把服务设成了只读（STUDIO_READONLY）', freeMb, automatic: false }
-      return cached
+      return announce(cached)
     }
     if (freeMb >= 0 && freeMb < LOW_DISK_MB) {
       cached = { readonly: true, reason: `磁盘可用空间只剩 ${String(freeMb)} MB（低于 ${String(LOW_DISK_MB)} MB），先停下写入`, freeMb, automatic: true }
-      return cached
+      return announce(cached)
     }
     cached = { readonly: false, reason: '', freeMb, automatic: false }
-    return cached
+    return announce(cached)
   }
 
   return {

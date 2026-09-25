@@ -131,7 +131,29 @@ const limiter = createRateLimiter()
  * 自动触发（可用空间 < 200 MB）是有意为之：素材把盘写满是这套东西最可能的死法，
  * 而"写一半失败"比"明确拒绝"难收拾得多。
  */
-const degrade = createDegrade({ dataDir: config.dataDir, forced: config.readonly })
+const degrade = createDegrade({
+  dataDir: config.dataDir,
+  forced: config.readonly,
+  /**
+   * 进入只读时喊一声（M4 的「监控告警」）。
+   *
+   * 两个去处：日志（运维总会看）与 `STUDIO_ALERT_WEBHOOK`（企微/飞书/Slack 的
+   * 机器人地址都收 `{"text": "…"}`）。**喊一次就够** —— 每 30 秒报一次同样的
+   * 消息只会让人开始忽略告警。
+   */
+  onAlert: (state) => {
+    const message = `【Studio 服务器】进入只读：${state.reason}`
+    console.log(`[studio] ${message}`)
+    if (config.alertWebhook === '') return
+    void fetch(config.alertWebhook, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: message, readonly: true, reason: state.reason, freeMb: state.freeMb }),
+    }).catch((error: unknown) => {
+      console.log(`[studio] 告警没发出去：${error instanceof Error ? error.message : String(error)}`)
+    })
+  },
+})
 
 /** 机审预筛（M4）：没配就跳过，配了就把明显不该过的挡在人工审核之前。 */
 const moderator = createModeration(
@@ -1181,10 +1203,13 @@ const server = createServer((req, res) => {
       /**
        * cloud 模式**没有**画布、素材、算力、作业 —— 那些东西只在用户自己的机器上
        * （见 docs/19）。所以这里明确回 404 并说清原因，
-       * 而不是「能访问但永远是空的」：后者会让人以为是 bug。
+       * 而不是「能访问但永远是空的」：后者会让人以为是白屏 bug。
+       *
+       * **但备份接口要留着**：服务器上也有一份数据库与上传的成品，
+       * 运维要看备份状态、要手动做一次、要恢复 —— 那是这台机器的活路。
        */
       if (config.mode === 'cloud' && (pathname.startsWith('/api/') || pathname.startsWith('/v1/'))
-        && pathname !== '/api/health' && !pathname.startsWith('/api/v1/')) {
+        && pathname !== '/api/health' && !pathname.startsWith('/api/v1/') && !pathname.startsWith('/api/backup')) {
         json(res, 404, { error: '这是服务器端（cloud 模式）：画布、素材与算力都在你自己的桌面端里，不在这台服务器上' })
         return
       }

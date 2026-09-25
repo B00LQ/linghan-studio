@@ -90,6 +90,13 @@ export interface StudioConfig {
    * 而一个坏掉的外部接口不该让整站发不出东西。
    */
   moderationFailClosed: boolean
+  /**
+   * 告警 webhook（`STUDIO_ALERT_WEBHOOK`）：进入只读时 POST 一句 `{"text": "…"}`。
+   *
+   * 空 = 不告警（只打日志）。这是"监控告警"那一项的最小实现：
+   * 它要能自己找到你，而不是等你某天打开设置页才发现站点早就只读了。
+   */
+  alertWebhook: string
 }
 
 /** 运行模式。 */
@@ -252,6 +259,7 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
     moderationUrl: pick('MODERATION_URL'),
     moderationKey: pick('MODERATION_KEY'),
     moderationFailClosed: flag(pick('MODERATION_FAIL_CLOSED')),
+    alertWebhook: pick('STUDIO_ALERT_WEBHOOK'),
   }
 }
 
