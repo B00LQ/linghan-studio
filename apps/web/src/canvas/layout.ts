@@ -28,12 +28,15 @@ const IMAGE: Footprint = { w: 320, h: 430 }
 const VIDEO: Footprint = { w: 360, h: 300 }
 /** 裁切/拼接也是视频卡：同一个播放器，同样 16:9。 */
 const CLIP: Footprint = VIDEO
+/** 音频卡：一个播放条，比视频卡更矮。 */
+const AUDIO: Footprint = { w: 360, h: 190 }
 
 /** The footprint for a node kind. */
 export function footprintOf(kind: string): Footprint {
   if (kind === 'image') return IMAGE
   if (kind === 'video') return VIDEO
   if (kind === 'trim' || kind === 'concat') return CLIP
+  if (kind === 'audio') return AUDIO
   return TEXT
 }
 

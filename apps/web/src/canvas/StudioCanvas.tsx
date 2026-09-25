@@ -33,7 +33,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import { listWorkflows, type WorkflowInfo } from '../api.ts'
-import { createShot, deleteAsset, downloadAssets, fetchGenerationStats, fetchTextBackend, listAssets, listTakes, loadCanvas, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
+import { createShot, deleteAsset, downloadAssets, fetchAudioBackend, fetchGenerationStats, fetchTextBackend, listAssets, listTakes, loadCanvas, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
 import { arrangeLayout, arrangeSubset, findFreeSlot, findOverlaps, nodeRect } from './layout.ts'
 import { NodePanel, AssetPanel } from './CanvasPanels.tsx'
 import { ImageEditor } from './ImageEditor.tsx'
@@ -41,7 +41,7 @@ import { CompareView } from './CompareView.tsx'
 import { NodeTools } from './NodeTools.tsx'
 import { transformImage, type EditOps } from './imageEdit.ts'
 import type { BrowserAsset } from '../components/AssetBrowser.tsx'
-import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, producesVideo, specOf, type CanvasNodeKind, type CanvasNodeSpec, type PortKind } from './ports.ts'
+import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, producesAudio, producesVideo, specOf, type CanvasNodeKind, type CanvasNodeSpec, type PortKind } from './ports.ts'
 import { describeProgress, type NodeProgress } from './progress.ts'
 
 /** Data carried by every Studio node. */
@@ -115,12 +115,13 @@ const CanvasContext = createContext<{
   progressOf: (nodeId: string) => NodeProgress | null
   /** Progress display, already formatted for the node's own window. */
   statusOf: (nodeId: string) => { text: string; fraction: number | null }
-  /** 这类节点现在能不能生成；不能的话，理由是什么（文本节点取决于服务端探测）。 */
+  /** 这类节点现在能不能生成；不能的话，理由是什么（文本/音频取决于服务端探测）。 */
   blockedOf: (spec: CanvasNodeSpec) => string | undefined
-  /** 文本模型的显示名（文本节点那一行）；还没探测出来时是一句说明。 */
-  textModel: string
-  /** 文本后端的说明，做 tooltip：配没配、配的是哪个地址。 */
-  textNote: string
+  /**
+   * 非 ComfyUI 那两类节点（文本/音频）跑在哪个后端上：卡片上那一行显示什么。
+   * ComfyUI 那几类返回空串（它们显示的是「本地 ComfyUI」）。
+   */
+  nodeBackend: (spec: CanvasNodeSpec) => { model: string; note: string }
   /** Workflows this node can pick from — **only the ones this machine can run**.
    *
    * 缺节点的（比如官方 PDD 那条要有 ComfyUI-MiniMax-H3-PDD-Acc 插件）、缺模型的、
@@ -153,8 +154,7 @@ const CanvasContext = createContext<{
   progressOf: () => null,
   statusOf: () => ({ text: '', fraction: null }),
   blockedOf: () => undefined,
-  textModel: '文本',
-  textNote: '',
+  nodeBackend: () => ({ model: '', note: '' }),
   runnable: [],
   workflowFor: () => '',
   sizeFor: () => '1024x1024',
@@ -234,7 +234,7 @@ function PromptInput({ value, placeholder, onInput, onBegin }: {
 
 /** One canvas node's rendering. */
 function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
-  const { takes, activeNodeId, showTake, rerunTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor, blockedOf, textModel, textNote } = useContext(CanvasContext)
+  const { takes, activeNodeId, showTake, rerunTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor, blockedOf, nodeBackend } = useContext(CanvasContext)
   const spec = specOf(data.kind)
   const history = typeof data.shotId === 'string' && data.shotId !== '' ? (takes[data.shotId] ?? []) : []
   // 卡片上现在**显示**的是哪一版。版本条按「最早的在前」排，所以索引也从那边数。
@@ -295,7 +295,10 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
         // 「有没有声音」是这个模型的一半卖点，用静音缩略图糊弄过去等于藏了一半。
         producesVideo(String(data.kind))
           ? <video className="node-video" src={data.url} controls playsInline preload="metadata" />
-          : <img src={data.url} alt={data.text ?? '生成结果'} />
+          // 音频用播放条：它没有画面，摆一张占位图等于骗人。
+          : producesAudio(String(data.kind))
+            ? <audio className="node-audio" src={data.url} controls preload="metadata" />
+            : <img src={data.url} alt={data.text ?? '生成结果'} />
       ) : (
         <div className="empty-card">
           <div className="placeholder" />
@@ -385,8 +388,8 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
             </div>
           ) : null}
           <div className="bar">
-            <span className="model" title={spec.picture ? '' : textNote}>
-              {spec.picture ? '本地 ComfyUI' : textModel}
+            <span className="model" title={spec.picture && spec.capability !== undefined ? '' : nodeBackend(spec).note}>
+              {spec.capability !== undefined ? '本地 ComfyUI' : nodeBackend(spec).model}
             </span>
             {spec.picture ? (
               <>
@@ -702,15 +705,20 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         })
       })
       .catch(() => { /* 没有估计也是一种正常状态：标签少说一句话而已 */ })
-    // 文本后端也一起探：文本节点的 ↑ 能不能按，取决于这台机器配没配模型。
+    // 文本与音频后端也一起探：这两类节点的 ↑ 能不能按，取决于这台机器配没配模型。
     void fetchTextBackend()
       .then((info) => { setTextBackend(info) })
       .catch(() => { setTextBackend(null) })
+    void fetchAudioBackend()
+      .then((info) => { setAudioBackend(info) })
+      .catch(() => { setAudioBackend(null) })
   }, [])
   /** Workflows this canvas can choose from; loaded once per mount. */
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   /** 文本后端（LLM）是什么；null = 还在探测。文本节点的可用性由它决定。 */
   const [textBackend, setTextBackend] = useState<TextBackendInfo | null>(null)
+  /** 音频后端（语音模型）是什么；null = 还在探测。音频节点同理。 */
+  const [audioBackend, setAudioBackend] = useState<TextBackendInfo | null>(null)
   /** Re-render tick while something is running, so the ETA counts down. */
   const [tick, setTick] = useState(0)
   /**
@@ -1241,16 +1249,37 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   /**
    * 这个节点现在能不能生成；不能的话，理由是什么。
    *
-   * 文本节点的理由来自**服务端探测**（配了 key 就能用），不是写死在目录里的那句话——
-   * 写死的话，配好的机器上会一直显示「未配置文本模型」，而那是假话。
+   * 文本与音频节点的理由来自**服务端探测**（配了 key 就能用），不是写死在目录里的那句话——
+   * 写死的话，配好的机器上会一直显示「未配置」，而那是假话。
    * @param spec - the node's catalogue entry.
    * @returns the reason, or undefined when it can run.
    */
   const blockedOf = useCallback((spec: CanvasNodeSpec): string | undefined => {
-    if (spec.kind !== 'text') return spec.generateBlocked
-    if (textBackend === null) return '正在探测文本模型…'
-    return textBackend.configured ? undefined : textBackend.note
-  }, [textBackend])
+    if (spec.kind === 'text') {
+      if (textBackend === null) return '正在探测文本模型…'
+      return textBackend.configured ? undefined : textBackend.note
+    }
+    if (spec.kind === 'audio') {
+      if (audioBackend === null) return '正在探测语音模型…'
+      return audioBackend.configured ? undefined : audioBackend.note
+    }
+    return spec.generateBlocked
+  }, [audioBackend, textBackend])
+
+  /**
+   * 非 ComfyUI 那两类节点（文本/音频）跑在哪个后端上——卡片上那一行显示什么。
+   * @param spec - the node's catalogue entry.
+   * @returns the model name and the note (both empty for ComfyUI nodes).
+   */
+  const nodeBackend = useCallback((spec: CanvasNodeSpec): { model: string; note: string } => {
+    if (spec.kind === 'text') {
+      return { model: textBackend === null ? '探测文本模型…' : textBackend.model, note: textBackend?.note ?? '' }
+    }
+    if (spec.kind === 'audio') {
+      return { model: audioBackend === null ? '探测语音模型…' : audioBackend.model, note: audioBackend?.note ?? '' }
+    }
+    return { model: '', note: '' }
+  }, [audioBackend, textBackend])
 
   /**
    * The size this node will actually ask for — same rule as {@link workflowFor}:
@@ -1479,9 +1508,12 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       setStatus('这个节点已经在跑了')
       return
     }
-    // 文本节点走的是 LLM，**不跑 ComfyUI 工作流**，所以下面那条「必须解析出工作流」
-    // 对它不成立。它的指令就是节点里那段字；上游文本节点接上来的字是「接着写」的素材。
+    // 文本与音频走的是**后端**（LLM / 语音模型），**不跑 ComfyUI 工作流**，所以下面那条
+    // 「必须解析出工作流」对它们不成立。它们的输入就是节点里那段字；上游文本节点接上来的
+    // 字是「接着写 / 念这个」的素材。
     const isText = spec.kind === 'text'
+    const isAudio = spec.kind === 'audio'
+    const isBackend = isText || isAudio
     const own = (target.data.text ?? '').trim()
     const upstream = inboundText(nodeId, nodesRef.current, edgesRef.current)
     const prompt = own !== '' ? own : upstream
@@ -1489,7 +1521,8 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     if (prompt === '' && spec.capability !== 'video-edit') {
       setStatus(isText
         ? '先写下你想让它写什么（例如：雨夜霓虹街头，三段式场景，带环境声）'
-        : '提示词为空：在节点下方写，或从文本节点拉线接入')
+        : isAudio ? '先写下要念的内容（例如：雨夜里的旁白：那盏灯……）'
+          : '提示词为空：在节点下方写，或从文本节点拉线接入')
       return
     }
     /**
@@ -1500,7 +1533,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
      * 拿不到就明说，别让服务端替我挑一套错的。
      */
     let workflowId = ''
-    if (!isText) {
+    if (!isBackend) {
       workflowId = workflowFor(nodeId, target.data)
       if (workflowId === '') {
         // 两种「没有」要分清：真的没导入过，还是导入了但这台机器跑不了（缺节点、
@@ -1527,7 +1560,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       projectId,
       nodeId,
       prompt,
-      ...(isText ? { kind: 'text' as const } : {}),
+      ...(isText ? { kind: 'text' as const } : isAudio ? { kind: 'audio' as const } : {}),
       size: sizeFor(target.data),
       count: typeof target.data.count === 'number' ? target.data.count : 1,
       ...(workflowId === '' ? {} : { workflowId }),
@@ -1541,9 +1574,11 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       ...(isText && own !== '' && upstream !== '' ? { params: { context: upstream } } : {}),
     }, isText
       ? '已提交：等文本模型写…'
-      : spec.kind === 'video'
-        ? '已提交：视频要十几分钟，可以先去干别的'
-        : spec.capability === 'video-edit' ? '已提交：剪辑不用显卡，几秒就完' : '已提交…', async () => {
+      : isAudio
+        ? '已提交：等语音模型念…'
+        : spec.kind === 'video'
+          ? '已提交：视频要十几分钟，可以先去干别的'
+          : spec.capability === 'video-edit' ? '已提交：剪辑不用显卡，几秒就完' : '已提交…', async () => {
       // The history id is the node's own; the operator never sees a "shot".
       // 先建好：第一帧进度可能在节点自己知道 shotId 之前就到了。
       // **文本不建镜头**：它不是文件，没有「版本」这套，建了只会留一个空镜头。
@@ -1883,8 +1918,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     labelOf: (nodeId: string) => nodeLabel(nodes, nodeId),
     progressOf: (nodeId: string) => progress[nodeId] ?? null,
     blockedOf,
-    textModel: textBackend === null ? '探测文本模型…' : textBackend.model,
-    textNote: textBackend?.note ?? '',
+    nodeBackend,
     statusOf: (nodeId: string) => {
       const report = progress[nodeId] ?? null
       const node = nodes.find((item) => item.id === nodeId)
@@ -1897,8 +1931,8 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
        * 没有样本时宁可**不说**——步数与进度条已经在如实报进展了。
        */
       const kind = String(node?.data.kind ?? '')
-      // 产出什么**资产**：视频类（含裁切/拼接）都产出 video。
-      const assetKind = producesVideo(kind) ? 'video' : kind === 'image' ? 'image' : ''
+      // 产出什么**资产**：视频类（含裁切/拼接）都产出 video，音频节点产出 audio。
+      const assetKind = producesVideo(kind) ? 'video' : producesAudio(kind) ? 'audio' : kind === 'image' ? 'image' : ''
       // 只有「生成类」节点才允许退到「同类中位数」：裁切/拼接产出的也是 video，
       // 但它们是秒级的 —— 拿生成那条 8 分钟的中位数去预估剪辑，等于把刚修过的
       // 那个谎（拿图片的中位数去预计视频）又说一遍。
@@ -1922,7 +1956,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     workflowFor,
     sizeFor,
     // `tick` is not read: it exists so the ETA above is recomputed every 500 ms.
-  }), [beginEdit, blockedOf, cancelRun, compare, editImage, generate, nodes, progress, quickEdit, rerunTake, runningNodeId, runnable, selection, setParam, showTake, sizeFor, stats, takes, textBackend, tick, workflowFor])
+  }), [beginEdit, blockedOf, cancelRun, compare, editImage, generate, nodeBackend, nodes, progress, quickEdit, rerunTake, runningNodeId, runnable, selection, setParam, showTake, sizeFor, stats, takes, tick, workflowFor])
 
   // 左键双击空白处 → 添加节点面板。
   //

@@ -158,6 +158,9 @@ export interface TextBackendInfo {
  */
 export const fetchTextBackend = (): Promise<TextBackendInfo> => request<TextBackendInfo>('/api/text-backend')
 
+/** 音频后端：形状和文本那份一模一样（driver/model/configured/note）。 */
+export const fetchAudioBackend = (): Promise<TextBackendInfo> => request<TextBackendInfo>('/api/audio-backend')
+
 /** What a stored workflow produces. */
 export type WorkflowCapability = 'image' | 'video' | 'video-edit'
 
@@ -168,8 +171,8 @@ export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancell
 export interface StudioJob {
   id: string
   request: {
-    /** `text` = 交给文本后端（LLM），别的都是 ComfyUI 渲染。 */
-    kind?: 'render' | 'text'
+    /** `text` / `audio` = 交给对应后端，别的都是 ComfyUI 渲染。 */
+    kind?: 'render' | 'text' | 'audio'
     projectId: string
     nodeId: string
     prompt: string
@@ -220,8 +223,8 @@ export const submitJob = (input: {
   shotId?: string
   /** 非提示词、非尺寸的取值（裁切的 start…），直接当工作流占位符的值用。 */
   params?: Record<string, number | string>
-  /** `text` = 交给文本后端（LLM）；省略就是 ComfyUI 渲染。 */
-  kind?: 'text'
+  /** `text` / `audio` = 交给对应的后端（LLM / 语音模型）；省略就是 ComfyUI 渲染。 */
+  kind?: 'text' | 'audio'
   /**
    * 固定种子（复现某一版时带上）。省略就随机。
    *

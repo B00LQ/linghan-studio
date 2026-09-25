@@ -29,10 +29,11 @@ export interface JobRequest {
    * 这是什么活。
    *
    * `render`（默认）走 ComfyUI 出图/出片；`text` 是把一段提示词交给 LLM、把结果写回
-   * **文本节点**。两者共用同一个注册表与同一套「提交立刻返回、状态靠查/推」的形状 ——
-   * 一次 LLM 调用也可能几十秒，它同样不该挂在一个 HTTP 请求上。
+   * **文本节点**；`audio` 是交给语音模型、把音频存成素材并写回**音频节点**。
+   * 三者共用同一个注册表与同一套「提交立刻返回、状态靠查/推」的形状 ——
+   * 一次 LLM 或 TTS 调用也可能几十秒，它同样不该挂在一个 HTTP 请求上。
    */
-  kind?: 'render' | 'text'
+  kind?: 'render' | 'text' | 'audio'
   /** Canvas the result should be written into. */
   projectId: string
   /** Node that asked for it. */

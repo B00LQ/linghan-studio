@@ -15,10 +15,10 @@
 import type { WorkflowCapability } from '../api.ts'
 
 /** What a port carries. */
-export type PortKind = 'text' | 'image' | 'video'
+export type PortKind = 'text' | 'image' | 'video' | 'audio'
 
 /** Node kinds the canvas can draw. */
-export type CanvasNodeKind = 'text' | 'image' | 'video' | 'trim' | 'concat' | 'group'
+export type CanvasNodeKind = 'text' | 'image' | 'video' | 'trim' | 'concat' | 'audio' | 'group'
 
 /** One port on a canvas node. */
 export interface PortDef {
@@ -139,6 +139,17 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
     placeholder: '',
     picture: true,
   },
+  {
+    kind: 'audio',
+    title: '音频',
+    description: '把一段文字念成人声（旁白 / 对白）；接任意 OpenAI 兼容的语音接口',
+    // 和文本节点一样**不跑 ComfyUI 工作流**（capability 不填 = 不参与工作流选择）：
+    // 它直接对接语音模型，所以下拉里不会出现出图/出片的工作流。
+    inputs: [{ id: 'prompt', kind: 'text', label: '要念的文字' }],
+    outputs: [{ id: 'audio', kind: 'audio', label: '声音' }],
+    placeholder: '写下要念的内容。例如：雨夜里的旁白：那盏灯，是我最后一次见到他。',
+    picture: true,
+  },
 ]
 
 /** Look up a spec by node kind. */
@@ -156,6 +167,17 @@ export function specOf(kind: string): CanvasNodeSpec | undefined {
  */
 export function producesVideo(kind: string): boolean {
   return specOf(kind)?.outputs.some((port) => port.kind === 'video') ?? false
+}
+
+/**
+ * 这类节点产出的是不是音频。
+ *
+ * 和 {@link producesVideo} 同一个理由：判据是**产出端口**的类型，不是节点叫什么。
+ * @param kind - node kind stored in data.
+ * @returns whether anything it produces is audio.
+ */
+export function producesAudio(kind: string): boolean {
+  return specOf(kind)?.outputs.some((port) => port.kind === 'audio') ?? false
 }
 
 /** The kind a port carries, when the node kind and port id are known. */
@@ -197,6 +219,8 @@ export function initialData(kind: CanvasNodeKind, extra: Record<string, unknown>
   if (kind === 'trim') return { kind, url: '', start: 0, duration: 3, ...extra }
   // 拼接两段：只有输入，没有任何参数。
   if (kind === 'concat') return { kind, url: '', ...extra }
+  // 音频：给它文字就念；没有画幅、没有张数。
+  if (kind === 'audio') return { kind, text: '', url: '', ...extra }
   return { kind, text: '', url: '', size: '1024x1024', count: 1, ...extra }
 }
 

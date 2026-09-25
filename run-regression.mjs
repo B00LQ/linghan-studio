@@ -27,6 +27,7 @@ const SUITES = [
   { name: 'progress', script: 'progress-test.mjs', args: [] },
   { name: 'ports', script: 'ports-test.mjs', args: [] },
   { name: 'text', script: 'text-test.mjs', args: [] },
+  { name: 'audio', script: 'audio-test.mjs', args: [] },
   { name: 'workflow-engine', script: 'workflow-engine-test.mjs', args: [] },
   { name: 'workflow-api', script: 'workflow-api-test.mjs', args: [BASE, PASSWORD] },
   { name: 'take-pipeline', script: 'take-pipeline-test.mjs', args: [BASE, PASSWORD] },

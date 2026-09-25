@@ -20,6 +20,7 @@ import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
 import { createTextBackend } from './text.ts'
+import { createAudioBackend } from './audio.ts'
 import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
@@ -106,6 +107,12 @@ const textBackend = createTextBackend({
   log: (message) => { console.log(`[studio] ${message}`) },
 })
 
+/** 音频后端：独立的一段人声/配乐；没配时是占位驱动（合成一段真能播的 WAV）。 */
+const audioBackend = createAudioBackend({
+  store,
+  log: (message) => { console.log(`[studio] ${message}`) },
+})
+
 /**
  * 渲染作业：一次生成不再等于一个 HTTP 请求。
  *
@@ -144,6 +151,56 @@ const jobs = createJobRegistry({
         bridge.broadcastDocument(request.projectId, 'render')
       }
       return { files: [], takes: 0, shotId: '', text }
+    }
+    // 音频作业：干活的换成语音模型，结果是**文件**（所以它和渲染那条一样走素材 + take
+    // + 写回画布，也和渲染一样「失败也要留一条 take」——不然「失败也留痕」又是空话）。
+    if (request.kind === 'audio') {
+      const model = audioBackend.status().model
+      let audioShotId = request.shotId ?? ''
+      if (audioShotId === '' || store.getShot(audioShotId) === undefined) {
+        audioShotId = store.addShot(request.projectId, request.prompt.slice(0, 40) || '配音', request.prompt).id
+      }
+      const before = store.listTakes(audioShotId)
+      const started = Date.now()
+      try {
+        const speech = await audioBackend.speak({ text: request.prompt })
+        const asset = store.saveAsset(speech.bytes, speech.mime, 'audio')
+        const take = store.addTake({
+          shotId: audioShotId,
+          providerId: 'studio-audio',
+          model,
+          status: 'succeeded',
+          assetId: asset.id,
+          params: { prompt: request.prompt, voice: speech.voice },
+          latencyMs: Date.now() - started,
+        })
+        const files = [{ url: `/api/assets/${asset.id}`, assetId: asset.id, takeId: take.id }]
+        const doc = readDocument(store, request.projectId)
+        const applied = applyGeneration(doc, {
+          nodeId: request.nodeId,
+          shotId: audioShotId,
+          prompt: request.prompt,
+          historyLength: before.length,
+          files,
+        })
+        if (applied) {
+          writeDocument(store, request.projectId, doc)
+          bridge.broadcastDocument(request.projectId, 'render')
+        }
+        return { files, takes: store.listTakes(audioShotId).length, shotId: audioShotId }
+      } catch (error) {
+        // 失败也记一条：这一版的参数、耗时、原因都留着，画布上能看见、能点一下重试。
+        store.addTake({
+          shotId: audioShotId,
+          providerId: 'studio-audio',
+          model,
+          status: 'failed',
+          params: { prompt: request.prompt },
+          latencyMs: Date.now() - started,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        throw error
+      }
     }
     // 镜头：没有就现建一个，和画布点击、Agent 调用走的是同一条路。
     let shotId = request.shotId ?? ''
@@ -457,6 +514,12 @@ const server = createServer((req, res) => {
         return
       }
 
+      // 音频后端（音频节点靠它出人声）。同一套形状：configured + note 给画布用。
+      if (pathname === '/api/audio-backend' && method === 'GET') {
+        json(res, 200, audioBackend.status())
+        return
+      }
+
       // 渲染作业：提交立刻返回，之后靠查/推。长任务（视频十几分钟）不能挂在
       // 一个 HTTP 请求上——见 createJobRegistry 上面的说明。
       if (pathname === '/api/jobs' && method === 'POST') {
@@ -478,8 +541,8 @@ const server = createServer((req, res) => {
           return
         }
         const job = jobs.submit({
-          // 文本节点提交的是「文本作业」：同样的注册表，干活的换成 LLM。
-          ...(body.kind === 'text' ? { kind: 'text' as const } : {}),
+          // 文本/音频节点提交的是「后端作业」：同样的注册表，干活的换成 LLM 或语音模型。
+          ...(body.kind === 'text' || body.kind === 'audio' ? { kind: body.kind } : {}),
           projectId,
           nodeId,
           prompt,

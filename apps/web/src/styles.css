@@ -965,6 +965,9 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .prompt-window .take-actions .link { padding: 0; }
 .prompt-window .take-actions-note { font-variant-numeric: tabular-nums; opacity: 0.75; }
 
+/* 音频卡：一条播放器，没有画面。它没有 16:9 的框，所以给它自己的宽度。 */
+.studio-node .node-audio { width: 100%; display: block; }
+
 /* 裁切的「从第几秒 / 要几秒」：窄一点，两个并排也不挤掉模型名。 */
 .prompt-window .bar input.clip-number {  width: 54px;
   font-size: 11px;
