@@ -38,6 +38,7 @@ import { arrangeLayout, arrangeSubset, findFreeSlot, findOverlaps, nodeRect } fr
 import { NodePanel, AssetPanel } from './CanvasPanels.tsx'
 import { ImageEditor } from './ImageEditor.tsx'
 import { CompareView } from './CompareView.tsx'
+import { SmallImage } from '../components/SmallImage.tsx'
 import { NodeTools } from './NodeTools.tsx'
 import { transformImage, type EditOps } from './imageEdit.ts'
 import type { BrowserAsset } from '../components/AssetBrowser.tsx'
@@ -335,7 +336,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                     ? (producesVideo(String(data.kind))
                       // 缩略图也要是个视频元素：<img src="....mp4"> 什么都不显示。
                       ? <video src={`/api/assets/${take.assetId}`} muted playsInline preload="metadata" />
-                      : <img src={`/api/assets/${take.assetId}`} alt={`第 ${String(index + 1)} 版`} />)
+                      : <SmallImage assetId={take.assetId} size={160} alt={`第 ${String(index + 1)} 版`} />)
                     : <span className="cell-failed">失败</span>}
                   <span className="cell-no">{index + 1}</span>
                 </button>

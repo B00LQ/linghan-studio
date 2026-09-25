@@ -26,6 +26,9 @@ const SUITES = [
   { name: 'layout', script: 'layout-test.mjs', args: [] },
   { name: 'progress', script: 'progress-test.mjs', args: [] },
   { name: 'ports', script: 'ports-test.mjs', args: [] },
+  // 手写 PNG 编解码器的单测：颜色型/位深/滤波器/不支持格式/缩放算术。
+  // 这一条特别值——解码器错了不会崩，只会安静地把图变样（16 位取错字节 = 满屏噪点）。
+  { name: 'thumb', script: 'thumb-test.mjs', args: [] },
   { name: 'text', script: 'text-test.mjs', args: [] },
   { name: 'audio', script: 'audio-test.mjs', args: [] },
   { name: 'workflow-engine', script: 'workflow-engine-test.mjs', args: [] },

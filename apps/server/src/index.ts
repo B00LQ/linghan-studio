@@ -7,7 +7,7 @@
  * self-hosted deployment holds provider credentials server-side.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { clearSession, clearThrottle, hasSession, issueSession, passwordMatches, throttle } from './auth.ts'
@@ -16,6 +16,7 @@ import { createBridge } from './bridge.ts'
 import { createStudioRegistry } from './workflow/nodes.ts'
 import { createWorkflowRoutes } from './workflow/routes.ts'
 import { loadConfig, SETTINGS, settingsView } from './config.ts'
+import { thumbnail } from './png.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
@@ -1123,6 +1124,55 @@ const server = createServer((req, res) => {
         } catch (error) {
           json(res, 413, { error: error instanceof Error ? error.message : '上传失败' })
         }
+        return
+      }
+
+      /**
+       * 缩略图。
+       *
+       * 卡片与版本条上那些小格子原本直接拉原图：这台机器上 159 张 PNG 平均 1.28 MB，
+       * 资产窗一屏 60 张就是 68 MB。缩到 320px 长边之后一屏是几百 KB。
+       *
+       * 缓存写在数据目录里（`thumbs/<id>-<size>.png`）：素材是内容寻址的，同一张图的
+       * 缩略图永远一样，所以生成一次就够了。不支持的格式（JPEG、隔行、调色板）回 404，
+       * **让调用方退回原图** —— 给一张错的缩略图比不给更糟。
+       */
+      const thumbMatch = /^\/api\/assets\/([^/]+)\/thumb$/u.exec(pathname)
+      if (thumbMatch !== null && method === 'GET') {
+        const asset = store.getAsset(decodeURIComponent(thumbMatch[1] as string))
+        if (asset === undefined) {
+          json(res, 404, { error: '素材不存在' })
+          return
+        }
+        const size = Math.min(640, Math.max(64, Number.parseInt(url.searchParams.get('w') ?? '320', 10) || 320))
+        const cached = join(config.dataDir, 'thumbs', `${asset.id}-${String(size)}.png`)
+        try {
+          const body = await readFile(cached)
+          res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' })
+          res.end(body)
+          return
+        } catch {
+          // 没有缓存：现做一张。
+        }
+        let made: Buffer | undefined
+        try {
+          made = thumbnail(await readFile(store.assetPath(asset)), size)
+        } catch {
+          made = undefined
+        }
+        if (made === undefined) {
+          json(res, 404, { error: '这张素材做不出缩略图（格式不支持），请直接用原图' })
+          return
+        }
+        try {
+          await mkdir(join(config.dataDir, 'thumbs'), { recursive: true })
+          await writeFile(cached, made)
+        } catch (error) {
+          // 写不进缓存也要把图发出去：缓存是优化，不是功能。
+          console.log(`[studio] 缩略图缓存写入失败：${String(error)}`)
+        }
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' })
+        res.end(made)
         return
       }
 

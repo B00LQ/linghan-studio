@@ -13,6 +13,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { TakeInfo } from '../api.ts'
+import { SmallImage } from '../components/SmallImage.tsx'
 
 /** Props for {@link CompareView}. */
 export interface CompareViewProps {
@@ -114,8 +115,9 @@ export function CompareView({ nodeLabel, mediaKind, takes, currentTakeId, onUse,
                       // 视频格用播放器：对比两段片子的运镜和声音，靠一张静帧是看不出来的。
                       ? <video src={`/api/assets/${take.assetId}`} controls playsInline preload="metadata" />
                       : (
-                        <img
-                          src={`/api/assets/${take.assetId}`}
+                        <SmallImage
+                          assetId={take.assetId}
+                          size={480}
                           alt={`第 ${String(index + 1)} 版`}
                           title="点击放大"
                           onClick={() => { setZoom(take.id) }}

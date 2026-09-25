@@ -26,6 +26,7 @@ import {
 } from '../api.ts'
 import { Menu, MenuItem } from '../components/Menu.tsx'
 import { ProjectCardMenu } from '../components/ProjectCardMenu.tsx'
+import { SmallImage } from '../components/SmallImage.tsx'
 import { navigate, useSearch } from '../router.ts'
 
 /** Props for the projects page. */
@@ -273,7 +274,7 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
                   {/* 没设封面时用画布自己的某张图（随机取）：一排同款灰底没法扫。 */}
                   {project.previewAssetId === ''
                     ? <span className="cover" />
-                    : <img className="cover" src={`/api/assets/${project.previewAssetId}`} alt="" />}
+                    : <SmallImage className="cover" assetId={String(project.previewAssetId)} size={480} />}
                   {renamingProject === project.id ? (
                     <input
                       className="card-rename"
@@ -327,7 +328,7 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
                 <button type="button" className="card-open" onClick={() => { navigate(`/canvas/${project.id}`) }}>
                   {project.previewAssetId === ''
                     ? <span className="cover" />
-                    : <img className="cover" src={`/api/assets/${project.previewAssetId}`} alt="" />}
+                    : <SmallImage className="cover" assetId={String(project.previewAssetId)} size={480} />}
                   <strong>{project.name}</strong>
                   <span className="muted">删除于 {when(project.deletedAt)}</span>
                 </button>
@@ -363,21 +364,23 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
               ? <p className="muted">这个画布上还没有画面。先在画布里生成或上传一张，再回来选。</p>
               : (
                 <div className="cover-grid">
-                  {cover.images.map((url) => (
-                    <button
-                      key={url}
-                      type="button"
-                      className="cover-choice"
-                      title="设为封面"
-                      onClick={() => {
-                        const assetId = url.split('/api/assets/')[1] ?? ''
-                        setCover(null)
-                        void setProjectCover(cover.project.id, assetId).then(() => { void reload(); onChanged() })
-                      }}
-                    >
-                      <img src={url} alt="" />
-                    </button>
-                  ))}
+                  {cover.images.map((url) => {
+                    const assetId = url.split('/api/assets/')[1] ?? ''
+                    return (
+                      <button
+                        key={url}
+                        type="button"
+                        className="cover-choice"
+                        title="设为封面"
+                        onClick={() => {
+                          setCover(null)
+                          void setProjectCover(cover.project.id, assetId).then(() => { void reload(); onChanged() })
+                        }}
+                      >
+                        <SmallImage assetId={assetId} size={320} alt="" />
+                      </button>
+                    )
+                  })}
                 </div>
               )}
             {cover.project.coverAssetId === '' ? null : (

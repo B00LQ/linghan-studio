@@ -15,6 +15,7 @@ import {
   type FolderInfo, type ProjectInfo, type SiteContent,
 } from '../api.ts'
 import { ProjectCardMenu } from '../components/ProjectCardMenu.tsx'
+import { SmallImage } from '../components/SmallImage.tsx'
 import { navigate } from '../router.ts'
 
 /** Props for the home page. */
@@ -105,7 +106,7 @@ export function HomePage({ onCreate, refreshToken }: HomePageProps) {
                     {/* 没设封面时用画布里的某一张图——比一块灰底有用得多。 */}
                     {project.previewAssetId === ''
                       ? <span className="thumb" />
-                      : <img className="thumb" src={`/api/assets/${project.previewAssetId}`} alt="" />}
+                      : <SmallImage className="thumb" assetId={String(project.previewAssetId)} size={320} />}
                     <span className="name">{project.name}</span>
                     <span className="time">
                       {folderName(project.folderId) === '' ? '' : `${folderName(project.folderId)} · `}{when(project.updatedAt)}

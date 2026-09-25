@@ -385,6 +385,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 /** Probe the session. */
 export const fetchSession = (): Promise<SessionInfo> => request<SessionInfo>('/api/session')
 
+/**
+ * 一张素材的小图地址。
+ *
+ * 服务端现做缩略图（只认 PNG；其它格式回 404），所以**调用方要在 onError 里退回原图** ——
+ * 缩略图是优化，不是功能。素材是内容寻址的，同一张图的缩略图永远一样，可以长期缓存。
+ * @param assetId - asset to preview.
+ * @param size - 长边上限（服务端会夹到 64…640）。
+ * @returns the URL.
+ */
+export const thumbUrl = (assetId: string, size = 320): string =>
+  `/api/assets/${encodeURIComponent(assetId)}/thumb?w=${String(size)}`
+
 /** 一个可设置字段的当前状态（服务端 config.ts 的 SettingView）。 */
 export interface SettingField {
   /** 环境变量名，也是提交时的键。 */

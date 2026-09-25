@@ -16,6 +16,7 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { AssetInfo } from '../api.ts'
+import { SmallImage } from './SmallImage.tsx'
 
 /** One asset as the browser needs it. */
 export type BrowserAsset = AssetInfo & { createdAt: string }
@@ -191,7 +192,7 @@ export function AssetBrowser(props: AssetBrowserProps) {
                         onClick={() => { setPreview(asset.id) }}
                       >
                         {asset.mime.startsWith('image/')
-                          ? <img src={asset.url} alt="" loading="lazy" decoding="async" />
+                          ? <SmallImage assetId={asset.id} size={320} />
                           : <span className="file">{asset.kind}</span>}
                       </button>
                       <button
