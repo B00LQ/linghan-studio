@@ -50,7 +50,7 @@ function parseJson(text: string): Record<string, unknown> {
 
 /** Read the document as a mutable record, tolerating a document that was never saved. */
 function readDoc(store: StudioStore, projectId: string): Record<string, unknown> {
-  const raw = store.getCanvas(projectId)
+  const raw = store.getDoc(projectId)
   if (raw === undefined) return { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } }
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -102,11 +102,12 @@ export function createWorkflowRoutes(deps: WorkflowRouteDeps): {
         return true
       }
 
-      const workflowMatch = /^\/api\/projects\/([^/]+)\/workflow$/u.exec(pathname)
+      const workflowMatch = /^\/api\/canvases\/([^/]+)\/workflow$/u.exec(pathname)
       if (workflowMatch !== null) {
         const projectId = decodeURIComponent(workflowMatch[1] as string)
-        if (deps.store.getProject(projectId) === undefined) {
-          json(res, 404, { error: '项目不存在' })
+        // 查的是**画布实体**：一张还没保存过的画布也该能存工作流。
+        if (deps.store.getCanvas(projectId) === undefined) {
+          json(res, 404, { error: '画布不存在' })
           return true
         }
         if (method === 'GET') {
@@ -122,18 +123,18 @@ export function createWorkflowRoutes(deps: WorkflowRouteDeps): {
           }
           const doc = readDoc(deps.store, projectId)
           doc.workflow = incoming
-          deps.store.saveCanvas(projectId, JSON.stringify(doc))
+          deps.store.saveDoc(projectId, JSON.stringify(doc))
           deps.onDocumentChanged(projectId, 'workflow-saved')
           json(res, 200, { ok: true })
           return true
         }
       }
 
-      const runMatch = /^\/api\/projects\/([^/]+)\/workflow\/run$/u.exec(pathname)
+      const runMatch = /^\/api\/canvases\/([^/]+)\/workflow\/run$/u.exec(pathname)
       if (runMatch !== null && method === 'POST') {
         const projectId = decodeURIComponent(runMatch[1] as string)
-        if (deps.store.getProject(projectId) === undefined) {
-          json(res, 404, { error: '项目不存在' })
+        if (deps.store.getCanvas(projectId) === undefined) {
+          json(res, 404, { error: '画布不存在' })
           return true
         }
         const body = parseJson(await readText(req))
@@ -156,7 +157,7 @@ export function createWorkflowRoutes(deps: WorkflowRouteDeps): {
         // Persist the results — cache keys and outputs are what make the next run
         // cheap, so losing them on reload would throw the whole mechanism away.
         doc.workflow = summary.workflow
-        deps.store.saveCanvas(projectId, JSON.stringify(doc))
+        deps.store.saveDoc(projectId, JSON.stringify(doc))
         deps.onDocumentChanged(projectId, 'workflow-run')
 
         const elapsedMs = Date.now() - started

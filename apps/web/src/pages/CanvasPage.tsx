@@ -11,7 +11,7 @@
  * canvas page only ever needs to say which canvas this is and let you rename it.
  */
 import { useCallback, useEffect, useState } from 'react'
-import { createProject, listProjects, loadCanvas, renameProject, trashProject, type CanvasDoc, type ProjectInfo } from '../api.ts'
+import { createCanvas, listCanvases, loadCanvas, renameCanvas, trashCanvas, type CanvasDoc, type CanvasInfo } from '../api.ts'
 import { CanvasTopBar } from '../canvas/CanvasTopBar.tsx'
 import { StudioCanvas } from '../canvas/StudioCanvas.tsx'
 import { navigate } from '../router.ts'
@@ -34,8 +34,8 @@ export function CanvasPage({ projectId }: CanvasPageProps) {
   const [state, setState] = useState<
     { status: 'loading' } | { status: 'ready'; doc: CanvasDoc | null } | { status: 'error'; message: string }
   >({ status: 'loading' })
-  const [project, setProject] = useState<ProjectInfo | null>(null)
-  const [siblings, setSiblings] = useState<ProjectInfo[]>([])
+  const [project, setProject] = useState<CanvasInfo | null>(null)
+  const [siblings, setSiblings] = useState<CanvasInfo[]>([])
 
   useEffect(() => {
     setState({ status: 'loading' })
@@ -48,9 +48,9 @@ export function CanvasPage({ projectId }: CanvasPageProps) {
 
   /** Re-read the picker: the canvas's own name and what else exists. */
   const refreshPicker = useCallback(async (): Promise<void> => {
-    const listed = await listProjects()
-    setProject(listed.projects.find((item) => item.id === projectId) ?? null)
-    setSiblings(listed.projects)
+    const listed = await listCanvases()
+    setProject(listed.canvases.find((item) => item.id === projectId) ?? null)
+    setSiblings(listed.canvases)
   }, [projectId])
 
   useEffect(() => {
@@ -65,17 +65,17 @@ export function CanvasPage({ projectId }: CanvasPageProps) {
     // 会被拦成弹窗。开完再填地址是这里唯一可靠的做法。
     const tab = window.open('', '_blank')
     try {
-      const created = await createProject(`未命名画布 ${String(siblings.length + 1)}`, project?.folderId)
-      if (tab === null) navigate(`/canvas/${created.project.id}`)
-      else tab.location.href = `/canvas/${created.project.id}`
+      const created = await createCanvas(`未命名画布 ${String(siblings.length + 1)}`, project?.folderId)
+      if (tab === null) navigate(`/canvas/${created.canvas.id}`)
+      else tab.location.href = `/canvas/${created.canvas.id}`
     } catch {
       tab?.close()
     }
   }, [project, siblings.length])
 
   /** 改画布名：改完刷新左栏，让标题立刻变。 */
-  const renameCanvas = useCallback(async (name: string): Promise<void> => {
-    await renameProject(projectId, name)
+  const applyCanvasName = useCallback(async (name: string): Promise<void> => {
+    await renameCanvas(projectId, name)
     await refreshPicker()
   }, [projectId, refreshPicker])
 
@@ -83,7 +83,7 @@ export function CanvasPage({ projectId }: CanvasPageProps) {
   const removeCanvas = async (): Promise<void> => {
     if (project === null) return
     if (!window.confirm(`把画布「${project.name}」移到回收站？可以在项目页的回收站里还原。`)) return
-    await trashProject(project.id)
+    await trashCanvas(project.id)
     navigate('/')
   }
 
@@ -116,7 +116,7 @@ export function CanvasPage({ projectId }: CanvasPageProps) {
             onAllProjects={() => { navigate('/projects') }}
             onCreateProject={() => { void addCanvas() }}
             onDeleteProject={() => { void removeCanvas() }}
-            onRenameCanvas={(name) => { void renameCanvas(name) }}
+            onRenameCanvas={(name) => { void applyCanvasName(name) }}
           />
         )}
       />

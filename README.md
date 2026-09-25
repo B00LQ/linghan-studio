@@ -215,6 +215,21 @@ GET  /api/agent/tools                    # 工具清单（含 JSON Schema）
 POST /api/agent/call  {"name":"canvas_generate","input":{"nodeId":"image-…"}}
 ```
 
+**HTTP 面按「画布」正名**（存储层同样是 `canvas` 表）：
+
+```bash
+GET    /api/canvases                     # 画布列表（?folderId=… / ?trash=1）
+POST   /api/canvases                     # 新建
+PATCH  /api/canvases/<id>                # 改名 / 换文件夹 / 换封面
+DELETE /api/canvases/<id>[?purge=1]      # 进回收站（purge 才是真删）
+GET    /api/canvases/<id>/doc            # 画布文档
+PUT    /api/canvases/<id>/doc
+```
+
+旧路径 `/api/projects…`（包括 `/canvas`）**仍然能用**，返回体里也同时带
+`canvases`/`canvas` 与旧的 `projects`/`project` 两个键 —— 这是对外发布过的接口，
+「改个名字就把别人的脚本打死」不该发生。新写的代码请用新的那套。
+
 Agent 的生成走**和点击完全相同的那条路**——同一个作业注册表、同样的素材库、同样的镜头、
 同样的 take 记账，所以「Agent 画的」和「人画的」在数据上无法区分，也不该被区分。
 Agent 不需要浏览器开着（无人值守路径）；若画布有人开着，改动会自动出现。

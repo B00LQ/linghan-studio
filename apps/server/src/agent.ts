@@ -248,10 +248,10 @@ export function createAgentFace(deps: AgentDeps): {
   const project = (input: Record<string, unknown>): string => {
     const requested = text(input.projectId).trim()
     if (requested !== '') {
-      if (deps.store.getProject(requested) === undefined) throw new Error(`项目不存在：${requested}`)
+      if (deps.store.getCanvas(requested) === undefined) throw new Error(`项目不存在：${requested}`)
       return requested
     }
-    const newest = deps.store.listProjects()[0]
+    const newest = deps.store.listCanvases()[0]
     if (newest === undefined) throw new Error('还没有任何项目，先在 Studio 里创建一个')
     return newest.id
   }

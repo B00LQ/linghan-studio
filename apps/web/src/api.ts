@@ -30,7 +30,7 @@ export interface FolderInfo {
 }
 
 /** A creation project: one canvas. */
-export interface ProjectInfo {
+export interface CanvasInfo {
   id: string
   name: string
   /** Owning folder id; empty means "no folder". */
@@ -548,49 +548,49 @@ export const deleteFolder = (folderId: string): Promise<{ ok: boolean }> =>
   request(`/api/folders/${encodeURIComponent(folderId)}`, { method: 'DELETE' })
 
 /** List canvases, newest first; narrow by folder, or read the trash. */
-export const listProjects = (options: { folderId?: string; trashed?: boolean } = {}): Promise<{ projects: ProjectInfo[] }> => {
+export const listCanvases = (options: { folderId?: string; trashed?: boolean } = {}): Promise<{ canvases: CanvasInfo[] }> => {
   const query = new URLSearchParams()
   if (options.folderId !== undefined && options.folderId !== '') query.set('folderId', options.folderId)
   if (options.trashed === true) query.set('trash', '1')
   const suffix = query.toString()
-  return request(`/api/projects${suffix === '' ? '' : `?${suffix}`}`)
+  return request(`/api/canvases${suffix === '' ? '' : `?${suffix}`}`)
 }
 
 /** Create a canvas, optionally filed in a folder. */
-export const createProject = (name: string, folderId?: string): Promise<{ project: ProjectInfo }> =>
-  request('/api/projects', { method: 'POST', body: JSON.stringify({ name, ...(folderId === undefined ? {} : { folderId }) }) })
+export const createCanvas = (name: string, folderId?: string): Promise<{ canvas: CanvasInfo }> =>
+  request('/api/canvases', { method: 'POST', body: JSON.stringify({ name, ...(folderId === undefined ? {} : { folderId }) }) })
 
 /** Rename a canvas. */
-export const renameProject = (projectId: string, name: string): Promise<{ project: ProjectInfo }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+export const renameCanvas = (projectId: string, name: string): Promise<{ canvas: CanvasInfo }> =>
+  request(`/api/canvases/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ name }) })
 
 /** Move a canvas into a folder (empty string unfiles it). */
-export const moveProject = (projectId: string, folderId: string): Promise<{ project: ProjectInfo }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ folderId }) })
+export const moveCanvas = (projectId: string, folderId: string): Promise<{ canvas: CanvasInfo }> =>
+  request(`/api/canvases/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ folderId }) })
 
 /** Set which asset is the canvas's cover (empty string clears it). */
-export const setProjectCover = (projectId: string, coverAssetId: string): Promise<{ project: ProjectInfo }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ coverAssetId }) })
+export const setCanvasCover = (projectId: string, coverAssetId: string): Promise<{ canvas: CanvasInfo }> =>
+  request(`/api/canvases/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ coverAssetId }) })
 
 /** Copy a canvas: same document, fresh node identities, no generation history. */
-export const duplicateProject = (projectId: string): Promise<{ project: ProjectInfo }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}/duplicate`, { method: 'POST' })
+export const duplicateCanvas = (projectId: string): Promise<{ canvas: CanvasInfo }> =>
+  request(`/api/canvases/${encodeURIComponent(projectId)}/duplicate`, { method: 'POST' })
 
 /** Move a canvas to the trash. */
-export const trashProject = (projectId: string): Promise<{ ok: boolean }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+export const trashCanvas = (projectId: string): Promise<{ ok: boolean }> =>
+  request(`/api/canvases/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
 
 /** Take a canvas back out of the trash. */
-export const restoreProject = (projectId: string): Promise<{ project: ProjectInfo }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}/restore`, { method: 'POST' })
+export const restoreCanvas = (projectId: string): Promise<{ canvas: CanvasInfo }> =>
+  request(`/api/canvases/${encodeURIComponent(projectId)}/restore`, { method: 'POST' })
 
 /** Delete a canvas for good. Only offered from the trash. */
-export const purgeProject = (projectId: string): Promise<{ ok: boolean }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}?purge=1`, { method: 'DELETE' })
+export const purgeCanvas = (projectId: string): Promise<{ ok: boolean }> =>
+  request(`/api/canvases/${encodeURIComponent(projectId)}?purge=1`, { method: 'DELETE' })
 
 /** Empty the trash. The server also drops anything older than 30 days on start. */
 export const emptyTrash = (): Promise<{ ok: boolean; removed: number }> =>
-  request('/api/projects?trash=1', { method: 'DELETE' })
+  request('/api/canvases?trash=1', { method: 'DELETE' })
 
 /**
  * Download a set of assets as one archive.
@@ -632,19 +632,19 @@ export const deleteAsset = (assetId: string): Promise<{ ok: boolean }> =>
 
 /** Put assets onto a canvas as picture nodes. */
 export const placeAssets = (projectId: string, ids: string[]): Promise<{ ok: boolean; placed: number }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}/place`, { method: 'POST', body: JSON.stringify({ ids }) })
+  request(`/api/canvases/${encodeURIComponent(projectId)}/place`, { method: 'POST', body: JSON.stringify({ ids }) })
 
 /** Read one project's canvas. */
 export const loadCanvas = (projectId: string): Promise<{ doc: CanvasDoc | null }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}/canvas`)
+  request(`/api/canvases/${encodeURIComponent(projectId)}/doc`)
 
 /** Write one project's canvas. */
 export const saveCanvas = (projectId: string, doc: CanvasDoc): Promise<{ ok: boolean }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}/canvas`, { method: 'PUT', body: JSON.stringify({ doc }) })
+  request(`/api/canvases/${encodeURIComponent(projectId)}/doc`, { method: 'PUT', body: JSON.stringify({ doc }) })
 
 /** Create a shot — the canvas calls this the first time a config node generates. */
 export const createShot = (projectId: string, title: string, prompt: string): Promise<{ shot: ShotInfo }> =>
-  request(`/api/projects/${encodeURIComponent(projectId)}/shots`, {
+  request(`/api/canvases/${encodeURIComponent(projectId)}/shots`, {
     method: 'POST',
     body: JSON.stringify({ title, prompt }),
   })

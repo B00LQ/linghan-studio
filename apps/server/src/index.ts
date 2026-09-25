@@ -80,7 +80,7 @@ const gateway = createGateway({
   onProgress: ({ shotId, progress }) => {
     const shot = store.getShot(shotId)
     if (shot === undefined) return
-    bridge.broadcast(shot.projectId, 'generation_progress', { projectId: shot.projectId, shotId, ...progress })
+    bridge.broadcast(shot.canvasId, 'generation_progress', { projectId: shot.canvasId, shotId, ...progress })
   },
   // 没指定就按顺序取第一套（内置的 z-image），指定了就用用户选的那套。
   resolveWorkflow: (id) => {
@@ -477,6 +477,19 @@ const server = createServer((req, res) => {
     const method = req.method ?? 'GET'
 
     try {
+      /**
+       * 画布（作品）的接口正名（债务第 8 条）：路径是 `/api/canvases`，
+       * 存储层是 `canvas` 表 —— 界面从第一天就说「画布」，代码里不该再叫 `project`。
+       *
+       * **旧路径 `/api/projects` 仍然能用**：这是对外发布过的接口，
+       * 「改个名字就把别人的脚本打死」不该发生。别名在这里统一改写一次，
+       * 下面的处理器一份就够（两套路由迟早会跑偏）。
+       * 只在 URL 层面改写，所以下游（工作流路由、文档路由）一起就正名了。
+       */
+      const canvasPath = pathname.startsWith('/api/projects')
+        ? `/api/canvases${pathname.slice('/api/projects'.length)}`
+        : pathname
+
       if (pathname === '/api/health') {
         json(res, 200, { ok: true, driver: config.imageDriver, clients: bridge.connected() })
         return
@@ -572,7 +585,8 @@ const server = createServer((req, res) => {
       }
 
       // Workspace API.
-      if (await workflowRoutes.handle(req, res, pathname, method)) return
+      // 工作流路由也认正名后的路径（入口处已经把旧名改写掉了）。
+      if (await workflowRoutes.handle(req, res, canvasPath, method)) return
 
       if (pathname === '/api/image-backend' && method === 'GET') {
         json(res, 200, await gateway.backend())
@@ -727,7 +741,8 @@ const server = createServer((req, res) => {
         const projectId = typeof body.projectId === 'string' ? body.projectId : ''
         const nodeId = typeof body.nodeId === 'string' ? body.nodeId : ''
         const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
-        if (store.getProject(projectId) === undefined) {
+        // 查的是**画布实体**，不是文档：一张还没保存过的画布也该能接作业。
+        if (store.getCanvas(projectId) === undefined) {
           json(res, 404, { error: '画布不存在' })
           return
         }
@@ -845,33 +860,39 @@ const server = createServer((req, res) => {
         }
       }
 
-      if (pathname === '/api/projects' && method === 'DELETE') {
-        // 整站清空回收站：`DELETE /api/projects?trash=1`。
+      /**
+       * 画布（作品）的 HTTP 面。
+       *
+       * 路径已在请求入口处从旧名 `/api/projects` 改写成 `/api/canvases`（见那里的说明）。
+       */
+      if (canvasPath === '/api/canvases' && method === 'DELETE') {
+        // 整站清空回收站：`DELETE /api/canvases?trash=1`。
         const purged = store.purgeTrash()
         console.log(`[studio] trash emptied: ${String(purged)} 个画布`)
         json(res, 200, { ok: true, removed: purged })
         return
       }
-      if (pathname === '/api/projects' && method === 'GET') {
+      if (canvasPath === '/api/canvases' && method === 'GET') {
         const folderId = url.searchParams.get('folderId')
         const trashed = url.searchParams.get('trash') === '1'
-        json(res, 200, {
-          projects: store.listProjects({
+        const canvases = store.listCanvases({
             ...(folderId === null || folderId === '' ? {} : { folderId }),
-            ...(trashed ? { trashed: true } : {}),
-          }),
+          ...(trashed ? { trashed: true } : {}),
         })
+        // canvases 是正名后的字段；projects 一起给，旧客户端读得到。
+        json(res, 200, { canvases, projects: canvases })
         return
       }
-      if (pathname === '/api/projects' && method === 'POST') {
+      if (canvasPath === '/api/canvases' && method === 'POST') {
         const body = parseJson(await readText(req))
         const name = typeof body.name === 'string' && body.name.trim() !== '' ? body.name.trim() : '未命名画布'
         const folderId = typeof body.folderId === 'string' && body.folderId !== '' ? body.folderId : undefined
-        json(res, 200, { project: store.createProject(name, folderId) })
+        const canvas = store.createCanvas(name, folderId)
+        json(res, 200, { canvas, project: canvas })
         return
       }
 
-      const projectMatch = /^\/api\/projects\/([^/]+)$/u.exec(pathname)
+      const projectMatch = /^\/api\/canvases\/([^/]+)$/u.exec(canvasPath)
       if (projectMatch !== null && method === 'PATCH') {
         const projectId = decodeURIComponent(projectMatch[1] as string)
         const body = parseJson(await readText(req))
@@ -882,73 +903,77 @@ const server = createServer((req, res) => {
             json(res, 400, { error: '名字不能为空' })
             return
           }
-          if (!store.renameProject(projectId, name)) {
+          if (!store.renameCanvas(projectId, name)) {
             json(res, 404, { error: '画布不存在' })
             return
           }
         }
         if (typeof body.folderId === 'string') {
-          if (!store.moveProject(projectId, body.folderId)) {
+          if (!store.moveCanvas(projectId, body.folderId)) {
             json(res, 404, { error: '画布不存在' })
             return
           }
         }
         if (typeof body.coverAssetId === 'string') {
-          if (!store.setProjectCover(projectId, body.coverAssetId)) {
+          if (!store.setCanvasCover(projectId, body.coverAssetId)) {
             json(res, 404, { error: '画布不存在' })
             return
           }
         }
-        json(res, 200, { project: store.getProject(projectId) })
+        const canvas = store.getCanvas(projectId)
+        json(res, 200, { canvas, project: canvas })
         return
       }
       if (projectMatch !== null && method === 'DELETE') {
         const projectId = decodeURIComponent(projectMatch[1] as string)
         // 默认是**进回收站**，只有显式 purge=1 才真的删。
-        // 「删除项目」是菜单里最容易误点的一项，不该不可撤销。
+        // 「删除画布」是菜单里最容易误点的一项，不该不可撤销。
         const purge = url.searchParams.get('purge') === '1'
-        const done = purge ? store.deleteProject(projectId) : store.trashProject(projectId)
+        const done = purge ? store.deleteCanvas(projectId) : store.trashCanvas(projectId)
         if (!done) {
           json(res, 404, { error: '画布不存在' })
           return
         }
-        console.log(`[studio] project ${purge ? 'purged' : 'trashed'}: ${projectId.slice(0, 8)}`)
+        console.log(`[studio] canvas ${purge ? 'purged' : 'trashed'}: ${projectId.slice(0, 8)}`)
         json(res, 200, { ok: true })
         return
       }
 
-      const duplicateMatch = /^\/api\/projects\/([^/]+)\/duplicate$/u.exec(pathname)
+      const duplicateMatch = /^\/api\/canvases\/([^/]+)\/duplicate$/u.exec(canvasPath)
       if (duplicateMatch !== null && method === 'POST') {
         const projectId = decodeURIComponent(duplicateMatch[1] as string)
-        const copy = store.duplicateProject(projectId)
+        const copy = store.duplicateCanvas(projectId)
         if (copy === undefined) {
           json(res, 404, { error: '画布不存在' })
           return
         }
-        json(res, 200, { project: copy })
+        json(res, 200, { canvas: copy, project: copy })
         return
       }
 
-      const restoreMatch = /^\/api\/projects\/([^/]+)\/restore$/u.exec(pathname)
+      const restoreMatch = /^\/api\/canvases\/([^/]+)\/restore$/u.exec(canvasPath)
       if (restoreMatch !== null && method === 'POST') {
         const projectId = decodeURIComponent(restoreMatch[1] as string)
-        if (!store.restoreProject(projectId)) {
+        if (!store.restoreCanvas(projectId)) {
           json(res, 404, { error: '画布不存在' })
           return
         }
-        json(res, 200, { project: store.getProject(projectId) })
+        const canvas = store.getCanvas(projectId)
+        json(res, 200, { canvas, project: canvas })
         return
       }
 
-      const canvasMatch = /^\/api\/projects\/([^/]+)\/canvas$/u.exec(pathname)
+      // 文档：`/api/canvases/<id>/doc`（旧路径是 `/api/projects/<id>/canvas`，
+      // 由上面那次统一改写照顾到了 —— 所以这里只留正名后的那一个）。
+      const canvasMatch = /^\/api\/canvases\/([^/]+)\/(?:doc|canvas)$/u.exec(canvasPath)
       if (canvasMatch !== null) {
         const projectId = decodeURIComponent(canvasMatch[1] as string)
-        if (store.getProject(projectId) === undefined) {
-          json(res, 404, { error: '项目不存在' })
+        if (store.getCanvas(projectId) === undefined) {
+          json(res, 404, { error: '画布不存在' })
           return
         }
         if (method === 'GET') {
-          const raw = store.getCanvas(projectId)
+          const raw = store.getDoc(projectId)
           let doc: unknown = null
           if (raw !== undefined) {
             try { doc = JSON.parse(raw) } catch { doc = null }
@@ -958,7 +983,7 @@ const server = createServer((req, res) => {
         }
         if (method === 'PUT' || method === 'POST') {
           const body = parseJson(await readText(req))
-          store.saveCanvas(projectId, JSON.stringify(body.doc ?? body))
+          store.saveDoc(projectId, JSON.stringify(body.doc ?? body))
           json(res, 200, { ok: true })
           return
         }
@@ -1298,10 +1323,10 @@ const server = createServer((req, res) => {
       }
 
       // 把素材放到某张画布上（资产页没有画布上下文，所以要显式指定）。
-      const placeMatch = /^\/api\/projects\/([^/]+)\/place$/u.exec(pathname)
+      const placeMatch = /^\/api\/canvases\/([^/]+)\/place$/u.exec(canvasPath)
       if (placeMatch !== null && method === 'POST') {
         const projectId = decodeURIComponent(placeMatch[1] as string)
-        if (store.getProject(projectId) === undefined) {
+        if (store.getCanvas(projectId) === undefined) {
           json(res, 404, { error: '画布不存在' })
           return
         }

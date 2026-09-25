@@ -19,10 +19,10 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  createFolder, createProject, deleteFolder, duplicateProject, emptyTrash, listFolders, listProjects,
-  moveProject, purgeProject, renameFolder, renameProject, restoreProject, setProjectCover,
-  trashProject, loadCanvas,
-  type FolderInfo, type ProjectInfo,
+  createFolder, createCanvas, deleteFolder, duplicateCanvas, emptyTrash, listFolders, listCanvases,
+  moveCanvas, purgeCanvas, renameFolder, renameCanvas, restoreCanvas, setCanvasCover,
+  trashCanvas, loadCanvas,
+  type FolderInfo, type CanvasInfo,
 } from '../api.ts'
 import { Menu, MenuItem } from '../components/Menu.tsx'
 import { ProjectCardMenu } from '../components/ProjectCardMenu.tsx'
@@ -50,10 +50,10 @@ function when(iso: string): string {
  * @returns the projects page.
  */
 export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
-  const [projects, setProjects] = useState<ProjectInfo[]>([])
+  const [projects, setProjects] = useState<CanvasInfo[]>([])
   const [folders, setFolders] = useState<FolderInfo[]>([])
   const [query, setQuery] = useState('')
-  const [cover, setCover] = useState<{ project: ProjectInfo; images: string[] } | null>(null)
+  const [cover, setCover] = useState<{ canvas: CanvasInfo; images: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const search = useSearch()
   const folder = search.get('folder') ?? ''
@@ -61,10 +61,10 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
 
   const reload = useCallback(async (): Promise<void> => {
     const [listed, spaces] = await Promise.all([
-      listProjects(trash ? { trashed: true } : (folder === '' ? {} : { folderId: folder })),
+      listCanvases(trash ? { trashed: true } : (folder === '' ? {} : { folderId: folder })),
       listFolders(),
     ])
-    setProjects(listed.projects)
+    setProjects(listed.canvases)
     setFolders(spaces.folders)
   }, [folder, trash])
 
@@ -72,12 +72,13 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
     void reload().catch(() => { setProjects([]); setFolders([]) })
   }, [reload, refreshToken])
 
-  const createCanvas = async (): Promise<void> => {
+  /** 「新建画布」按钮：建一张空画布，然后跳到它。 */
+  const newCanvas = async (): Promise<void> => {
     setBusy(true)
     try {
-      const created = await createProject(`未命名画布 ${String(projects.length + 1)}`, folder)
+      const created = await createCanvas(`未命名画布 ${String(projects.length + 1)}`, folder)
       onChanged()
-      navigate(`/canvas/${created.project.id}`)
+      navigate(`/canvas/${created.canvas.id}`)
     } finally {
       setBusy(false)
     }
@@ -118,21 +119,21 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
     setRenamingProject(null)
     const trimmed = name.trim()
     if (trimmed === '') return
-    await renameProject(id, trimmed)
+    await renameCanvas(id, trimmed)
     await reload()
     onChanged()
   }, [onChanged, reload])
 
   /** Open the cover picker: the images already on that canvas, and nothing else. */
-  const openCover = async (project: ProjectInfo): Promise<void> => {
+  const openCover = async (project: CanvasInfo): Promise<void> => {
     try {
       const { doc } = await loadCanvas(project.id)
       const images = (doc?.nodes ?? [])
         .map((node) => (node as { data?: { url?: unknown } }).data?.url)
         .filter((url): url is string => typeof url === 'string' && url.startsWith('/api/assets/'))
-      setCover({ project, images })
+      setCover({ canvas: project, images })
     } catch {
-      setCover({ project, images: [] })
+      setCover({ canvas: project, images: [] })
     }
   }
 
@@ -263,7 +264,7 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
             {visible.length === 0 ? null : <span className="count">{visible.length}</span>}
           </h2>
           <div className="card-grid">
-            <button type="button" className="card create-card" disabled={busy} onClick={() => { void createCanvas() }}>
+            <button type="button" className="card create-card" disabled={busy} onClick={() => { void newCanvas() }}>
               <span className="plus" aria-hidden="true">＋</span>
               <span>{busy ? '正在创建…' : inFolder ? '在这里新建画布' : '创建新的项目'}</span>
             </button>
@@ -297,17 +298,17 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
                   onOpen={() => { navigate(`/canvas/${project.id}`) }}
                   onRename={() => { setRenamingProject(project.id); setProjectDraft(project.name) }}
                   onCover={() => { void openCover(project) }}
-                  onDuplicate={() => { void duplicateProject(project.id).then(() => { void reload(); onChanged() }) }}
-                  onMove={(folderId) => { void moveProject(project.id, folderId).then(reload) }}
+                  onDuplicate={() => { void duplicateCanvas(project.id).then(() => { void reload(); onChanged() }) }}
+                  onMove={(folderId) => { void moveCanvas(project.id, folderId).then(reload) }}
                   onDelete={() => {
                     if (project.deletedAt === '') {
-                      void trashProject(project.id).then(() => { void reload(); onChanged() })
+                      void trashCanvas(project.id).then(() => { void reload(); onChanged() })
                       return
                     }
                     if (!window.confirm(`彻底删除「${project.name}」？这一步不能撤销。`)) return
-                    void purgeProject(project.id).then(() => { void reload(); onChanged() })
+                    void purgeCanvas(project.id).then(() => { void reload(); onChanged() })
                   }}
-                  onRestore={() => { void restoreProject(project.id).then(() => { void reload(); onChanged() }) }}
+                  onRestore={() => { void restoreCanvas(project.id).then(() => { void reload(); onChanged() }) }}
                 />
               </article>
             ))}
@@ -338,13 +339,13 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
                   onOpen={() => { navigate(`/canvas/${project.id}`) }}
                   onRename={() => { setRenamingProject(project.id); setProjectDraft(project.name) }}
                   onCover={() => { void openCover(project) }}
-                  onDuplicate={() => { void duplicateProject(project.id).then(() => { void reload(); onChanged() }) }}
-                  onMove={(folderId) => { void moveProject(project.id, folderId).then(reload) }}
+                  onDuplicate={() => { void duplicateCanvas(project.id).then(() => { void reload(); onChanged() }) }}
+                  onMove={(folderId) => { void moveCanvas(project.id, folderId).then(reload) }}
                   onDelete={() => {
                     if (!window.confirm(`彻底删除「${project.name}」？这一步不能撤销。`)) return
-                    void purgeProject(project.id).then(() => { void reload(); onChanged() })
+                    void purgeCanvas(project.id).then(() => { void reload(); onChanged() })
                   }}
-                  onRestore={() => { void restoreProject(project.id).then(() => { void reload(); onChanged() }) }}
+                  onRestore={() => { void restoreCanvas(project.id).then(() => { void reload(); onChanged() }) }}
                 />
               </article>
             ))}
@@ -357,7 +358,7 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
           <div className="studio-menu-scrim" onClick={() => { setCover(null) }} />
           <div className="cover-panel" role="dialog" aria-label="修改封面">
             <header>
-              <strong>给「{cover.project.name}」选封面</strong>
+              <strong>给「{cover.canvas.name}」选封面</strong>
               <button type="button" className="link" onClick={() => { setCover(null) }}>关闭</button>
             </header>
             {cover.images.length === 0
@@ -374,7 +375,7 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
                         title="设为封面"
                         onClick={() => {
                           setCover(null)
-                          void setProjectCover(cover.project.id, assetId).then(() => { void reload(); onChanged() })
+                          void setCanvasCover(cover.canvas.id, assetId).then(() => { void reload(); onChanged() })
                         }}
                       >
                         <SmallImage assetId={assetId} size={320} alt="" />
@@ -383,10 +384,10 @@ export function ProjectsPage({ refreshToken, onChanged }: ProjectsPageProps) {
                   })}
                 </div>
               )}
-            {cover.project.coverAssetId === '' ? null : (
+            {cover.canvas.coverAssetId === '' ? null : (
               <button type="button" onClick={() => {
                 setCover(null)
-                void setProjectCover(cover.project.id, '').then(() => { void reload(); onChanged() })
+                void setCanvasCover(cover.canvas.id, '').then(() => { void reload(); onChanged() })
               }}>移除封面</button>
             )}
           </div>

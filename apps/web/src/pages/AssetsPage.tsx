@@ -12,8 +12,8 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
-  deleteAsset, downloadAssets, listAssetFolders, listAssets, listProjects, placeAssets,
-  type AssetFolderInfo, type ProjectInfo,
+  deleteAsset, downloadAssets, listAssetFolders, listAssets, listCanvases, placeAssets,
+  type AssetFolderInfo, type CanvasInfo,
 } from '../api.ts'
 import { AssetBrowser, type BrowserAsset } from '../components/AssetBrowser.tsx'
 import { Menu, MenuItem } from '../components/Menu.tsx'
@@ -32,15 +32,15 @@ export interface AssetsPageProps {
 export function AssetsPage({ refreshToken }: AssetsPageProps) {
   const [assets, setAssets] = useState<BrowserAsset[]>([])
   const [folders, setFolders] = useState<AssetFolderInfo[]>([])
-  const [projects, setProjects] = useState<ProjectInfo[]>([])
+  const [projects, setProjects] = useState<CanvasInfo[]>([])
   const [notice, setNotice] = useState('')
   /** Ids waiting for the user to pick a canvas. */
   const [pending, setPending] = useState<string[]>([])
 
   const reload = useCallback(async (): Promise<void> => {
-    const [listed, canvases, filed] = await Promise.all([listAssets(), listProjects(), listAssetFolders()])
+    const [listed, canvases, filed] = await Promise.all([listAssets(), listCanvases(), listAssetFolders()])
     setAssets(listed.assets)
-    setProjects(canvases.projects)
+    setProjects(canvases.canvases)
     setFolders(filed.folders)
   }, [])
 

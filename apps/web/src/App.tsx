@@ -7,7 +7,7 @@
  * growing into a junk drawer.
  */
 import { useCallback, useEffect, useState } from 'react'
-import { createProject, fetchSession, login, logout, type SessionInfo } from './api.ts'
+import { createCanvas, fetchSession, login, logout, type SessionInfo } from './api.ts'
 import { AssetsPage } from './pages/AssetsPage.tsx'
 import { CanvasPage } from './pages/CanvasPage.tsx'
 import { HomePage } from './pages/HomePage.tsx'
@@ -52,10 +52,10 @@ export function App() {
   const createAndOpen = useCallback(async () => {
     const tab = window.open('', '_blank')
     try {
-      const created = await createProject('未命名画布')
+      const created = await createCanvas('未命名画布')
       refresh()
-      if (tab === null) navigate(`/canvas/${created.project.id}`)
-      else tab.location.href = `/canvas/${created.project.id}`
+      if (tab === null) navigate(`/canvas/${created.canvas.id}`)
+      else tab.location.href = `/canvas/${created.canvas.id}`
     } catch (problem) {
       tab?.close()
       throw problem

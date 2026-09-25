@@ -51,18 +51,18 @@ export async function apiSession(base, password) {
     call,
     /** Create a canvas, optionally filed in a folder. */
     createProject: async (name, folderId) =>
-      (await call('/api/projects', { method: 'POST', body: JSON.stringify({ name, ...(folderId === undefined ? {} : { folderId }) }) })).json,
+      (await call('/api/canvases', { method: 'POST', body: JSON.stringify({ name, ...(folderId === undefined ? {} : { folderId }) }) })).json,
     /** Create a folder. */
     createFolder: async (name) => (await call('/api/folders', { method: 'POST', body: JSON.stringify({ name }) })).json,
     /** Move a canvas to the trash (or purge it with `purge`). */
     trashProject: async (projectId, purge = false) =>
-      call(`/api/projects/${projectId}${purge ? '?purge=1' : ''}`, { method: 'DELETE' }),
+      call(`/api/canvases/${projectId}${purge ? '?purge=1' : ''}`, { method: 'DELETE' }),
     createShot: async (projectId, title, prompt) =>
-      (await call(`/api/projects/${projectId}/shots`, { method: 'POST', body: JSON.stringify({ title, prompt }) })).json,
+      (await call(`/api/canvases/${projectId}/shots`, { method: 'POST', body: JSON.stringify({ title, prompt }) })).json,
     /** Write a whole canvas document. */
-    putCanvas: async (projectId, doc) => call(`/api/projects/${projectId}/canvas`, { method: 'PUT', body: JSON.stringify({ doc }) }),
+    putCanvas: async (projectId, doc) => call(`/api/canvases/${projectId}/doc`, { method: 'PUT', body: JSON.stringify({ doc }) }),
     /** Read a whole canvas document. */
-    getCanvas: async (projectId) => (await call(`/api/projects/${projectId}/canvas`)).json,
+    getCanvas: async (projectId) => (await call(`/api/canvases/${projectId}/doc`)).json,
     /** Call one Agent tool. */
     agent: async (name, input) => (await call('/api/agent/call', { method: 'POST', body: JSON.stringify({ name, input }) })).json,
   }

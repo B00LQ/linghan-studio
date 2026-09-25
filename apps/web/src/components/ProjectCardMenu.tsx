@@ -6,12 +6,12 @@
  * how "where do I rename this?" becomes a hunt.
  */
 import { Menu, MenuItem } from './Menu.tsx'
-import type { FolderInfo, ProjectInfo } from '../api.ts'
+import type { FolderInfo, CanvasInfo } from '../api.ts'
 
 /** Props for {@link ProjectCardMenu}. */
 export interface ProjectCardMenuProps {
   /** The canvas this menu belongs to. */
-  project: ProjectInfo
+  project: CanvasInfo
   /** Folders available to move into. */
   folders: FolderInfo[]
   /** Open the canvas. */

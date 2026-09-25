@@ -69,8 +69,8 @@ export interface OpResult {
 
 /** Read a project's document, creating an empty one when never saved. */
 export function readDocument(store: StudioStore, projectId: string): CanvasDocument {
-  if (store.getCanvas(projectId) === undefined) return { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } }
-  return readRaw(store.getCanvas(projectId) as string)
+  if (store.getDoc(projectId) === undefined) return { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } }
+  return readRaw(store.getDoc(projectId) as string)
 }
 
 /**
@@ -101,7 +101,7 @@ function readRaw(raw: string): CanvasDocument {
 
 /** Persist a document. */
 export function writeDocument(store: StudioStore, projectId: string, doc: CanvasDocument): void {
-  store.saveCanvas(projectId, JSON.stringify(doc))
+  store.saveDoc(projectId, JSON.stringify(doc))
 }
 
 /** Build one node with the canvas's real shape. */

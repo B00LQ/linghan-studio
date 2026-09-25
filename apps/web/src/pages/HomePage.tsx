@@ -11,8 +11,8 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  duplicateProject, fetchSite, listFolders, listProjects, moveProject, trashProject,
-  type FolderInfo, type ProjectInfo, type SiteContent,
+  duplicateCanvas, fetchSite, listFolders, listCanvases, moveCanvas, trashCanvas,
+  type FolderInfo, type CanvasInfo, type SiteContent,
 } from '../api.ts'
 import { ProjectCardMenu } from '../components/ProjectCardMenu.tsx'
 import { SmallImage } from '../components/SmallImage.tsx'
@@ -40,7 +40,7 @@ function when(iso: string): string {
  */
 export function HomePage({ onCreate, refreshToken }: HomePageProps) {
   const [site, setSite] = useState<SiteContent | null>(null)
-  const [projects, setProjects] = useState<ProjectInfo[]>([])
+  const [projects, setProjects] = useState<CanvasInfo[]>([])
   const [folders, setFolders] = useState<FolderInfo[]>([])
   const [busy, setBusy] = useState(false)
   /** Bumped after an action on a card, to re-read the list. */
@@ -51,7 +51,7 @@ export function HomePage({ onCreate, refreshToken }: HomePageProps) {
     void fetchSite().then(setSite).catch(() => { setSite(null) })
   }, [])
   useEffect(() => {
-    void listProjects().then((result) => { setProjects(result.projects) }).catch(() => { setProjects([]) })
+    void listCanvases().then((result) => { setProjects(result.canvases) }).catch(() => { setProjects([]) })
     void listFolders().then((result) => { setFolders(result.folders) }).catch(() => { setFolders([]) })
   }, [refreshToken, localToken])
 
@@ -118,11 +118,11 @@ export function HomePage({ onCreate, refreshToken }: HomePageProps) {
                     onOpen={() => { navigate(`/canvas/${project.id}`) }}
                     onRename={() => { navigate('/projects') }}
                     onCover={() => { navigate('/projects') }}
-                    onDuplicate={() => { void duplicateProject(project.id).then(refresh) }}
-                    onMove={(folderId) => { void moveProject(project.id, folderId).then(refresh) }}
+                    onDuplicate={() => { void duplicateCanvas(project.id).then(refresh) }}
+                    onMove={(folderId) => { void moveCanvas(project.id, folderId).then(refresh) }}
                     onDelete={() => {
                       if (!window.confirm(`把画布「${project.name}」移到回收站？可以在项目页的回收站里还原。`)) return
-                      void trashProject(project.id).then(refresh)
+                      void trashCanvas(project.id).then(refresh)
                     }}
                   />
                 </article>

@@ -1,7 +1,7 @@
 /**
  * Studio domain store.
  *
- * One SQLite file holds the directing model — projects, canvases, shots, takes —
+ * One SQLite file holds the directing model — canvases, documents, shots, takes —
  * plus the content-addressed asset index. Canvas documents live here rather than
  * in the browser so a project survives a device change and can be shared.
  */
@@ -29,7 +29,7 @@ export interface StudioFolder {
 }
 
 /** A creation project: one canvas. */
-export interface StudioProject {
+export interface StudioCanvas {
   /** Stable project id. */
   id: string
   /** Display name. */
@@ -54,13 +54,13 @@ export interface StudioProject {
   updatedAt: string
 }
 
-/** One shot inside a project. */
+/** One shot inside a canvas. */
 export interface StudioShot {
   /** Stable shot id. */
   id: string
-  /** Owning project id. */
-  projectId: string
-  /** Story order within the project. */
+  /** Owning canvas id. */
+  canvasId: string
+  /** Story order within the canvas. */
   index: number
   /** Short human label. */
   title: string
@@ -200,23 +200,23 @@ export interface StudioStore {
    * List canvases, newest first.
    * @param options - `folderId` narrows to one folder, `trashed` reads the trash.
    */
-  listProjects: (options?: { folderId?: string; trashed?: boolean }) => StudioProject[]
+  listCanvases: (options?: { folderId?: string; trashed?: boolean }) => StudioCanvas[]
   /** Create a canvas, optionally filed in a folder. */
-  createProject: (name: string, folderId?: string) => StudioProject
+  createCanvas: (name: string, folderId?: string) => StudioCanvas
   /** Read a project, or undefined when it does not exist. */
-  getProject: (id: string) => StudioProject | undefined
+  getCanvas: (id: string) => StudioCanvas | undefined
   /** Rename a canvas. Returns false when it does not exist. */
-  renameProject: (id: string, name: string) => boolean
+  renameCanvas: (id: string, name: string) => boolean
   /** Move a canvas into a folder (empty string unfiles it). */
-  moveProject: (id: string, folderId: string) => boolean
+  moveCanvas: (id: string, folderId: string) => boolean
   /** Set a canvas's cover to one of its assets (empty string clears it). */
-  setProjectCover: (id: string, assetId: string) => boolean
+  setCanvasCover: (id: string, assetId: string) => boolean
   /** Copy a canvas: same document, fresh node identities, no generation history. */
-  duplicateProject: (id: string) => StudioProject | undefined
+  duplicateCanvas: (id: string) => StudioCanvas | undefined
   /** Move a canvas to the trash. */
-  trashProject: (id: string) => boolean
+  trashCanvas: (id: string) => boolean
   /** Take a canvas back out of the trash. */
-  restoreProject: (id: string) => boolean
+  restoreCanvas: (id: string) => boolean
   /**
    * Delete trashed canvases for good.
    * @param olderThanDays - when given, only trash older than this many days goes.
@@ -224,17 +224,17 @@ export interface StudioStore {
    */
   purgeTrash: (olderThanDays?: number) => number
   /** Delete a canvas for good. Shots and takes cascade; assets stay. */
-  deleteProject: (id: string) => boolean
+  deleteCanvas: (id: string) => boolean
   /** Read one canvas document, or undefined when never saved. */
-  getCanvas: (projectId: string) => string | undefined
+  getDoc: (canvasId: string) => string | undefined
   /** Write one canvas document. */
-  saveCanvas: (projectId: string, doc: string) => void
+  saveDoc: (canvasId: string, doc: string) => void
   /** Append a shot to a project. */
-  addShot: (projectId: string, title: string, prompt: string) => StudioShot
+  addShot: (canvasId: string, title: string, prompt: string) => StudioShot
   /** Read one shot, or undefined when it does not exist. */
   getShot: (id: string) => StudioShot | undefined
   /** List a project's shots in story order. */
-  listShots: (projectId: string) => StudioShot[]
+  listShots: (canvasId: string) => StudioShot[]
   /** Record one generation attempt. */
   addTake: (input: NewTake) => StudioTake
   /** List a shot's takes, newest first. */
@@ -329,7 +329,7 @@ CREATE TABLE IF NOT EXISTS folder (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS project (
+CREATE TABLE IF NOT EXISTS canvas (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   folder_id TEXT,
@@ -338,21 +338,21 @@ CREATE TABLE IF NOT EXISTS project (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS canvas (
-  project_id TEXT PRIMARY KEY REFERENCES project(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS canvas_doc (
+  canvas_id TEXT PRIMARY KEY REFERENCES canvas(id) ON DELETE CASCADE,
   doc TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS shot (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+  canvas_id TEXT NOT NULL REFERENCES canvas(id) ON DELETE CASCADE,
   idx INTEGER NOT NULL,
   title TEXT NOT NULL,
   prompt TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'draft',
   selected_take_id TEXT
 );
-CREATE INDEX IF NOT EXISTS shot_by_project ON shot(project_id, idx);
+CREATE INDEX IF NOT EXISTS shot_by_canvas ON shot(canvas_id, idx);
 -- 设置页写下来的覆盖值：**键就是环境变量名**（一个东西一个名字，UI 里也说得出「它来自哪」）。
 -- 环境变量仍然有效：存储里的值优先，清掉某一条就退回环境变量/默认值。
 CREATE TABLE IF NOT EXISTS setting (
@@ -440,6 +440,40 @@ function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
 }
 
 /**
+ * 表名正名：`project` → `canvas`，`canvas`（文档）→ `canvas_doc`。
+ *
+ * 债务第 8 条：界面上从第一天就说「画布」，存储层却一直叫 `project` ——
+ * 于是每读一次代码都要在脑子里翻译一遍，而「项目」和「画布」在这个产品里
+ * **本来就是同一个东西**（一张画布就是一个作品）。
+ *
+ * **必须在 `SCHEMA` 之前跑**：SCHEMA 里有 `CREATE TABLE IF NOT EXISTS canvas`，
+ * 而旧库里 `canvas` 正是那张文档表 —— 先建表的话，重命名会撞在一个刚建出来的空表上。
+ * 判定「旧布局」的依据是 `project` 表还在。
+ *
+ * 这是唯一一处会动用户已有数据的迁移，所以先做一份**一致性快照**（`VACUUM INTO`）：
+ * 动别人的作品必须有退路，而这一步只花几毫秒。
+ */
+function migrateNames(db: DatabaseSync, dbPath: string): void {
+  if (!hasTable(db, 'project')) return
+  try {
+    const backup = `${dbPath}.before-canvas-rename`
+    db.exec(`VACUUM INTO '${backup.replace(/'/gu, "''")}'`)
+  } catch (error) {
+    // 备份失败就**不要动**：宁可这次不迁移，也不能在没有退路的情况下改表名。
+    console.log(`[studio] 跳过表名迁移（备份失败）：${String(error)}`)
+    return
+  }
+  // 顺序不能反：先把 `canvas` 这个名字让出来，`project` 才能拿走它。
+  if (hasTable(db, 'canvas') && !hasTable(db, 'canvas_doc')) {
+    db.exec('ALTER TABLE canvas RENAME TO canvas_doc')
+    db.exec('ALTER TABLE canvas_doc RENAME COLUMN project_id TO canvas_id')
+  }
+  db.exec('ALTER TABLE project RENAME TO canvas')
+  db.exec('ALTER TABLE shot RENAME COLUMN project_id TO canvas_id')
+  console.log('[studio] 存储层正名：project → canvas、canvas → canvas_doc（原库已备份为 .before-canvas-rename）')
+}
+
+/**
  * Bring an existing database up to the current schema.
  *
  * Order is the whole story: `CREATE TABLE IF NOT EXISTS` leaves an existing table
@@ -454,12 +488,12 @@ function migrate(db: DatabaseSync): void {
   if (hasTable(db, 'workspace') && !hasTable(db, 'folder')) {
     db.exec('ALTER TABLE workspace RENAME TO folder')
   }
-  if (hasColumn(db, 'project', 'workspace_id') && !hasColumn(db, 'project', 'folder_id')) {
-    db.exec('ALTER TABLE project RENAME COLUMN workspace_id TO folder_id')
+  if (hasColumn(db, 'canvas', 'workspace_id') && !hasColumn(db, 'canvas', 'folder_id')) {
+    db.exec('ALTER TABLE canvas RENAME COLUMN workspace_id TO folder_id')
   }
-  ensureColumn(db, 'project', 'folder_id', 'TEXT')
-  ensureColumn(db, 'project', 'cover_asset_id', "TEXT NOT NULL DEFAULT ''")
-  ensureColumn(db, 'project', 'deleted_at', 'TEXT')
+  ensureColumn(db, 'canvas', 'folder_id', 'TEXT')
+  ensureColumn(db, 'canvas', 'cover_asset_id', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(db, 'canvas', 'deleted_at', 'TEXT')
   ensureColumn(db, 'shot', 'selected_take_id', 'TEXT')
   ensureColumn(db, 'take', 'params_json', "TEXT NOT NULL DEFAULT '{}'")
   ensureColumn(db, 'take', 'seed', 'INTEGER')
@@ -467,7 +501,7 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, 'take', 'error', 'TEXT')
   ensureColumn(db, 'take', 'mark', "TEXT NOT NULL DEFAULT 'none'")
   ensureColumn(db, 'asset', 'folder_id', "TEXT NOT NULL DEFAULT ''")
-  db.exec('CREATE INDEX IF NOT EXISTS project_by_folder ON project(folder_id, updated_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS canvas_by_folder ON canvas(folder_id, updated_at DESC)')
   db.exec('CREATE INDEX IF NOT EXISTS asset_by_folder ON asset(folder_id, created_at DESC)')
 }
 
@@ -479,16 +513,19 @@ function migrate(db: DatabaseSync): void {
 export function openStore(dataDir: string): StudioStore {
   const assetRoot = join(dataDir, 'assets')
   mkdirSync(assetRoot, { recursive: true })
-  const db = new DatabaseSync(join(dataDir, 'studio.sqlite'))
+  const dbPath = join(dataDir, 'studio.sqlite')
+  const db = new DatabaseSync(dbPath)
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA foreign_keys = ON')
+  // 正名在**建表之前**跑（见 migrateNames 的说明）。
+  migrateNames(db, dbPath)
   db.exec(SCHEMA)
   migrate(db)
 
   const now = (): string => new Date().toISOString()
 
-  /** The columns a project row is read from, in one place. */
-  const PROJECT_COLUMNS = 'id, name, folder_id, cover_asset_id, deleted_at, created_at, updated_at'
+  /** The columns a canvas row is read from, in one place. */
+  const CANVAS_COLUMNS = 'id, name, folder_id, cover_asset_id, deleted_at, created_at, updated_at'
 
   /**
    * Pull a random image out of a stored canvas document.
@@ -513,7 +550,7 @@ export function openStore(dataDir: string): StudioStore {
     }
   }
 
-  const readProject = (row: Row): StudioProject => ({
+  const readCanvas = (row: Row): StudioCanvas => ({
     id: text(row, 'id'),
     name: text(row, 'name'),
     folderId: text(row, 'folder_id'),
@@ -528,7 +565,7 @@ export function openStore(dataDir: string): StudioStore {
     listFolders() {
       return (db.prepare(`
         SELECT f.id, f.name, f.created_at, f.updated_at, COUNT(p.id) AS canvas_count
-        FROM folder f LEFT JOIN project p ON p.folder_id = f.id AND p.deleted_at IS NULL
+        FROM folder f LEFT JOIN canvas p ON p.folder_id = f.id AND p.deleted_at IS NULL
         GROUP BY f.id ORDER BY f.created_at
       `).all() as Row[]).map((row) => ({
         id: text(row, 'id'),
@@ -547,7 +584,7 @@ export function openStore(dataDir: string): StudioStore {
     getFolder(id) {
       const row = db.prepare('SELECT id, name, created_at, updated_at FROM folder WHERE id = ?').get(id) as Row | undefined
       if (row === undefined) return undefined
-      const count = db.prepare('SELECT COUNT(*) AS n FROM project WHERE folder_id = ? AND deleted_at IS NULL').get(id) as Row | undefined
+      const count = db.prepare('SELECT COUNT(*) AS n FROM canvas WHERE folder_id = ? AND deleted_at IS NULL').get(id) as Row | undefined
       return {
         id: text(row, 'id'),
         name: text(row, 'name'),
@@ -564,11 +601,11 @@ export function openStore(dataDir: string): StudioStore {
       if (db.prepare('SELECT id FROM folder WHERE id = ?').get(id) === undefined) return false
       // A folder is a label, not a container: deleting it must not take the work
       // inside. The canvases survive and become unfiled.
-      db.prepare("UPDATE project SET folder_id = NULL WHERE folder_id = ?").run(id)
+      db.prepare("UPDATE canvas SET folder_id = NULL WHERE folder_id = ?").run(id)
       db.prepare('DELETE FROM folder WHERE id = ?').run(id)
       return true
     },
-    listProjects(options = {}) {
+    listCanvases(options = {}) {
       const trashed = options.trashed === true
       // The trash is a separate view, never mixed into the working list.
       const where: string[] = [trashed ? 'deleted_at IS NOT NULL' : 'deleted_at IS NULL']
@@ -578,16 +615,16 @@ export function openStore(dataDir: string): StudioStore {
         params.push(options.folderId)
       }
       const order = trashed ? 'deleted_at DESC' : 'updated_at DESC'
-      const rows = db.prepare(`SELECT ${PROJECT_COLUMNS} FROM project WHERE ${where.join(' AND ')} ORDER BY ${order}`).all(...params) as Row[]
+      const rows = db.prepare(`SELECT ${CANVAS_COLUMNS} FROM canvas WHERE ${where.join(' AND ')} ORDER BY ${order}`).all(...params) as Row[]
       return rows.map((row) => {
-        const project = readProject(row)
+        const canvas = readCanvas(row)
         // 没设封面时，从这张画布自己的图里随机挑一张当缩略图。
-        if (project.coverAssetId !== '') return { ...project, previewAssetId: project.coverAssetId }
-        const canvasRow = db.prepare('SELECT doc FROM canvas WHERE project_id = ?').get(project.id) as Row | undefined
-        return { ...project, previewAssetId: previewOf(canvasRow === undefined ? undefined : text(canvasRow, 'doc')) }
+        if (canvas.coverAssetId !== '') return { ...canvas, previewAssetId: canvas.coverAssetId }
+        const docRow = db.prepare('SELECT doc FROM canvas_doc WHERE canvas_id = ?').get(canvas.id) as Row | undefined
+        return { ...canvas, previewAssetId: previewOf(docRow === undefined ? undefined : text(docRow, 'doc')) }
       })
     },
-    createProject(name, folderId) {
+    createCanvas(name, folderId) {
       const stamp = now()
       const id = randomUUID()
       // A folder id that does not exist would hide the canvas from every folder
@@ -595,39 +632,39 @@ export function openStore(dataDir: string): StudioStore {
       const owner = folderId !== undefined && db.prepare('SELECT id FROM folder WHERE id = ?').get(folderId) !== undefined
         ? folderId
         : ''
-      db.prepare('INSERT INTO project (id, name, folder_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(id, name, owner, stamp, stamp)
+      db.prepare('INSERT INTO canvas (id, name, folder_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(id, name, owner, stamp, stamp)
       return { id, name, folderId: owner, coverAssetId: '', deletedAt: '', previewAssetId: '', createdAt: stamp, updatedAt: stamp }
     },
-    getProject(id) {
-      const row = db.prepare(`SELECT ${PROJECT_COLUMNS} FROM project WHERE id = ?`).get(id) as Row | undefined
-      return row === undefined ? undefined : readProject(row)
+    getCanvas(id) {
+      const row = db.prepare(`SELECT ${CANVAS_COLUMNS} FROM canvas WHERE id = ?`).get(id) as Row | undefined
+      return row === undefined ? undefined : readCanvas(row)
     },
-    renameProject(id, name) {
+    renameCanvas(id, name) {
       // `updated_at` moves too: the name is part of the work, and a rename should
       // not look like an edit that never happened in 「最近画布」.
-      const result = db.prepare('UPDATE project SET name = ?, updated_at = ? WHERE id = ?').run(name, now(), id)
+      const result = db.prepare('UPDATE canvas SET name = ?, updated_at = ? WHERE id = ?').run(name, now(), id)
       return Number(result.changes) > 0
     },
-    moveProject(id, folderId) {
+    moveCanvas(id, folderId) {
       const target = folderId !== '' && db.prepare('SELECT id FROM folder WHERE id = ?').get(folderId) !== undefined ? folderId : ''
-      const result = db.prepare('UPDATE project SET folder_id = ?, updated_at = ? WHERE id = ?').run(target === '' ? null : target, now(), id)
+      const result = db.prepare('UPDATE canvas SET folder_id = ?, updated_at = ? WHERE id = ?').run(target === '' ? null : target, now(), id)
       return Number(result.changes) > 0
     },
-    setProjectCover(id, assetId) {
-      const result = db.prepare('UPDATE project SET cover_asset_id = ? WHERE id = ?').run(assetId, id)
+    setCanvasCover(id, assetId) {
+      const result = db.prepare('UPDATE canvas SET cover_asset_id = ? WHERE id = ?').run(assetId, id)
       return Number(result.changes) > 0
     },
-    duplicateProject(id) {
-      const source = this.getProject(id)
+    duplicateCanvas(id) {
+      const source = this.getCanvas(id)
       if (source === undefined) return undefined
       const stamp = now()
       const copyId = randomUUID()
-      db.prepare('INSERT INTO project (id, name, folder_id, cover_asset_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      db.prepare('INSERT INTO canvas (id, name, folder_id, cover_asset_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(copyId, `${source.name} 副本`, source.folderId === '' ? null : source.folderId, source.coverAssetId, stamp, stamp)
       // The document comes along, but every node gets a new identity and loses its
       // generation history: two canvases sharing a shot id would make one canvas's
       // version list change when the other generates.
-      const raw = db.prepare('SELECT doc FROM canvas WHERE project_id = ?').get(id) as Row | undefined
+      const raw = db.prepare('SELECT doc FROM canvas_doc WHERE canvas_id = ?').get(id) as Row | undefined
       if (raw !== undefined) {
         let doc = text(raw, 'doc')
         try {
@@ -657,60 +694,60 @@ export function openStore(dataDir: string): StudioStore {
           // An unparseable document would be copied verbatim; a canvas that opens
           // empty is worse than one that opens exactly as it was.
         }
-        db.prepare('INSERT INTO canvas (project_id, doc, updated_at) VALUES (?, ?, ?)').run(copyId, doc, stamp)
+        db.prepare('INSERT INTO canvas_doc (canvas_id, doc, updated_at) VALUES (?, ?, ?)').run(copyId, doc, stamp)
       }
-      return this.getProject(copyId)
+      return this.getCanvas(copyId)
     },
-    trashProject(id) {
+    trashCanvas(id) {
       // 删除进回收站，不是消失：画布是用户唯一的作品载体，
       // 一次误点不该有不可撤销的后果。
-      const result = db.prepare('UPDATE project SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now(), id)
+      const result = db.prepare('UPDATE canvas SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now(), id)
       return Number(result.changes) > 0
     },
-    restoreProject(id) {
-      const result = db.prepare('UPDATE project SET deleted_at = NULL WHERE id = ?').run(id)
+    restoreCanvas(id) {
+      const result = db.prepare('UPDATE canvas SET deleted_at = NULL WHERE id = ?').run(id)
       return Number(result.changes) > 0
     },
     purgeTrash(olderThanDays) {
       // 回收站不能只进不出：没有期限的话，它会变成第二个「全部项目」。
       if (olderThanDays === undefined) {
-        const result = db.prepare('DELETE FROM project WHERE deleted_at IS NOT NULL').run()
+        const result = db.prepare('DELETE FROM canvas WHERE deleted_at IS NOT NULL').run()
         return Number(result.changes)
       }
       const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString()
-      const result = db.prepare('DELETE FROM project WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff)
+      const result = db.prepare('DELETE FROM canvas WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff)
       return Number(result.changes)
     },
-    deleteProject(id) {
+    deleteCanvas(id) {
       // Canvas, shots and takes cascade (foreign keys are on). Assets do not:
       // they are content-addressed and shared, so one project's deletion must not
       // pull the bytes out from under another project that also references them.
-      const result = db.prepare('DELETE FROM project WHERE id = ?').run(id)
+      const result = db.prepare('DELETE FROM canvas WHERE id = ?').run(id)
       return Number(result.changes) > 0
     },
-    getCanvas(projectId) {
-      const row = db.prepare('SELECT doc FROM canvas WHERE project_id = ?').get(projectId) as Row | undefined
+    getDoc(canvasId) {
+      const row = db.prepare('SELECT doc FROM canvas_doc WHERE canvas_id = ?').get(canvasId) as Row | undefined
       return row === undefined ? undefined : text(row, 'doc')
     },
-    saveCanvas(projectId, doc) {
+    saveDoc(canvasId, doc) {
       const stamp = now()
-      db.prepare('INSERT INTO canvas (project_id, doc, updated_at) VALUES (?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET doc = excluded.doc, updated_at = excluded.updated_at')
-        .run(projectId, doc, stamp)
-      db.prepare('UPDATE project SET updated_at = ? WHERE id = ?').run(stamp, projectId)
+      db.prepare('INSERT INTO canvas_doc (canvas_id, doc, updated_at) VALUES (?, ?, ?) ON CONFLICT(canvas_id) DO UPDATE SET doc = excluded.doc, updated_at = excluded.updated_at')
+        .run(canvasId, doc, stamp)
+      db.prepare('UPDATE canvas SET updated_at = ? WHERE id = ?').run(stamp, canvasId)
     },
-    addShot(projectId, title, prompt) {
-      const row = db.prepare('SELECT COALESCE(MAX(idx), -1) + 1 AS next FROM shot WHERE project_id = ?').get(projectId) as Row | undefined
+    addShot(canvasId, title, prompt) {
+      const row = db.prepare('SELECT COALESCE(MAX(idx), -1) + 1 AS next FROM shot WHERE canvas_id = ?').get(canvasId) as Row | undefined
       const id = randomUUID()
       const index = integer(row ?? {}, 'next')
-      db.prepare('INSERT INTO shot (id, project_id, idx, title, prompt, status) VALUES (?, ?, ?, ?, ?, ?)').run(id, projectId, index, title, prompt, 'draft')
-      return { id, projectId, index, title, prompt, status: 'draft', selectedTakeId: '' }
+      db.prepare('INSERT INTO shot (id, canvas_id, idx, title, prompt, status) VALUES (?, ?, ?, ?, ?, ?)').run(id, canvasId, index, title, prompt, 'draft')
+      return { id, canvasId, index, title, prompt, status: 'draft', selectedTakeId: '' }
     },
     getShot(id) {
-      const row = db.prepare('SELECT id, project_id, idx, title, prompt, status, selected_take_id FROM shot WHERE id = ?').get(id) as Row | undefined
+      const row = db.prepare('SELECT id, canvas_id, idx, title, prompt, status, selected_take_id FROM shot WHERE id = ?').get(id) as Row | undefined
       if (row === undefined) return undefined
       return {
         id: text(row, 'id'),
-        projectId: text(row, 'project_id'),
+        canvasId: text(row, 'canvas_id'),
         index: integer(row, 'idx'),
         title: text(row, 'title'),
         prompt: text(row, 'prompt'),
@@ -718,11 +755,11 @@ export function openStore(dataDir: string): StudioStore {
         selectedTakeId: text(row, 'selected_take_id'),
       }
     },
-    listShots(projectId) {
-      return (db.prepare('SELECT id, project_id, idx, title, prompt, status, selected_take_id FROM shot WHERE project_id = ? ORDER BY idx').all(projectId) as Row[])
+    listShots(canvasId) {
+      return (db.prepare('SELECT id, canvas_id, idx, title, prompt, status, selected_take_id FROM shot WHERE canvas_id = ? ORDER BY idx').all(canvasId) as Row[])
         .map((row) => ({
           id: text(row, 'id'),
-          projectId: text(row, 'project_id'),
+          canvasId: text(row, 'canvas_id'),
           index: integer(row, 'idx'),
           title: text(row, 'title'),
           prompt: text(row, 'prompt'),
@@ -964,7 +1001,7 @@ export function openStore(dataDir: string): StudioStore {
     assetInUse(id) {
       // A canvas document holds `/api/assets/<id>` in its node data, so a LIKE
       // scan answers "is this still on someone's canvas" without a join table.
-      const row = db.prepare("SELECT COUNT(*) AS n FROM canvas WHERE doc LIKE ?").get(`%/api/assets/${id}%`) as Row | undefined
+      const row = db.prepare("SELECT COUNT(*) AS n FROM canvas_doc WHERE doc LIKE ?").get(`%/api/assets/${id}%`) as Row | undefined
       return integer(row ?? {}, 'n') > 0
     },
     updateTakeAsset(takeId, assetId) {
