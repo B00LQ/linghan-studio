@@ -158,6 +158,51 @@ export interface StudioAssetFolder {
   assetCount: number
 }
 
+/**
+ * 一个账号。
+ *
+ * 只在 `cloud` 模式里用（见 `StudioConfig.mode`）：`local` 模式是「一个访问密码」，
+ * 没有也不需要账号。密码哈希用 `scrypt`（`node:crypto`），**不引入任何依赖**。
+ */
+export interface StudioUser {
+  /** Stable user id. */
+  id: string
+  /** Login email, stored lowercase. */
+  email: string
+  /** Display name; empty means "use the part before @". */
+  displayName: string
+  /** `admin` 能进管理后台（M3）；第一个注册的账号自动是 admin。 */
+  role: 'admin' | 'user'
+  /** `banned` 之后不能再登录（会话也一起撤销）。 */
+  status: 'active' | 'banned'
+  /** 邮箱验证时间；空 = 还没验证（能登录，但发布作品要验证，见 M3）。 */
+  emailVerifiedAt: string
+  /** Creation timestamp (ISO-8601). */
+  createdAt: string
+  /** Last successful login, empty before the first one. */
+  lastLoginAt: string
+}
+
+/** 一个登录会话（一台设备）。 */
+export interface StudioSession {
+  /** Stable session id；管理界面用它撤销单台设备。 */
+  id: string
+  /** Owning user. */
+  userId: string
+  /** 设备名（用户自己填的，或者客户端报的）。 */
+  label: string
+  /** Access token 过期时间。 */
+  accessExpiresAt: string
+  /** Refresh token 过期时间。 */
+  refreshExpiresAt: string
+  /** 撤销时间；空 = 还活着。 */
+  revokedAt: string
+  /** Creation timestamp. */
+  createdAt: string
+  /** 最后一次用到它的时间。 */
+  lastSeenAt: string
+}
+
 /** How long generation has actually been taking, for the ETA display. */
 export interface GenerationStats {
   /** Duration samples behind the numbers. */
@@ -329,6 +374,58 @@ export interface StudioStore {
   clearSetting: (key: string) => void
   /** Close the underlying database. */
   close: () => void
+
+  // ── 账号（cloud 模式）────────────────────────────────────────────────────
+  /** 建账号。邮箱重复会抛（`UNIQUE` 约束）——调用方负责先查。 */
+  createUser: (input: { email: string; passwordHash: string; displayName?: string; role?: 'admin' | 'user' }) => StudioUser
+  /** 按邮箱查（大小写不敏感：存的是小写）。 */
+  getUserByEmail: (email: string) => StudioUser | undefined
+  /** 按 id 查。 */
+  getUserById: (id: string) => StudioUser | undefined
+  /**
+   * 读密码哈希。
+   *
+   * **故意单独一个方法**：`StudioUser` 里没有这一列，所以它不会被顺手带到任何接口响应里。
+   * 只有账号层（校验密码）会调它。
+   */
+  getUserPasswordHash: (id: string) => string | undefined
+  /** 有多少个账号（用来判断「第一个注册的是管理员」）。 */
+  countUsers: () => number
+  /** 记一次成功登录。 */
+  touchUserLogin: (userId: string) => void
+  /** 标记邮箱已验证。 */
+  markEmailVerified: (userId: string, at: string) => void
+  /** 改密码（重置密码用）。 */
+  setUserPassword: (userId: string, passwordHash: string) => void
+  /** 列表（管理后台用）。 */
+  listUsers: (limit?: number) => StudioUser[]
+
+  /** 存一次性令牌的哈希（验证邮箱 / 重置密码）。 */
+  createAuthToken: (input: { userId: string; kind: string; tokenHash: string; expiresAt: string }) => void
+  /** 按哈希找未用、未过期的令牌。 */
+  findAuthToken: (kind: string, tokenHash: string, nowIso: string) => { id: string; userId: string } | undefined
+  /** 标记令牌已用（一次性）。 */
+  consumeAuthToken: (id: string, at: string) => void
+
+  /** 建会话（登录）。 */
+  createSession: (input: {
+    userId: string; accessHash: string; refreshHash: string; label: string
+    accessExpiresAt: string; refreshExpiresAt: string
+  }) => StudioSession
+  /** 按访问令牌哈希找会话。 */
+  findSessionByAccess: (accessHash: string) => StudioSession | undefined
+  /** 按刷新令牌哈希找会话。 */
+  findSessionByRefresh: (refreshHash: string) => StudioSession | undefined
+  /** 轮换令牌（刷新即换新的一对）。 */
+  rotateSession: (sessionId: string, input: { accessHash: string; refreshHash: string; accessExpiresAt: string; refreshExpiresAt: string }) => void
+  /** 记一次使用。 */
+  touchSession: (sessionId: string, at: string) => void
+  /** 撤销一个会话。 */
+  revokeSession: (sessionId: string, at: string) => void
+  /** 撤销一个用户的全部会话（改密码、封禁时用）。 */
+  revokeUserSessions: (userId: string, at: string) => void
+  /** 列出某人的会话（管理自己的设备）。 */
+  listSessions: (userId: string) => StudioSession[]
 }
 
 const SCHEMA = `
@@ -399,6 +496,44 @@ CREATE TABLE IF NOT EXISTS asset_folder (
   name TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+-- 账号（只在 cloud 模式用得上；local 模式一个访问密码就够，表空着）。
+CREATE TABLE IF NOT EXISTS user (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'user',
+  status TEXT NOT NULL DEFAULT 'active',
+  email_verified_at TEXT,
+  created_at TEXT NOT NULL,
+  last_login_at TEXT
+);
+-- 一次性令牌：邮箱验证 / 重置密码。**只存哈希**，明文只在邮件里出现一次。
+CREATE TABLE IF NOT EXISTS auth_token (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS auth_token_by_hash ON auth_token(token_hash);
+-- 会话（一个设备一行）：访问令牌与刷新令牌**都只存哈希**，可单独撤销。
+CREATE TABLE IF NOT EXISTS session (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  access_hash TEXT NOT NULL,
+  refresh_hash TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  access_expires_at TEXT NOT NULL,
+  refresh_expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_by_refresh ON session(refresh_hash);
+CREATE INDEX IF NOT EXISTS session_by_user ON session(user_id, created_at DESC);
 `
 
 /** A row as `node:sqlite` hands it back. */
@@ -532,6 +667,39 @@ export function openStore(dataDir: string): StudioStore {
   migrate(db)
 
   const now = (): string => new Date().toISOString()
+
+  /** 一行 user → 领域对象。 */
+  const readUser = (row: Row): StudioUser => {
+    const role = text(row, 'role')
+    const status = text(row, 'status')
+    return {
+      id: text(row, 'id'),
+      email: text(row, 'email'),
+      displayName: text(row, 'display_name'),
+      role: role === 'admin' ? 'admin' : 'user',
+      status: status === 'banned' ? 'banned' : 'active',
+      emailVerifiedAt: text(row, 'email_verified_at'),
+      createdAt: text(row, 'created_at'),
+      lastLoginAt: text(row, 'last_login_at'),
+    }
+  }
+
+  /** 一行 session → 领域对象（**不含令牌哈希**：那两列永远不出存储层）。 */
+  const readSession = (row: Row): StudioSession => ({
+    id: text(row, 'id'),
+    userId: text(row, 'user_id'),
+    label: text(row, 'label'),
+    accessExpiresAt: text(row, 'access_expires_at'),
+    refreshExpiresAt: text(row, 'refresh_expires_at'),
+    revokedAt: text(row, 'revoked_at'),
+    createdAt: text(row, 'created_at'),
+    lastSeenAt: text(row, 'last_seen_at'),
+  })
+
+  /** The columns a user row is read from, in one place. */
+  const USER_COLUMNS = 'id, email, display_name, role, status, email_verified_at, created_at, last_login_at'
+  /** The columns a session row is read from. */
+  const SESSION_COLUMNS = 'id, user_id, label, access_expires_at, refresh_expires_at, revoked_at, created_at, last_seen_at'
 
   /** The columns a canvas row is read from, in one place. */
   const CANVAS_COLUMNS = 'id, name, folder_id, cover_asset_id, deleted_at, created_at, updated_at'
@@ -1058,6 +1226,108 @@ export function openStore(dataDir: string): StudioStore {
     },
     close() {
       db.close()
+    },
+
+    // ── 账号（cloud 模式）──────────────────────────────────────────────────
+    createUser(input) {
+      const id = randomUUID()
+      const stamp = now()
+      const email = input.email.trim().toLowerCase()
+      db.prepare('INSERT INTO user (id, email, password_hash, display_name, role, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, email, input.passwordHash, input.displayName ?? '', input.role ?? 'user', 'active', stamp)
+      return {
+        id,
+        email,
+        displayName: input.displayName ?? '',
+        role: input.role ?? 'user',
+        status: 'active',
+        emailVerifiedAt: '',
+        createdAt: stamp,
+        lastLoginAt: '',
+      }
+    },
+    getUserByEmail(email) {
+      const row = db.prepare(`SELECT ${USER_COLUMNS} FROM user WHERE email = ?`).get(email.trim().toLowerCase()) as Row | undefined
+      return row === undefined ? undefined : readUser(row)
+    },
+    getUserById(id) {
+      const row = db.prepare(`SELECT ${USER_COLUMNS} FROM user WHERE id = ?`).get(id) as Row | undefined
+      return row === undefined ? undefined : readUser(row)
+    },
+    getUserPasswordHash(id) {
+      const row = db.prepare('SELECT password_hash FROM user WHERE id = ?').get(id) as Row | undefined
+      return row === undefined ? undefined : text(row, 'password_hash')
+    },
+    countUsers() {
+      const row = db.prepare('SELECT COUNT(*) AS n FROM user').get() as Row | undefined
+      return integer(row ?? {}, 'n')
+    },
+    touchUserLogin(userId) {
+      db.prepare('UPDATE user SET last_login_at = ? WHERE id = ?').run(now(), userId)
+    },
+    markEmailVerified(userId, at) {
+      db.prepare('UPDATE user SET email_verified_at = ? WHERE id = ?').run(at, userId)
+    },
+    setUserPassword(userId, passwordHash) {
+      db.prepare('UPDATE user SET password_hash = ? WHERE id = ?').run(passwordHash, userId)
+    },
+    listUsers(limit = 200) {
+      return (db.prepare(`SELECT ${USER_COLUMNS} FROM user ORDER BY created_at DESC LIMIT ?`).all(limit) as Row[]).map(readUser)
+    },
+
+    createAuthToken(input) {
+      db.prepare('INSERT INTO auth_token (id, user_id, kind, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(randomUUID(), input.userId, input.kind, input.tokenHash, input.expiresAt, now())
+    },
+    findAuthToken(kind, tokenHash, nowIso) {
+      const row = db.prepare('SELECT id, user_id FROM auth_token WHERE kind = ? AND token_hash = ? AND used_at IS NULL AND expires_at > ?')
+        .get(kind, tokenHash, nowIso) as Row | undefined
+      return row === undefined ? undefined : { id: text(row, 'id'), userId: text(row, 'user_id') }
+    },
+    consumeAuthToken(id, at) {
+      db.prepare('UPDATE auth_token SET used_at = ? WHERE id = ?').run(at, id)
+    },
+
+    createSession(input) {
+      const id = randomUUID()
+      const stamp = now()
+      db.prepare(`INSERT INTO session (id, user_id, access_hash, refresh_hash, label, access_expires_at, refresh_expires_at, created_at, last_seen_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, input.userId, input.accessHash, input.refreshHash, input.label, input.accessExpiresAt, input.refreshExpiresAt, stamp, stamp)
+      return {
+        id,
+        userId: input.userId,
+        label: input.label,
+        accessExpiresAt: input.accessExpiresAt,
+        refreshExpiresAt: input.refreshExpiresAt,
+        revokedAt: '',
+        createdAt: stamp,
+        lastSeenAt: stamp,
+      }
+    },
+    findSessionByAccess(accessHash) {
+      const row = db.prepare(`SELECT ${SESSION_COLUMNS} FROM session WHERE access_hash = ?`).get(accessHash) as Row | undefined
+      return row === undefined ? undefined : readSession(row)
+    },
+    findSessionByRefresh(refreshHash) {
+      const row = db.prepare(`SELECT ${SESSION_COLUMNS} FROM session WHERE refresh_hash = ?`).get(refreshHash) as Row | undefined
+      return row === undefined ? undefined : readSession(row)
+    },
+    rotateSession(sessionId, input) {
+      db.prepare('UPDATE session SET access_hash = ?, refresh_hash = ?, access_expires_at = ?, refresh_expires_at = ?, last_seen_at = ? WHERE id = ?')
+        .run(input.accessHash, input.refreshHash, input.accessExpiresAt, input.refreshExpiresAt, now(), sessionId)
+    },
+    touchSession(sessionId, at) {
+      db.prepare('UPDATE session SET last_seen_at = ? WHERE id = ?').run(at, sessionId)
+    },
+    revokeSession(sessionId, at) {
+      db.prepare('UPDATE session SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(at, sessionId)
+    },
+    revokeUserSessions(userId, at) {
+      db.prepare('UPDATE session SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(at, userId)
+    },
+    listSessions(userId) {
+      return (db.prepare(`SELECT ${SESSION_COLUMNS} FROM session WHERE user_id = ? ORDER BY created_at DESC`).all(userId) as Row[]).map(readSession)
     },
   }
 }

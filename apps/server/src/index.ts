@@ -10,7 +10,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { clearSession, clearThrottle, hasSession, issueSession, passwordMatches, throttle } from './auth.ts'
+import { clearSession, clearThrottle, clearUserCookie, hasSession, issueSession, issueUserCookie, passwordMatches, readUserToken, throttle } from './auth.ts'
 import { createAgentFace } from './agent.ts'
 import { createBridge } from './bridge.ts'
 import { createStudioRegistry } from './workflow/nodes.ts'
@@ -22,6 +22,7 @@ import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
 import { createTextBackend } from './text.ts'
 import { createAudioBackend } from './audio.ts'
+import { createAccounts, createConsoleMailer, createWebhookMailer } from './accounts.ts'
 import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, resetWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
@@ -70,6 +71,21 @@ if (expired > 0) console.log(`[studio] 回收站清理：${String(expired)} 个�
 const setupNeeded = (): boolean => config.password === '' && (settings.STUDIO_SETUP_DONE ?? '') !== '1'
 /** 绿色包的根目录（启动器会设 `STUDIO_HOME`）；Docker/源码运行没有它。 */
 const studioHome = process.env.STUDIO_HOME ?? ''
+
+/**
+ * 账号层（`cloud` 模式）。
+ *
+ * 邮件默认**打到日志**（开发与测试不需要任何外部服务）；配了 `STUDIO_MAIL_WEBHOOK`
+ * 就 POST 给你自己的转发服务。真实邮件服务商留到 M4。
+ */
+const accounts = createAccounts({
+  store,
+  publicUrl: config.publicUrl,
+  mailer: config.mailWebhookUrl === ''
+    ? createConsoleMailer((message) => { console.log(`[studio] ${message}`) })
+    : createWebhookMailer(config.mailWebhookUrl, (message) => { console.log(`[studio] ${message}`) }),
+  log: (message) => { console.log(`[studio] ${message}`) },
+})
 const bridge = createBridge((message) => { console.log(`[studio] ${message}`) })
 const gateway = createGateway({
   config,
@@ -389,6 +405,43 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload))
 }
 
+/** 把用户可控的文本塞进 HTML 之前转义（这两页会回显服务端的错误信息）。 */
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/gu, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character] ?? character))
+}
+
+/**
+ * 极简 HTML 页（邮箱验证 / 重置密码用）。
+ *
+ * 刻意不引入模板：这两页只服务一封邮件里的链接，样式跟着品牌色走就行。
+ * @param title - 页面标题与主标题。
+ * @param body - 已经拼好的正文（**调用方负责转义**）。
+ * @returns 完整的 HTML 文本。
+ */
+function htmlPage(title: string, body: string): string {
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escapeHtml(title)} · LINGHAN Studio</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0d12; color: #e8ecf4;
+         font: 14px/1.7 system-ui, "Microsoft YaHei", sans-serif; }
+  .card { width: min(420px, 90vw); padding: 28px; background: #141821; border: 1px solid #263041; border-radius: 14px; }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  p { margin: 0 0 10px; }
+  .muted { color: #8b97a8; font-size: 13px; }
+  .ok { color: #7ad1a3; } .bad { color: #ff8f8f; }
+  input { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 9px 10px; border-radius: 8px;
+          border: 1px solid #263041; background: #0b0d12; color: #e8ecf4; font-size: 14px; }
+  button { width: 100%; padding: 10px; border: 0; border-radius: 8px; background: #7aa2ff; color: #0b0d12;
+           font-size: 14px; font-weight: 600; cursor: pointer; }
+</style></head>
+<body><div class="card"><h1>${escapeHtml(title)}</h1>${body}</div></body></html>`
+}
+
 /** Read a request body as text, bounded to 16 MiB. */
 async function readText(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = []
@@ -491,7 +544,239 @@ const server = createServer((req, res) => {
         : pathname
 
       if (pathname === '/api/health') {
-        json(res, 200, { ok: true, driver: config.imageDriver, clients: bridge.connected() })
+        json(res, 200, { ok: true, mode: config.mode, driver: config.imageDriver, clients: bridge.connected() })
+        return
+      }
+
+      /**
+       * 账号接口（`cloud` 模式）。
+       *
+       * 全部在 `/api/v1/auth/` 下：这是**对外发布的接口**（桌面端会带着它发出去），
+       * 所以从第一天就带版本号 —— 以后加字段、改行为都得留在 v1 里往下兼容。
+       *
+       * 会话有两种携带方式，同一套服务端：
+       * - 网页端：httpOnly cookie（`studio_user`），未登录跳登录页；
+       * - 桌面端：`Authorization: Bearer <accessToken>`，刷新用 body 里的 refreshToken。
+       */
+      if (config.mode === 'cloud' && pathname.startsWith('/api/v1/auth/')) {
+        const route = pathname.slice('/api/v1/auth/'.length)
+        const body = method === 'POST' ? parseJson(await readText(req)) : {}
+        /** 从 cookie 或 Bearer 里取访问令牌。 */
+        const accessTokenOf = (): string => {
+          const header = req.headers.authorization ?? ''
+          if (header.toLowerCase().startsWith('bearer ')) return header.slice(7).trim()
+          return readUserToken(req, config.cookieSecret) ?? ''
+        }
+        const publicUser = (user: { id: string; email: string; displayName: string; role: string; emailVerifiedAt: string; createdAt: string; lastLoginAt: string }): Record<string, unknown> => ({
+          id: user.id,
+          email: user.email,
+          displayName: user.displayName,
+          role: user.role,
+          emailVerified: user.emailVerifiedAt !== '',
+          createdAt: user.createdAt,
+          lastLoginAt: user.lastLoginAt,
+        })
+
+        if (route === 'register' && method === 'POST') {
+          const result = await accounts.register({
+            email: typeof body.email === 'string' ? body.email : '',
+            password: typeof body.password === 'string' ? body.password : '',
+            ...(typeof body.displayName === 'string' && body.displayName !== '' ? { displayName: body.displayName } : {}),
+          })
+          if ('message' in result) {
+            json(res, result.status, { error: result.message })
+            return
+          }
+          // 注册完直接给会话：让「注册→验证邮箱」之间不用再登录一次。
+          const tokens = (await accounts.login({
+            email: result.user.email,
+            password: typeof body.password === 'string' ? body.password : '',
+            label: req.headers['user-agent']?.slice(0, 60) ?? '',
+          }))
+          if ('message' in tokens) {
+            json(res, 200, { user: publicUser(result.user), verificationSent: true })
+            return
+          }
+          issueUserCookie(res, tokens.tokens.accessToken, config.cookieSecret, secureCookies)
+          json(res, 200, { user: publicUser(tokens.user), tokens: tokens.tokens, verificationSent: true })
+          return
+        }
+
+        if (route === 'login' && method === 'POST') {
+          const address = req.socket.remoteAddress ?? 'unknown'
+          // 限流按「来源地址」：按邮箱限流会让攻击者用别人的邮箱把对方锁在门外。
+          if (throttle(address)) {
+            json(res, 429, { error: '尝试过于频繁，请稍后再试' })
+            return
+          }
+          const result = await accounts.login({
+            email: typeof body.email === 'string' ? body.email : '',
+            password: typeof body.password === 'string' ? body.password : '',
+            label: typeof body.label === 'string' && body.label !== '' ? body.label : (req.headers['user-agent']?.slice(0, 60) ?? ''),
+          })
+          if ('message' in result) {
+            json(res, result.status, { error: result.message })
+            return
+          }
+          clearThrottle(address)
+          issueUserCookie(res, result.tokens.accessToken, config.cookieSecret, secureCookies)
+          json(res, 200, { user: publicUser(result.user), tokens: result.tokens })
+          return
+        }
+
+        if (route === 'refresh' && method === 'POST') {
+          const result = await accounts.refresh(typeof body.refreshToken === 'string' ? body.refreshToken : '')
+          if ('message' in result) {
+            json(res, result.status, { error: result.message })
+            return
+          }
+          issueUserCookie(res, result.tokens.accessToken, config.cookieSecret, secureCookies)
+          json(res, 200, { user: publicUser(result.user), tokens: result.tokens })
+          return
+        }
+
+        if (route === 'logout' && method === 'POST') {
+          const token = typeof body.refreshToken === 'string' && body.refreshToken !== '' ? body.refreshToken : accessTokenOf()
+          accounts.logout(token)
+          clearUserCookie(res)
+          json(res, 200, { ok: true })
+          return
+        }
+
+        if (route === 'me' && method === 'GET') {
+          const user = accounts.me(accessTokenOf())
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          json(res, 200, { user: publicUser(user) })
+          return
+        }
+
+        if (route === 'verify-email' && method === 'POST') {
+          const result = await accounts.verifyEmail(typeof body.token === 'string' ? body.token : '')
+          if ('message' in result) {
+            json(res, result.status, { error: result.message })
+            return
+          }
+          json(res, 200, { user: publicUser(result) })
+          return
+        }
+
+        if (route === 'resend-verification' && method === 'POST') {
+          await accounts.resendVerification(typeof body.email === 'string' ? body.email : '')
+          // 无论邮箱存不存在都回同一句：这个接口不该变成「查邮箱是否注册过」的工具。
+          json(res, 200, { ok: true, note: '如果这个邮箱注册过且还没验证，验证邮件已经发出' })
+          return
+        }
+
+        if (route === 'forgot-password' && method === 'POST') {
+          await accounts.requestPasswordReset(typeof body.email === 'string' ? body.email : '')
+          json(res, 200, { ok: true, note: '如果这个邮箱注册过，重置邮件已经发出（1 小时内有效）' })
+          return
+        }
+
+        if (route === 'reset-password' && method === 'POST') {
+          const result = await accounts.resetPassword(
+            typeof body.token === 'string' ? body.token : '',
+            typeof body.password === 'string' ? body.password : '',
+          )
+          if ('message' in result) {
+            json(res, result.status, { error: result.message })
+            return
+          }
+          clearUserCookie(res)
+          json(res, 200, { ok: true, note: '密码已改，所有设备都需要重新登录' })
+          return
+        }
+
+        if (route === 'sessions' && method === 'GET') {
+          const user = accounts.me(accessTokenOf())
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          json(res, 200, {
+            sessions: accounts.listSessions(user.id).map((session) => ({
+              id: session.id,
+              label: session.label,
+              createdAt: session.createdAt,
+              lastSeenAt: session.lastSeenAt,
+              expiresAt: session.refreshExpiresAt,
+              revoked: session.revokedAt !== '',
+            })),
+          })
+          return
+        }
+
+        const sessionRevoke = /^sessions\/([^/]+)$/u.exec(route)
+        if (sessionRevoke !== null && method === 'DELETE') {
+          const user = accounts.me(accessTokenOf())
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          const ok = accounts.revokeSession(user.id, decodeURIComponent(sessionRevoke[1] as string))
+          json(res, ok ? 200 : 404, ok ? { ok: true } : { error: '没有这个会话' })
+          return
+        }
+
+        json(res, 404, { error: `未知的账号接口 ${method} ${pathname}` })
+        return
+      }
+
+      /**
+       * cloud 模式**没有**画布、素材、算力、作业 —— 那些东西只在用户自己的机器上
+       * （见 docs/19）。所以这里明确回 404 并说清原因，
+       * 而不是「能访问但永远是空的」：后者会让人以为是 bug。
+       */
+      if (config.mode === 'cloud' && (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) && pathname !== '/api/health') {
+        json(res, 404, { error: '这是服务器端（cloud 模式）：画布、素材与算力都在你自己的桌面端里，不在这台服务器上' })
+        return
+      }
+
+      /**
+       * 邮件里那两个链接落到的页面（`/verify-email`、`/reset-password`）。
+       *
+       * 为什么在这里手写两页 HTML 而不是等前端：**邮件链接必须点开就能用**。
+       * 等 SPA 里做页面（M3）意味着 M1 的验证邮件点开是「页面不存在」——那种半成品比没有更糟。
+       * 这两页只有几十行、零依赖；M3 做正式页面时把它们换掉即可。
+       */
+      if (config.mode === 'cloud' && method === 'GET' && (pathname === '/verify-email' || pathname === '/reset-password')) {
+        const token = url.searchParams.get('token') ?? ''
+        if (pathname === '/verify-email') {
+          const result = await accounts.verifyEmail(token)
+          const ok = !('message' in result)
+          res.writeHead(ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(htmlPage(ok ? '邮箱已验证' : '链接无效', ok
+            ? '<p class="ok">邮箱验证成功，可以关掉这个页面回到应用了。</p>'
+            : `<p class="bad">${escapeHtml('message' in result ? result.message : '')}</p><p class="muted">验证链接 1 小时内有效、且只能用一次；需要的话在应用里重新发一封。</p>`))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(htmlPage('设置新密码', `
+          <p class="muted">设置一个新密码（至少 8 位）。改完所有设备都要重新登录。</p>
+          <input id="password" type="password" placeholder="新密码" autocomplete="new-password" />
+          <input id="repeat" type="password" placeholder="再说一遍" autocomplete="new-password" />
+          <button id="submit">设置新密码</button>
+          <p id="result" class="muted"></p>
+          <script>
+            const token = ${JSON.stringify(token)};
+            document.getElementById('submit').addEventListener('click', async () => {
+              const password = document.getElementById('password').value;
+              const repeat = document.getElementById('repeat').value;
+              const out = document.getElementById('result');
+              if (password !== repeat) { out.className = 'bad'; out.textContent = '两次输入的密码不一样'; return; }
+              out.className = 'muted'; out.textContent = '正在提交…';
+              const response = await fetch('/api/v1/auth/reset-password', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ token, password }),
+              });
+              const body = await response.json().catch(() => ({}));
+              if (response.ok) { out.className = 'ok'; out.textContent = '密码已改，所有设备都需要重新登录。可以关掉这个页面了。'; }
+              else { out.className = 'bad'; out.textContent = body.error || ('失败：HTTP ' + response.status); }
+            });
+          </script>`))
         return
       }
 

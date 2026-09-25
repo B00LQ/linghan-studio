@@ -5,6 +5,18 @@ import { join, resolve } from 'node:path'
 
 /** Fully resolved server configuration. */
 export interface StudioConfig {
+  /**
+   * 运行模式。
+   *
+   * - `local`（默认）：今天这套 —— 画布、素材、算力、作业都在本机，一个访问密码。
+   *   桌面端自带的那份服务、自托管的人用的都是它。
+   * - `cloud`：服务器上的那一份 —— **只有账号**（M1），以后加作品与主页（M3）。
+   *   画布类接口在 cloud 模式下**明确不可用**（那些东西只在用户机器上）。
+   *
+   * 为什么不是一个开关切换两套代码：两种模式共用存储层、配置与 HTTP 脚手架，
+   * 分叉只发生在「暴露哪些路由」这一层。
+   */
+  mode: StudioMode
   /** HTTP port. */
   port: number
   /** Bind host. */
@@ -27,7 +39,20 @@ export interface StudioConfig {
   cookieSecret: string
   /** 更新源清单地址（绿色包自助更新用）；空串 = 没有更新源。 */
   updateUrl: string
+  /** 对外可访问的地址，用于邮件里的验证/重置链接；空串时按 `http://127.0.0.1:<port>` 推。 */
+  publicUrl: string
+  /**
+   * 邮件转发地址（webhook）。
+   *
+   * 空串 = **把邮件打到日志里**（开发与测试用，不需要任何外部服务）。
+   * 配了就把 `{to, subject, text}` POST 过去，由你自己的转发服务去发 ——
+   * 真实服务商（阿里云邮件推送 / SES / SMTP）留到 M4 再接，那时也能拿真凭据测。
+   */
+  mailWebhookUrl: string
 }
+
+/** 运行模式。 */
+export type StudioMode = 'local' | 'cloud'
 
 /**
  * 设置页能改的东西。
@@ -136,8 +161,12 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
   const password = pick('STUDIO_PASSWORD')
   const dataDir = pick('STUDIO_DATA_DIR')
   const driver = pick('STUDIO_IMAGE_DRIVER')
+  const mode = pick('STUDIO_MODE')
+  const port = intEnv('PORT', previous?.port ?? 8080)
   return {
-    port: intEnv('PORT', previous?.port ?? 8080),
+    // 只有显式写了 `cloud` 才是云模式：一个拼错的变量名不该悄悄把路由换成另一套。
+    mode: mode === 'cloud' ? 'cloud' : 'local',
+    port,
     host: process.env.HOST?.trim() || previous?.host || '0.0.0.0',
     password,
     dataDir: resolve(dataDir !== '' ? dataDir : join(homedir(), '.studio')),
@@ -151,6 +180,8 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
     // **重解析时要沿用旧的那个**：否则改一次设置就把所有人踢下线。
     cookieSecret: pick('STUDIO_SECRET') || previous?.cookieSecret || randomBytes(32).toString('base64url'),
     updateUrl: pick('STUDIO_UPDATE_URL'),
+    publicUrl: pick('STUDIO_PUBLIC_URL'),
+    mailWebhookUrl: pick('STUDIO_MAIL_WEBHOOK'),
   }
 }
 

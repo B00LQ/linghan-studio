@@ -111,3 +111,42 @@ export function issueSession(res: ServerResponse, secret: string, secure: boolea
 export function clearSession(res: ServerResponse): void {
   res.setHeader('set-cookie', `${SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0`)
 }
+
+/** 账号会话的 cookie 名。**和访问密码那个分开**：两套身份不该共用一个名字。 */
+export const USER_COOKIE = 'studio_user'
+
+/** 给一个值签名（`值.签名`），用于把「账号的访问令牌」放进 cookie。 */
+export function signValue(secret: string, value: string): string {
+  return `${value}.${createHmac('sha256', secret).update(value).digest('base64url')}`
+}
+
+/**
+ * 校验并取出签名过的值。
+ * @param secret - cookie signing secret.
+ * @param signed - `值.签名`。
+ * @returns the value, or undefined when the signature does not match.
+ */
+export function verifyValue(secret: string, signed: string): string | undefined {
+  const index = signed.lastIndexOf('.')
+  if (index <= 0) return undefined
+  const value = signed.slice(0, index)
+  const expected = createHmac('sha256', secret).update(value).digest('base64url')
+  return equals(signed.slice(index + 1), expected) ? value : undefined
+}
+
+/** 读出账号会话里的访问令牌（网页端用 cookie，桌面端用 Bearer —— 这里只管 cookie）。 */
+export function readUserToken(req: IncomingMessage, secret: string): string | undefined {
+  const raw = readCookie(req, USER_COOKIE)
+  return raw === undefined ? undefined : verifyValue(secret, raw)
+}
+
+/** 写账号会话 cookie。 */
+export function issueUserCookie(res: ServerResponse, token: string, secret: string, secure: boolean): void {
+  const value = encodeURIComponent(signValue(secret, token))
+  res.setHeader('set-cookie', `${USER_COOKIE}=${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${String(SESSION_TTL_MS / 1000)}${secure ? '; Secure' : ''}`)
+}
+
+/** 清账号会话 cookie。 */
+export function clearUserCookie(res: ServerResponse): void {
+  res.setHeader('set-cookie', `${USER_COOKIE}=; HttpOnly; Path=/; Max-Age=0`)
+}

@@ -32,6 +32,9 @@ const SUITES = [
   { name: 'text', script: 'text-test.mjs', args: [] },
   { name: 'audio', script: 'audio-test.mjs', args: [] },
   { name: 'workflow-engine', script: 'workflow-engine-test.mjs', args: [] },
+  // 账号（M1）：自己起一个 **cloud 模式**的临时实例（不需要浏览器、不需要邮箱服务），
+  // 验注册/登录/会话轮换/邮箱验证/重置密码，以及「库里只存哈希」。
+  { name: 'accounts', script: 'accounts-test.mjs', args: [] },
   { name: 'workflow-api', script: 'workflow-api-test.mjs', args: [BASE, PASSWORD] },
   { name: 'take-pipeline', script: 'take-pipeline-test.mjs', args: [BASE, PASSWORD] },
   { name: 'agent-canvas', script: 'agent-canvas-test.mjs', args: [BASE, PASSWORD] },
