@@ -17,7 +17,7 @@ import { createBridge } from './bridge.ts'
 import { createStudioRegistry } from './workflow/nodes.ts'
 import { createWorkflowRoutes } from './workflow/routes.ts'
 import { loadConfig, SETTINGS, settingsView } from './config.ts'
-import { decodePng, downscale, encodePng, thumbnail } from './png.ts'
+import { decodePng, downscale, encodePng, tagPng, thumbnail } from './png.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
@@ -25,6 +25,9 @@ import { createTextBackend } from './text.ts'
 import { createAudioBackend } from './audio.ts'
 import { createAccounts, createConsoleMailer, createWebhookMailer } from './accounts.ts'
 import { applyPendingRestore, createBackups } from './backup.ts'
+import { createDegrade } from './degrade.ts'
+import { createModeration } from './moderation.ts'
+import { clientIp, createRateLimiter, type RateLimitRule } from './ratelimit.ts'
 import { adminPage, galleryPage, readSnapshot, workPage } from './cloud-pages.ts'
 import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
@@ -105,16 +108,36 @@ const accounts = createAccounts({
 const backups = createBackups({ dataDir: config.dataDir, log: (message) => { console.log(`[studio] ${message}`) } })
 if ((settings.STUDIO_BACKUP_DIR ?? '') !== '') backups.setDir(settings.STUDIO_BACKUP_DIR as string)
 const runDailyBackup = (): void => {
-  // 只备份「自己管自己数据」的那种部署：cloud 模式下这个进程没有画布与素材。
-  if (config.mode !== 'local') return
+  // **两种模式都要备份**：cloud 模式曾经"没有自己的数据"（只有账号表），
+  // 现在它装着所有人的作品与上传的素材 —— 这台机器坏了，主页就没了。
   if (!backups.dueForDaily()) return
   const result = backups.run('每天自动')
   if (typeof result === 'string') console.log(`[studio] 自动备份失败：${result}`)
 }
-if (config.mode === 'local') {
-  setTimeout(runDailyBackup, 8_000)
-  setInterval(runDailyBackup, 6 * 60 * 60 * 1000)
-}
+setTimeout(runDailyBackup, 8_000)
+setInterval(runDailyBackup, 6 * 60 * 60 * 1000)
+
+/**
+ * 限流（M4）：公网上的写接口各配一条窗口。
+ *
+ * 登录那条不在这里 —— `auth.ts` 里的 `throttle()` 已经在按来源地址管它，
+ * 而且它按**地址**而不是按邮箱，免得攻击者拿别人的邮箱把对方锁在门外。
+ */
+const limiter = createRateLimiter()
+
+/**
+ * 只读降级（M4）：人为开关 + 磁盘自检。
+ *
+ * 自动触发（可用空间 < 200 MB）是有意为之：素材把盘写满是这套东西最可能的死法，
+ * 而"写一半失败"比"明确拒绝"难收拾得多。
+ */
+const degrade = createDegrade({ dataDir: config.dataDir, forced: config.readonly })
+
+/** 机审预筛（M4）：没配就跳过，配了就把明显不该过的挡在人工审核之前。 */
+const moderator = createModeration(
+  { url: config.moderationUrl, key: config.moderationKey, failClosed: config.moderationFailClosed },
+  (message) => { console.log(`[studio] ${message}`) },
+)
 
 /** 正在进行的「绑定账号」流程的 state（一次一个，够用）。 */
 let pendingCloudState = ''
@@ -805,6 +828,18 @@ function kindOfMime(mime: string): string {
   return 'text'
 }
 
+/**
+ * 写进 PNG 元数据的 AI 生成标识（合规，M4）。
+ *
+ * 只用 ASCII：tEXt 块按规范就是 latin1，中文在这里会被悄悄改写成乱码，
+ * 而"文件里躺着一段乱码"比"没有标识"更像事故。人看的那行中文在作品页上。
+ */
+const AI_LABEL_TEXT: Record<string, string> = {
+  'AI-Generated': 'true',
+  Software: 'LINGHAN Studio',
+  Comment: 'AI-generated content. Labeled per AIGC labeling requirements.',
+}
+
 /** Parse a JSON object body. */
 function parseJson(text: string): Record<string, unknown> {
   try {
@@ -882,8 +917,49 @@ const server = createServer((req, res) => {
         : pathname
 
       if (pathname === '/api/health') {
-        json(res, 200, { ok: true, mode: config.mode, driver: config.imageDriver, clients: bridge.connected() })
+        const state = degrade.state()
+        json(res, 200, {
+          ok: true, mode: config.mode, driver: config.imageDriver, clients: bridge.connected(),
+          // 只读状态放进健康检查：监控只要看这一个地址就知道站点是不是"活着但不收东西了"。
+          readonly: state.readonly,
+          ...(state.readonly ? { readonlyReason: state.reason } : {}),
+          ...(state.freeMb >= 0 ? { freeMb: state.freeMb } : {}),
+        })
         return
+      }
+
+      /**
+       * 只读降级闸门（M4）。
+       *
+       * 白名单是**故意的**：登录、刷新会话、备份与恢复必须活着。
+       * 一个进不去、也救不回来的只读模式，等于把运维锁在门外。
+       */
+      if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+        const state = degrade.state()
+        const alive = /^\/api\/(login|logout)$/u.test(pathname)
+          || /^\/api\/v1\/auth\/(login|refresh|logout)$/u.test(pathname)
+          || pathname.startsWith('/api/backup')
+        if (state.readonly && !alive) {
+          res.setHeader('retry-after', '120')
+          json(res, 503, { error: `服务现在只读：${state.reason}`, readonly: true })
+          return
+        }
+      }
+
+      /** 这次请求的来源地址（只在明确配了反代时才信 `x-forwarded-for`）。 */
+      const origin = clientIp(req.headers, req.socket.remoteAddress, config.trustProxy)
+      /**
+       * 记一次并判定。
+       * @param scope - 限流桶的名字（不同接口各自一套额度）。
+       * @param rule - 窗口与上限。
+       * @returns 该不该拒（拒的时候响应已经写好了）。
+       */
+      const overLimit = (scope: string, rule: RateLimitRule): boolean => {
+        const decision = limiter.hit(`${scope}:${origin}`, rule)
+        if (decision.ok) return false
+        res.setHeader('retry-after', String(decision.retryAfterSec))
+        json(res, 429, { error: `操作太频繁了，${String(decision.retryAfterSec)} 秒后再试`, retryAfterSec: decision.retryAfterSec })
+        return true
       }
 
       /**
@@ -916,6 +992,8 @@ const server = createServer((req, res) => {
         })
 
         if (route === 'register' && method === 'POST') {
+          // 注册是公网上的写入口：一个脚本能拿它把用户表塞满、把发信额度烧光。
+          if (overLimit('register', { windowMs: 3_600_000, max: 5 })) return
           const result = await accounts.register({
             email: typeof body.email === 'string' ? body.email : '',
             password: typeof body.password === 'string' ? body.password : '',
@@ -1131,7 +1209,8 @@ const server = createServer((req, res) => {
        */
       if (config.mode === 'cloud' && method === 'GET' && pathname === '/') {
         const viewer = accounts.me(readUserToken(req, config.cookieSecret) ?? bearer(req) ?? '')
-        const works = store.listWorks({ status: 'approved' })
+        // 主页只列**公开且已通过**的：私密作品是"只给自己的云备份"，出现在主页上就是泄露。
+        const works = store.listWorks({ status: 'approved', visibility: 'public' })
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
         res.end(galleryPage(works.map((work) => ({
           id: work.id,
@@ -1171,7 +1250,19 @@ const server = createServer((req, res) => {
           return
         }
         const mineOrAdmin = viewer !== undefined && (viewer.id === work.userId || viewer.role === 'admin')
-        if (work.status !== 'approved' && !mineOrAdmin) {
+        /**
+         * 私密作品（M5 私人云备份）**只有作者与管理员**打得开。
+         *
+         * 管理员也算「打得开」是有意的：这一页同时也是处置滥用的入口，
+         * 把内容对运维藏起来只会让"有人拿它存违法内容"变成看不见的问题。
+         * 作者那边的承诺仍然成立：**不进主页、不进审核队列、别人拿不到链接**。
+         */
+        if (work.visibility === 'private' && !mineOrAdmin) {
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(htmlPage('作品不存在', '<p class="muted">这个链接可能已经失效。</p>'))
+          return
+        }
+        if (work.status !== 'approved' && work.visibility !== 'private' && !mineOrAdmin) {
           res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
           res.end(htmlPage('作品不存在', '<p class="muted">这件作品还没通过审核，或者已经下架了。</p>'))
           return
@@ -1187,10 +1278,12 @@ const server = createServer((req, res) => {
           })),
           edges: snapshot.edges,
         }
-        const notice = work.status === 'approved' ? ''
-          : work.status === 'pending' ? '这件作品还在待审：只有你和管理员看得到。'
-            : work.status === 'rejected' ? `没有通过审核${work.reviewNote === '' ? '' : `：${work.reviewNote}`}`
-              : `已下架${work.reviewNote === '' ? '' : `：${work.reviewNote}`}`
+        const notice = work.visibility === 'private'
+          ? '这是你的私密备份：只有你能看到，它不会出现在主页上。'
+          : work.status === 'approved' ? ''
+            : work.status === 'pending' ? '这件作品还在待审：只有你和管理员看得到。'
+              : work.status === 'rejected' ? `没有通过审核${work.reviewNote === '' ? '' : `：${work.reviewNote}`}`
+                : `已下架${work.reviewNote === '' ? '' : `：${work.reviewNote}`}`
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
         res.end(workPage({
           id: work.id,
@@ -1216,7 +1309,11 @@ const server = createServer((req, res) => {
       if (config.mode === 'cloud' && method === 'GET' && workAssetMatch !== null) {
         const work = store.getWork(decodeURIComponent(workAssetMatch[1] as string))
         const viewer = accounts.me(readUserToken(req, config.cookieSecret) ?? bearer(req) ?? '')
-        const allowed = work !== undefined && (work.status === 'approved' || (viewer !== undefined && (viewer.id === work.userId || viewer.role === 'admin')))
+        const allowed = work !== undefined
+          && (work.visibility === 'private'
+            // 私密作品的文件：作者与管理员（理由同作品页那一段）。
+            ? (viewer !== undefined && (viewer.id === work.userId || viewer.role === 'admin'))
+            : (work.status === 'approved' || (viewer !== undefined && (viewer.id === work.userId || viewer.role === 'admin'))))
         if (!allowed || work === undefined) {
           json(res, 404, { error: '取不到' })
           return
@@ -1313,6 +1410,9 @@ const server = createServer((req, res) => {
             json(res, 401, { error: '需要登录' })
             return
           }
+          // 额度按"张"算不好估：一次发布可能带十几张快照图，所以这里给得宽（1000/小时），
+          // 它挡的是脚本刷盘，不是正常使用。
+          if (overLimit('upload', { windowMs: 3_600_000, max: 1000 })) return
           const mime = (req.headers['content-type'] ?? '').split(';')[0]?.trim() ?? ''
           if (!/^(image|video)\//u.test(mime)) {
             json(res, 400, { error: '只能发布图片或视频' })
@@ -1324,7 +1424,23 @@ const server = createServer((req, res) => {
               json(res, 400, { error: '文件是空的' })
               return
             }
-            const asset = store.saveAsset(bytes, mime, kindOfMime(mime))
+            /**
+             * 配额（M4）。**按字节**而不是按条数：一条 4K 视频比一千张缩略图还占地方。
+             * 超了就明说还差多少，而不是笼统的"失败" —— 用户得知道要删点什么。
+             */
+            const limit = config.userQuotaMb * 1024 * 1024
+            const used = store.storageUsedBy(user.id)
+            if (used + bytes.length > limit) {
+              const over = Math.ceil((used + bytes.length - limit) / 1024 / 1024)
+              json(res, 413, {
+                error: `你的云空间用满了（${String(Math.floor(used / 1024 / 1024))} / ${String(config.userQuotaMb)} MB）。删掉几件旧作品再发，或者先把要发的压缩一下（还差 ${String(over)} MB）。`,
+                usedBytes: used, limitBytes: limit,
+              })
+              return
+            }
+            // AI 生成标识（合规）：PNG 会重新编码，顺手把隐式标识写进去。
+            const stamped = mime === 'image/png' ? tagPng(bytes, AI_LABEL_TEXT) : bytes
+            const asset = store.saveAsset(stamped, mime, kindOfMime(mime), user.id)
             json(res, 200, { asset: { id: asset.id, kind: asset.kind, mime: asset.mime, bytes: asset.bytes } })
           } catch (error) {
             json(res, 413, { error: error instanceof Error ? error.message : '上传失败' })
@@ -1339,6 +1455,7 @@ const server = createServer((req, res) => {
             json(res, 401, { error: '需要登录' })
             return
           }
+          if (overLimit('publish', { windowMs: 3_600_000, max: 30 })) return
           const body = parseJson(await readText(req))
           const title = typeof body.title === 'string' ? body.title.trim() : ''
           const assetId = typeof body.assetId === 'string' ? body.assetId : ''
@@ -1347,23 +1464,46 @@ const server = createServer((req, res) => {
             json(res, 400, { error: '缺标题或缺成品文件' })
             return
           }
+          /**
+           * 私密作品 = 只给自己的云备份（M5）。
+           *
+           * 它和发布**共用同一条上传管道**，只是不进主页、不进审核队列：
+           * 「备份自己的东西」和「给别人看」本来就是两件事，
+           * 但让它们共用一套存储与压缩，就只需要维护一条路。
+           */
+          const visibility = body.visibility === 'private' ? 'private' : 'public'
+          const summary = typeof body.summary === 'string' ? body.summary.trim() : ''
+          const tags = typeof body.tags === 'string' ? body.tags.trim() : ''
+          // 机审预筛（M4）：只筛公开作品；私密备份不公开，人工审核也管不着它。
+          if (visibility === 'public') {
+            const verdict = await moderator.screenText([title, summary, tags].filter((part) => part !== '').join('\n'))
+            if (!verdict.pass) {
+              console.log(`[studio] 机审拦下：${title}（${verdict.label}）`)
+              json(res, 400, { error: `机审没过：${verdict.reason}${verdict.label === '' ? '' : `（${verdict.label}）`}` })
+              return
+            }
+            if (!verdict.skipped) console.log(`[studio] 机审通过：${title}`)
+          }
           const snapshot = typeof body.snapshot === 'string' ? body.snapshot : ''
           const work = store.createWork({
             userId: user.id,
             title,
-            summary: typeof body.summary === 'string' ? body.summary.trim() : '',
-            tags: typeof body.tags === 'string' ? body.tags.trim() : '',
+            summary,
+            tags,
             kind: asset.kind === 'video' ? 'video' : 'image',
             assetId,
             ...(typeof body.coverAssetId === 'string' && store.getAsset(body.coverAssetId) !== undefined ? { coverAssetId: body.coverAssetId } : {}),
             ...(snapshot === '' ? {} : { snapshotJson: snapshot }),
+            visibility,
           })
-          console.log(`[studio] 作品已提交待审：${work.title}（${user.email}）`)
-          json(res, 200, { work: { id: work.id, status: work.status } })
+          console.log(visibility === 'private'
+            ? `[studio] 私密备份已存入：${work.title}（${user.email}）`
+            : `[studio] 作品已提交待审：${work.title}（${user.email}）`)
+          json(res, 200, { work: { id: work.id, status: work.status, visibility: work.visibility } })
           return
         }
 
-        // 我的作品（所有状态）。
+        // 我的作品（所有状态，含私密备份）。
         if (rest === 'works' && method === 'GET') {
           const user = me()
           if (user === undefined) {
@@ -1373,6 +1513,7 @@ const server = createServer((req, res) => {
           json(res, 200, {
             works: store.listWorks({ userId: user.id }).map((work) => ({
               id: work.id, title: work.title, status: work.status, kind: work.kind,
+              visibility: work.visibility,
               reviewNote: work.reviewNote, createdAt: work.createdAt, views: work.views,
             })),
           })
@@ -1388,13 +1529,18 @@ const server = createServer((req, res) => {
             return
           }
           store.deleteWork(work.id)
-          json(res, 200, { ok: true })
+          // 删完立刻回收**不再被任何作品引用**的上传素材：否则配额只增不减，
+          // 用户会莫名其妙地"还没发几条就说满了"。
+          const swept = store.sweepUserAssets(work.userId)
+          if (swept > 0) console.log(`[studio] 回收了 ${String(swept)} 个没人引用的上传素材`)
+          json(res, 200, { ok: true, swept })
           return
         }
 
         // 举报（不需要登录：举报越容易，问题越早被发现；但只记理由与作品）。
         const workReport = /^works\/([^/]+)\/report$/u.exec(rest)
         if (workReport !== null && method === 'POST') {
+          if (overLimit('report', { windowMs: 3_600_000, max: 10 })) return
           const work = store.getWork(decodeURIComponent(workReport[1] as string))
           if (work === undefined) {
             json(res, 404, { error: '没有这件作品' })
@@ -1420,7 +1566,8 @@ const server = createServer((req, res) => {
           }
           if (rest === 'admin/works' && method === 'GET') {
             const status = url.searchParams.get('status')
-            const works = store.listWorks({ ...(status === null || status === '' ? {} : { status }) })
+            // 审核队列**只管公开作品**：私密备份不进队列（作者没打算给人看）。
+            const works = store.listWorks({ ...(status === null || status === '' ? {} : { status }), visibility: 'public' })
             json(res, 200, {
               works: works.map((work) => ({
                 id: work.id, title: work.title, status: work.status, kind: work.kind,
@@ -1447,6 +1594,34 @@ const server = createServer((req, res) => {
           }
           if (rest === 'admin/reports' && method === 'GET') {
             json(res, 200, { reports: store.listReports() })
+            return
+          }
+          /**
+           * 运维状态（M4）：只读闸门、配额、机审、限流。
+           *
+           * 为什么要有这个接口：这几样东西**只在环境变量里**（配额、机审 key、
+           * 反代信任），配置的人需要一个地方确认"到底生效了没有"，
+           * 而不是去翻容器的环境变量。它全是只读信息，没有任何机密（key 只报有没有）。
+           */
+          if (rest === 'admin/ops' && method === 'GET') {
+            const state = degrade.state()
+            json(res, 200, {
+              readonly: state.readonly,
+              readonlyReason: state.reason,
+              freeMb: state.freeMb,
+              quotaMb: config.userQuotaMb,
+              quotaUsedBy: Object.fromEntries(
+                store.listUsers().map((user) => [user.email, store.storageUsedBy(user.id)]),
+              ),
+              moderation: {
+                configured: moderator.configured,
+                failClosed: config.moderationFailClosed,
+                note: moderator.configured ? '' : '没配机审：所有公开作品直接进人工审核',
+              },
+              trustProxy: config.trustProxy,
+              rateLimitedKeys: limiter.size(),
+              backups: backups.status(),
+            })
             return
           }
           const handleMatch = /^admin\/reports\/([^/]+)\/handle$/u.exec(rest)
@@ -2374,6 +2549,7 @@ const server = createServer((req, res) => {
        * 3. 落一件 pending 的作品 —— **必须管理员在后台点过才会上主页**。
        */
       if (pathname === '/api/cloud/publish' && method === 'POST') {
+        if (overLimit('publish', { windowMs: 3_600_000, max: 30 })) return
         const token = settings.STUDIO_CLOUD_TOKEN ?? ''
         if (token === '' || config.cloudUrl === '') {
           json(res, 400, { error: '还没绑定账号：先去设置页的「账号」一节绑定' })
@@ -2482,6 +2658,8 @@ const server = createServer((req, res) => {
               title,
               ...(typeof body.summary === 'string' ? { summary: body.summary } : {}),
               ...(typeof body.tags === 'string' ? { tags: body.tags } : {}),
+              // 私密 = 只给自己的云备份（M5）：同一条上传管道，服务器那边不进主页与审核队列。
+              ...(body.visibility === 'private' ? { visibility: 'private' } : {}),
               assetId: mainId,
               ...(snapshot === '' ? {} : { snapshot }),
             }),
@@ -2491,13 +2669,18 @@ const server = createServer((req, res) => {
             json(res, response.status === 401 ? 401 : 400, { error: payload.error ?? `提交失败：HTTP ${String(response.status)}` })
             return
           }
-          console.log(`[studio] 已提交作品待审：${title}（${String(payload.work?.id ?? '')}）`)
+          const priv = body.visibility === 'private'
+          console.log(priv
+            ? `[studio] 私密备份已存入云账号：${title}（${String(payload.work?.id ?? '')}）`
+            : `[studio] 已提交作品待审：${title}（${String(payload.work?.id ?? '')}）`)
           json(res, 200, {
             ok: true,
             workId: payload.work?.id ?? '',
             status: payload.work?.status ?? 'pending',
             notes,
-            note: '已经提交，等管理员在后台点「通过」之后就会出现在主页',
+            note: priv
+              ? '已经存进你的云账号（私密备份），它不会出现在主页上'
+              : '已经提交，等管理员在后台点「通过」之后就会出现在主页',
           })
         } catch (error) {
           json(res, 502, { error: `连不上服务器：${error instanceof Error ? error.message : String(error)}` })

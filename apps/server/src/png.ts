@@ -288,6 +288,53 @@ export function encodePng(raster: Raster): Buffer {
 }
 
 /**
+ * 往 PNG 里塞 tEXt 元数据（AI 生成标识，合规用）。
+ *
+ * 为什么用元数据而不是只印在页面上：**文件会被下载、转发、搬去别的地方**，
+ * 页面上那个角标跟着页面走，跟不走文件。国标《人工智能生成合成内容标识办法》
+ * 要求的"显式标识"落在画面上、隐式标识落在文件里 —— 这里做的是后者的最小实现。
+ *
+ * 三个实现细节，都有理由：
+ *
+ * - **插在 IHDR 之后**：PNG 规定 tEXt 要在 IDAT 之前（解码器看到 IDAT 就开画了）。
+ * - **只认 latin1**：tEXt 按规范就是 latin1，中文在这里会被编码器悄悄改掉；
+ *   所以值里的非 latin1 字符一律换成 `?` —— 宁可少一个汉字，也不写进去一段乱码。
+ * - **解析不动就原样返回**：这不是功能，是附注。一张不认识的 PNG 不该因为加标签而发不出去。
+ * @param bytes - 原 PNG。
+ * @param entries - 关键词 → 文本（关键词必须是 ASCII）。
+ * @returns 带标签的 PNG；解析不了就是原样。
+ */
+export function tagPng(bytes: Buffer, entries: Record<string, string>): Buffer {
+  if (bytes.length < 8 || !bytes.subarray(0, 8).equals(SIGNATURE)) return bytes
+  const ascii = (value: string): string => value.replace(/[^\u0020-\u007e]/gu, '?')
+  const extras = Object.entries(entries)
+    .filter(([keyword]) => /^[\u0020-\u007e]{1,79}$/u.test(keyword))
+    .map(([keyword, value]) => chunk('tEXt', Buffer.from(`${ascii(keyword)}\0${ascii(value)}`, 'latin1')))
+  if (extras.length === 0) return bytes
+
+  // 走一遍块表：校验通过才重排，顺便把结尾定位到 IEND。
+  const parts: Buffer[] = [bytes.subarray(0, 8)]
+  let at = 8
+  let inserted = false
+  while (at + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(at)
+    const end = at + 12 + length
+    if (end > bytes.length) return bytes
+    const type = bytes.toString('latin1', at + 4, at + 8)
+    const body = bytes.subarray(at + 8, at + 8 + length)
+    if (crc32(type, body) !== bytes.readUInt32BE(at + 8 + length)) return bytes
+    parts.push(bytes.subarray(at, end))
+    if (type === 'IHDR' && !inserted) {
+      parts.push(...extras)
+      inserted = true
+    }
+    at = end
+    if (type === 'IEND') break
+  }
+  return inserted ? Buffer.concat(parts) : bytes
+}
+
+/**
  * A picture → a thumbnail.
  * @param bytes - the original file.
  * @param maxDim - 长边上限。

@@ -58,6 +58,38 @@ export interface StudioConfig {
    * 真实服务商（阿里云邮件推送 / SES / SMTP）留到 M4 再接，那时也能拿真凭据测。
    */
   mailWebhookUrl: string
+  /**
+   * 每个账号能上传多少 MB（云端配额，`STUDIO_QUOTA_MB`，默认 2048）。
+   *
+   * 配额按**上传到服务器的字节**算（`asset.owner_id`），不按作品条数：
+   * 一条 4K 视频比一千张缩略图还占地方，按条数算等于没有配额。
+   */
+  userQuotaMb: number
+  /**
+   * 只读降级（`STUDIO_READONLY=1`）。
+   *
+   * 打开之后**所有写操作都被拒**、读照常 —— 磁盘快满、数据库要维护、
+   * 或者出了事故要先把站点定住的时候，这是比"整站 500"好得多的形态。
+   * 另外磁盘可用空间低于 200 MB 时会**自动**进入这个状态（自检在 degrade.ts）。
+   */
+  readonly: boolean
+  /**
+   * 前面确实挂了反向代理（`STUDIO_TRUST_PROXY=1`）时才认 `x-forwarded-for`。
+   *
+   * 没有反代却打开它 = 让攻击者自己填一个来源地址来绕过限流。
+   */
+  trustProxy: boolean
+  /** 机审 webhook 地址；空 = 没配（跳过机审，全部靠人工审核）。 */
+  moderationUrl: string
+  /** 机审的鉴权 key。 */
+  moderationKey: string
+  /**
+   * 机审接口挂了的时候：true = 拒绝发布，false = 放行等人工（默认）。
+   *
+   * 默认选"放行"是因为**人工审核本来就在后面**（每件作品都要管理员点通过），
+   * 而一个坏掉的外部接口不该让整站发不出东西。
+   */
+  moderationFailClosed: boolean
 }
 
 /** 运行模式。 */
@@ -170,6 +202,12 @@ function layer(overrides: Record<string, string>, key: string): string {
   return process.env[key]?.trim() ?? ''
 }
 
+/** 开关：`1` / `true` / `yes` / `on` 都算开。 */
+function flag(value: string): boolean {
+  const raw = value.trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on'
+}
+
 /**
  * Resolve configuration from the settings store layered over the environment.
  *
@@ -208,6 +246,12 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
     cloudUrl: pick('STUDIO_CLOUD_URL'),
     publicUrl: pick('STUDIO_PUBLIC_URL'),
     mailWebhookUrl: pick('STUDIO_MAIL_WEBHOOK'),
+    userQuotaMb: intEnv('STUDIO_QUOTA_MB', 2048),
+    readonly: flag(pick('STUDIO_READONLY')),
+    trustProxy: flag(pick('STUDIO_TRUST_PROXY')),
+    moderationUrl: pick('MODERATION_URL'),
+    moderationKey: pick('MODERATION_KEY'),
+    moderationFailClosed: flag(pick('MODERATION_FAIL_CLOSED')),
   }
 }
 

@@ -232,6 +232,13 @@ export interface StudioWork {
   status: 'pending' | 'approved' | 'rejected' | 'hidden'
   /** 拒绝理由/下架原因（给作者看）。 */
   reviewNote: string
+  /**
+   * 公开还是私密。
+   *
+   * `private` = **只当作自己的云备份**：不进主页、不进审核队列、别人打不开。
+   * 这是 M5「私人云备份」的落点 —— 和发布共用同一条上传管道，只是不给人看。
+   */
+  visibility: 'public' | 'private'
   /** AI 生成标识（合规要求）。 */
   aiLabel: boolean
   /** 看过多少次。 */
@@ -352,8 +359,11 @@ export interface StudioStore {
    * @returns 这一版是否存在并被删掉。
    */
   deleteTake: (shotId: string, takeId: string) => boolean
-  /** Persist one asset's bytes and index them by content hash. */
-  saveAsset: (bytes: Buffer, mime: string, kind: string) => StudioAsset
+  /**
+   * Persist one asset's bytes and index them by content hash.
+   * @param ownerId - 谁上传的（cloud 模式的配额与回收靠它；本机用不着，留空）。
+   */
+  saveAsset: (bytes: Buffer, mime: string, kind: string, ownerId?: string) => StudioAsset
   /** Look up one asset by id. */
   getAsset: (id: string) => StudioAsset | undefined
   /**
@@ -489,11 +499,13 @@ export interface StudioStore {
   createWork: (input: {
     userId: string; title: string; summary?: string; tags?: string; kind: string
     assetId: string; coverAssetId?: string; snapshotJson?: string
+    /** 缺省 public（要审核）；private = 只给自己看的云备份。 */
+    visibility?: 'public' | 'private'
   }) => StudioWork
   /** 读一件。 */
   getWork: (id: string) => StudioWork | undefined
-  /** 列表：按状态、按作者，新的在前。 */
-  listWorks: (options?: { status?: string; userId?: string; limit?: number }) => StudioWork[]
+  /** 列表：按状态、按作者、按可见性，新的在前。 */
+  listWorks: (options?: { status?: string; userId?: string; visibility?: 'public' | 'private'; limit?: number }) => StudioWork[]
   /**
    * 改审核状态。
    * @returns 有没有这件作品。
@@ -510,6 +522,22 @@ export interface StudioStore {
   listReports: (options?: { open?: boolean; limit?: number }) => StudioReport[]
   /** 标记举报已处理。 */
   handleReport: (id: string) => boolean
+
+  /**
+   * 这个账号上传占了多少字节（云端的配额按它算）。
+   *
+   * 数的是**上传到服务器上的**素材（`owner_id`），不是用户本机的素材 ——
+   * 服务器只为发布出来的东西付磁盘。
+   */
+  storageUsedBy: (userId: string) => number
+  /**
+   * 回收一个账号**不再被任何作品引用**的上传素材。
+   *
+   * 删作品之后跑它，否则配额只增不减：传错一张图就永久占着地方，
+   * 用户会莫名其妙地"还没发几条就说满了"。
+   * @returns 回收掉几个。
+   */
+  sweepUserAssets: (userId: string) => number
 }
 
 const SCHEMA = `
@@ -572,6 +600,8 @@ CREATE TABLE IF NOT EXISTS asset (
   bytes INTEGER NOT NULL,
   rel_path TEXT NOT NULL,
   folder_id TEXT NOT NULL DEFAULT '',
+  -- 谁上传的（cloud 模式的配额与回收靠它；local 模式留空）。
+  owner_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 -- 素材文件夹。**故意和画布文件夹分开**（见 StudioAssetFolder 的注释）。
@@ -595,6 +625,8 @@ CREATE TABLE IF NOT EXISTS work (
   snapshot_json TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
   review_note TEXT NOT NULL DEFAULT '',
+  -- public = 正常发布（要人工审核）；private = 只给自己的云备份（不公开、不审核）。
+  visibility TEXT NOT NULL DEFAULT 'public',
   ai_label INTEGER NOT NULL DEFAULT 1,
   views INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
@@ -761,8 +793,11 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, 'take', 'error', 'TEXT')
   ensureColumn(db, 'take', 'mark', "TEXT NOT NULL DEFAULT 'none'")
   ensureColumn(db, 'asset', 'folder_id', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(db, 'asset', 'owner_id', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(db, 'work', 'visibility', "TEXT NOT NULL DEFAULT 'public'")
   db.exec('CREATE INDEX IF NOT EXISTS canvas_by_folder ON canvas(folder_id, updated_at DESC)')
   db.exec('CREATE INDEX IF NOT EXISTS asset_by_folder ON asset(folder_id, created_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS asset_by_owner ON asset(owner_id, created_at DESC)')
 }
 
 /**
@@ -832,6 +867,8 @@ export function openStore(dataDir: string): StudioStore {
       snapshotJson: text(row, 'snapshot_json'),
       status: status === 'approved' || status === 'rejected' || status === 'hidden' ? status : 'pending',
       reviewNote: text(row, 'review_note'),
+      // 私密作品（M5「私人云备份」）：只有作者看得到，不进主页也不进审核队列。
+      visibility: text(row, 'visibility') === 'private' ? 'private' : 'public',
       aiLabel: integer(row, 'ai_label') !== 0,
       views: integer(row, 'views'),
       createdAt: text(row, 'created_at'),
@@ -840,7 +877,7 @@ export function openStore(dataDir: string): StudioStore {
   }
 
   /** The columns a work row is read from. */
-  const WORK_COLUMNS = 'id, user_id, title, summary, tags, kind, asset_id, cover_asset_id, snapshot_json, status, review_note, ai_label, views, created_at, updated_at'
+  const WORK_COLUMNS = 'id, user_id, title, summary, tags, kind, asset_id, cover_asset_id, snapshot_json, status, review_note, visibility, ai_label, views, created_at, updated_at'
 
   /** The columns a canvas row is read from, in one place. */
   const CANVAS_COLUMNS = 'id, name, folder_id, cover_asset_id, deleted_at, created_at, updated_at'
@@ -1162,10 +1199,12 @@ export function openStore(dataDir: string): StudioStore {
       if (integer(left ?? {}, 'n') === 0) db.prepare('DELETE FROM shot WHERE id = ?').run(shotId)
       return true
     },
-    saveAsset(bytes, mime, kind) {
+    saveAsset(bytes, mime, kind, ownerId = '') {
       const id = createHash('sha256').update(bytes).digest('hex').slice(0, 32)
       const existing = db.prepare('SELECT id, kind, mime, bytes, rel_path, folder_id, created_at FROM asset WHERE id = ?').get(id) as Row | undefined
       if (existing !== undefined) {
+        // 内容寻址：同样的字节只存一份。**先上传的人算拥有者** ——
+        // 后上传的人不因此多占配额，也不会因为别人删了作品而丢东西（回收前会核对引用）。
         return { id, kind: text(existing, 'kind'), mime: text(existing, 'mime'), bytes: integer(existing, 'bytes'), relPath: text(existing, 'rel_path'), createdAt: text(existing, 'created_at'), folderId: text(existing, 'folder_id') }
       }
       const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : mime === 'video/mp4' ? 'mp4' : 'png'
@@ -1174,8 +1213,8 @@ export function openStore(dataDir: string): StudioStore {
       mkdirSync(join(assetRoot, id.slice(0, 2)), { recursive: true })
       writeFileSync(absolute, bytes)
       const stamp = now()
-      db.prepare('INSERT INTO asset (id, kind, mime, bytes, rel_path, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(id, kind, mime, bytes.length, relPath, stamp)
+      db.prepare('INSERT INTO asset (id, kind, mime, bytes, rel_path, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, kind, mime, bytes.length, relPath, ownerId, stamp)
       return { id, kind, mime, bytes: bytes.length, relPath, createdAt: stamp, folderId: '' }
     },
     getAsset(id) {
@@ -1475,10 +1514,11 @@ export function openStore(dataDir: string): StudioStore {
     createWork(input) {
       const id = randomUUID()
       const stamp = now()
-      db.prepare(`INSERT INTO work (id, user_id, title, summary, tags, kind, asset_id, cover_asset_id, snapshot_json, status, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+      db.prepare(`INSERT INTO work (id, user_id, title, summary, tags, kind, asset_id, cover_asset_id, snapshot_json, status, visibility, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`)
         .run(id, input.userId, input.title, input.summary ?? '', input.tags ?? '', input.kind,
-          input.assetId, input.coverAssetId ?? '', input.snapshotJson ?? '', stamp, stamp)
+          input.assetId, input.coverAssetId ?? '', input.snapshotJson ?? '',
+          input.visibility === 'private' ? 'private' : 'public', stamp, stamp)
       const created = this.getWork(id)
       if (created === undefined) throw new Error('作品写入失败')
       return created
@@ -1498,6 +1538,10 @@ export function openStore(dataDir: string): StudioStore {
         where.push('user_id = ?')
         params.push(options.userId)
       }
+      if (options.visibility !== undefined) {
+        where.push('visibility = ?')
+        params.push(options.visibility)
+      }
       const clause = where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`
       params.push(options.limit ?? 200)
       return (db.prepare(`SELECT ${WORK_COLUMNS} FROM work ${clause} ORDER BY created_at DESC LIMIT ?`).all(...params) as Row[]).map(readWork)
@@ -1513,6 +1557,37 @@ export function openStore(dataDir: string): StudioStore {
     deleteWork(id) {
       const result = db.prepare('DELETE FROM work WHERE id = ?').run(id)
       return Number(result.changes) > 0
+    },
+    storageUsedBy(userId) {
+      const row = db.prepare('SELECT COALESCE(SUM(bytes), 0) AS used FROM asset WHERE owner_id = ?').get(userId) as Row | undefined
+      return row === undefined ? 0 : integer(row, 'used')
+    },
+    sweepUserAssets(userId) {
+      // 引用关系只在 work 里：成品、封面，以及快照 JSON 里那些 `/blob/<id>`。
+      // 用一次全表读换一次正确性 —— 这个动作只在删作品时发生，不是热路径。
+      const referenced = new Set<string>()
+      for (const row of db.prepare('SELECT asset_id, cover_asset_id, snapshot_json FROM work').all() as Row[]) {
+        const main = text(row, 'asset_id')
+        const cover = text(row, 'cover_asset_id')
+        if (main !== '') referenced.add(main)
+        if (cover !== '') referenced.add(cover)
+        const snapshot = text(row, 'snapshot_json')
+        for (const match of snapshot.matchAll(/\/blob\/([A-Za-z0-9]+)/gu)) {
+          const id = match[1]
+          if (id !== undefined) referenced.add(id)
+        }
+      }
+      const mine = db.prepare('SELECT id, rel_path FROM asset WHERE owner_id = ?').all(userId) as Row[]
+      let removed = 0
+      for (const row of mine) {
+        const id = text(row, 'id')
+        if (referenced.has(id)) continue
+        // 先删行再删文件：文件留着只是浪费磁盘，行留着就是"幽灵素材"（界面上看得到、读不出来）。
+        db.prepare('DELETE FROM asset WHERE id = ?').run(id)
+        try { rmSync(join(assetRoot, text(row, 'rel_path')), { force: true }) } catch { /* 文件没了也算回收成功 */ }
+        removed += 1
+      }
+      return removed
     },
     addReport(input) {
       const id = randomUUID()

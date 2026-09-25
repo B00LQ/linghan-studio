@@ -45,6 +45,10 @@ const SUITES = [
   // 备份（M2）：自己起一个 local 实例，做备份 → 改数据 → 恢复 → 重启，验「真的退回去了」；
   // 顺带验导出画布包与「只留 7 份」。
   { name: 'backup', script: 'backup-test.mjs', args: [] },
+  // 运营底线（M4）与私人云备份（M5）：限流 / 配额 / 只读降级 / 机审 /
+  // AI 生成标识进 PNG / 私密备份不进主页 / 删作品回收素材。
+  // 自己起**四个**临时实例（默认、只读、带机审、机审接口挂掉）——都不依赖真凭据。
+  { name: 'ops', script: 'ops-test.mjs', args: [] },
   { name: 'workflow-api', script: 'workflow-api-test.mjs', args: [BASE, PASSWORD] },
   { name: 'take-pipeline', script: 'take-pipeline-test.mjs', args: [BASE, PASSWORD] },
   { name: 'agent-canvas', script: 'agent-canvas-test.mjs', args: [BASE, PASSWORD] },

@@ -740,6 +740,9 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .publish-panel .field > span { display: flex; gap: 8px; align-items: baseline; }
 .publish-panel .field em { font-style: normal; font-size: 11px; }
 .publish-panel .field input, .publish-panel .field select { padding: 7px 9px; font-size: 13px; }
+/* 勾选项那一行是「一个方框 + 一句话」，不能跟上面那些标签/输入框一样竖着排。 */
+.publish-panel .field.check { flex-direction: row; align-items: flex-start; gap: 8px; }
+.publish-panel .field.check input { width: auto; padding: 0; margin-top: 2px; }
 .publish-panel footer { display: flex; justify-content: flex-end; gap: 8px; }
 .publish-panel .muted { font-size: 12px; line-height: 1.6; margin: 0; }
 

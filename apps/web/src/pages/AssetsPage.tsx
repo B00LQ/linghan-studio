@@ -49,7 +49,7 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
   }, [reload, refreshToken])
 
   /** 要发布的那一件（打开对话框用的状态）。 */
-  const [publish, setPublish] = useState<{ assetId: string; title: string; tags: string; summary: string; canvasId: string; withCanvas: boolean } | null>(null)
+  const [publish, setPublish] = useState<{ assetId: string; title: string; tags: string; summary: string; canvasId: string; withCanvas: boolean; privateOnly: boolean } | null>(null)
   const [publishBusy, setPublishBusy] = useState(false)
 
   /**
@@ -71,6 +71,7 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
         ...(publish.tags.trim() === '' ? {} : { tags: publish.tags.trim() }),
         ...(publish.canvasId === '' ? {} : { canvasId: publish.canvasId }),
         withCanvas: publish.withCanvas && publish.canvasId !== '',
+        ...(publish.privateOnly ? { visibility: 'private' as const } : {}),
       })
       setPublish(null)
       setNotice(`${result.note}${result.notes.length === 0 ? '' : `（${result.notes.join('；')}）`}`)
@@ -123,6 +124,9 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
             // 默认带上第一张画布：多数人发布的就是刚做的那张画布。
             canvasId: projects[0]?.id ?? '',
             withCanvas: true,
+            // 默认是**发布**（要审核）；「只备份」是一个要人手勾的选择 ——
+            // 默认偷偷不公开，比默认公开更让人措手不及。
+            privateOnly: false,
           })
           setNotice('')
         }}
@@ -199,13 +203,23 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
+            <label className="field check">
+              <input
+                type="checkbox"
+                data-testid="publish-private"
+                checked={publish.privateOnly}
+                onChange={(event) => { setPublish({ ...publish, privateOnly: event.target.checked }) }}
+              />
+              <span>只备份到我的账号（不公开）<em className="muted">不进主页、不需要审核，只有你自己能打开</em></span>
+            </label>
             <p className="muted">
-              只上传压缩后的成品与快照图片，原始素材留在你机器上。
-              提交后需要管理员在后台点「通过」才会出现在主页。
+              {publish.privateOnly
+                ? '这是一份私密备份：只上传压缩后的成品与快照图片，原始素材留在你机器上，别人看不到。'
+                : '只上传压缩后的成品与快照图片，原始素材留在你机器上。提交后需要管理员在后台点「通过」才会出现在主页。'}
             </p>
             <footer>
               <button type="button" className="primary" data-testid="publish-submit" disabled={publishBusy} onClick={() => { void submitPublish() }}>
-                {publishBusy ? '正在上传…' : '提交待审'}
+                {publishBusy ? '正在上传…' : publish.privateOnly ? '存到我的云账号' : '提交待审'}
               </button>
             </footer>
           </div>

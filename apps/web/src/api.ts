@@ -526,6 +526,13 @@ export const publishWork = (input: {
   /** 附带哪张画布（空 = 不带画布）。 */
   canvasId?: string
   withCanvas: boolean
+  /**
+   * `private` = **只备份到自己的云账号**（不公开、不进审核队列、别人打不开）。
+   *
+   * 和发布共用同一条上传管道：压缩、快照、配额都一样，
+   * 区别只在服务器那边记的是"私密" —— 用途不同，路只维护一条。
+   */
+  visibility?: 'public' | 'private'
 }): Promise<{ ok: boolean; workId: string; status: string; notes: string[]; note: string }> =>
   request('/api/cloud/publish', { method: 'POST', body: JSON.stringify(input) })
 

@@ -67,6 +67,22 @@ try {
     check('文案明说「要管理员点通过」', panel.text.includes('通过'))
   }
 
+  // 私密备份（M5）：勾上之后按钮与说明都要跟着变 ——
+  // 一个勾选框如果不改变任何字，用户没法确认自己勾上的是什么意思。
+  await session.clickSelector('[data-testid=publish-private]')
+  await sleep(500)
+  const priv = await session.evaluate(`(() => {
+    const box = document.querySelector('[data-testid=publish-panel]');
+    return {
+      checked: document.querySelector('[data-testid=publish-private]')?.checked ?? null,
+      submit: document.querySelector('[data-testid=publish-submit]')?.innerText?.trim() ?? null,
+      text: box === null ? '' : box.innerText,
+    };
+  })()`)
+  check('勾得上「只备份到我的账号」', priv.checked === true)
+  check('按钮变成「存到我的云账号」', priv.submit === '存到我的云账号', `submit=${String(priv.submit)}`)
+  check('说明改成「别人看不到」', priv.text.includes('别人看不到'))
+
   await session.clickText('取消')
   await sleep(500)
   const closed = await session.evaluate(`document.querySelector('[data-testid=publish-panel]') === null`)
