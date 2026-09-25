@@ -799,6 +799,32 @@ const server = createServer((req, res) => {
         }
       }
 
+      // 把一条 take 换成另一张素材：连续同一种编辑（连点四次右转）时**改这一版**，
+      // 而不是往版本条上堆四版。换下来的那张图没人用了就顺手删掉。
+      const takeAssetMatch = /^\/api\/shots\/([^/]+)\/takes\/([^/]+)\/asset$/u.exec(pathname)
+      if (takeAssetMatch !== null && method === 'POST') {
+        const shotId = decodeURIComponent(takeAssetMatch[1] as string)
+        const takeId = decodeURIComponent(takeAssetMatch[2] as string)
+        const body = parseJson(await readText(req))
+        const assetId = typeof body.assetId === 'string' ? body.assetId : ''
+        if (store.getShot(shotId) === undefined) {
+          json(res, 404, { error: '镜头不存在' })
+          return
+        }
+        const take = store.listTakes(shotId).find((item) => item.id === takeId)
+        if (take === undefined) {
+          json(res, 404, { error: '版本不存在' })
+          return
+        }
+        if (assetId === '' || store.getAsset(assetId) === undefined) {
+          json(res, 400, { error: '素材不存在' })
+          return
+        }
+        store.updateTakeAsset(takeId, assetId)
+        json(res, 200, { take: store.listTakes(shotId).find((item) => item.id === takeId) })
+        return
+      }
+
       // Mark one take as the chosen one for its shot, so the version strip has a
       // single answer to "which one are we using".
       const selectMatch = /^\/api\/shots\/([^/]+)\/select$/u.exec(pathname)

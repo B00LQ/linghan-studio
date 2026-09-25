@@ -297,6 +297,42 @@ const run = async () => {
   check('宽度正好是原来的高', rotated?.cardW === SOURCE_H, String(rotated?.cardW))
   check('高度正好是原来的宽', rotated?.cardH === SOURCE_W, String(rotated?.cardH))
 
+  log('⑤b 连点同一种编辑：只留一版，不再把版本条填满（债务第 28 条）')
+  // 上一步已经右转过一次，卡片显示的就是那一版；再点一次右转。
+  // 判据是「版本数不变、但图变了」—— 那才叫「改这一版」，而不是「又记一版」。
+  const beforeRepeat = (await api.call(`/api/shots/${shot.id}/takes`)).json.takes
+  const cellsBefore = await s.evaluate(`document.querySelectorAll('.prompt-window .history-cell').length`)
+  /** 再点一次「右转 90°」并等图真的换了。 */
+  const rotateAgain = async () => {
+    const previous = (await api.call(`/api/shots/${shot.id}/takes`)).json.takes[0]?.assetId
+    await s.evaluate(`document.querySelector('[data-testid="tools-image-edit"]').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))`)
+    await until(() => s.evaluate(`!!document.querySelector('[data-testid="tools-menu"]')`))
+    await clickByText(s, '[data-testid="tools-menu"]', '旋转')
+    await until(() => s.evaluate(`!!document.querySelector('[data-testid="tools-rotate-sub"]')`))
+    await clickByText(s, '[data-testid="tools-rotate-sub"]', '右转')
+    return until(async () => {
+      const list = (await api.call(`/api/shots/${shot.id}/takes`)).json.takes
+      return list[0]?.assetId !== previous ? list : null
+    }, 20_000)
+  }
+  // 点**两次**：一次验证「改这一版」，两次之后图又转回竖的（奇数次 90° 总是交换宽高），
+  // 这样后面 ⑥ 裁剪那条「当前是 720×1280」的前置状态仍然成立。
+  const amendedOnce = await rotateAgain()
+  check('第二次右转是「改这一版」：版本数不变',
+    amendedOnce !== null && amendedOnce.length === beforeRepeat.length,
+    `${String(beforeRepeat.length)} → ${String(amendedOnce?.length ?? 0)}`)
+  check('但那张图确实变了（编辑生效了，不是没反应）',
+    amendedOnce?.[0]?.assetId !== beforeRepeat[0]?.assetId,
+    `${String(beforeRepeat[0]?.assetId)} → ${String(amendedOnce?.[0]?.assetId)}`)
+  const amendedTwice = await rotateAgain()
+  check('再点一次仍然是同一版（连续同一种操作只留一格）',
+    amendedTwice !== null && amendedTwice.length === beforeRepeat.length,
+    `${String(beforeRepeat.length)} → ${String(amendedTwice?.length ?? 0)}`)
+  const cellsAfter = await s.evaluate(`document.querySelectorAll('.prompt-window .history-cell').length`)
+  check('版本条上的格子也没变多', cellsAfter === cellsBefore, `${String(cellsBefore)} → ${String(cellsAfter)}`)
+  // 这两次编辑各产出一张新素材：它们同样是这一轮建的，收尾时要一起删。
+  await trackShotAssets()
+
   log('⑥ 裁剪：从菜单进去，编辑器直接就是裁剪模式')
   await s.evaluate(`document.querySelector('[data-testid="tools-image-edit"]').click()`)
   await until(() => s.evaluate(`!!document.querySelector('[data-testid="tools-crop"]')`))

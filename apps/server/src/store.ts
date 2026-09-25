@@ -244,6 +244,13 @@ export interface StudioStore {
   assetInUse: (id: string) => boolean
   /** Delete one asset's index row and its bytes. */
   deleteAsset: (id: string) => boolean
+  /**
+   * 把一条 take 换成另一张素材（连续同一种编辑时「改这一版」而不是再记一版）。
+   * @param takeId - the take to change.
+   * @param assetId - the asset it should point at.
+   * @returns whether the take existed.
+   */
+  updateTakeAsset: (takeId: string, assetId: string) => boolean
   /** Absolute path of one asset's bytes. */
   assetPath: (asset: StudioAsset) => string
   /**
@@ -829,6 +836,12 @@ export function openStore(dataDir: string): StudioStore {
       // scan answers "is this still on someone's canvas" without a join table.
       const row = db.prepare("SELECT COUNT(*) AS n FROM canvas WHERE doc LIKE ?").get(`%/api/assets/${id}%`) as Row | undefined
       return integer(row ?? {}, 'n') > 0
+    },
+    updateTakeAsset(takeId, assetId) {
+      const row = db.prepare('SELECT id FROM take WHERE id = ?').get(takeId) as Row | undefined
+      if (row === undefined) return false
+      db.prepare('UPDATE take SET asset_id = ? WHERE id = ?').run(assetId, takeId)
+      return true
     },
     deleteAsset(id) {
       const asset = this.getAsset(id)

@@ -33,7 +33,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import { listWorkflows, type WorkflowInfo } from '../api.ts'
-import { createShot, deleteAsset, downloadAssets, fetchAudioBackend, fetchGenerationStats, fetchTextBackend, listAssets, listTakes, loadCanvas, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
+import { createShot, deleteAsset, downloadAssets, fetchAudioBackend, fetchGenerationStats, fetchTextBackend, listAssets, listTakes, loadCanvas, replaceTakeAsset, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
 import { arrangeLayout, arrangeSubset, findFreeSlot, findOverlaps, nodeRect } from './layout.ts'
 import { NodePanel, AssetPanel } from './CanvasPanels.tsx'
 import { ImageEditor } from './ImageEditor.tsx'
@@ -1713,17 +1713,43 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         setStatus(`已保存编辑结果（这张还没有版本记录）`)
         return
       }
+      /**
+       * **连续同一种快捷编辑：改这一版，不再往上堆一版。**
+       *
+       * 债务清单第 28 条：连点四次「右转 90°」会在版本条上留下四格，把它填满 ——
+       * 而那四格里的中间态几乎没人要（原图仍在，一键点得回去）。判据两条，缺一不可：
+       * ① 上一条也是**同一种**编辑（`model` 就是那句说明，`providerId` 是 studio-edit）；
+       * ② 卡片上显示的**正是那一条**（人没切到别的版本上去）。
+       * 换了操作（右转之后左转）或切过版本，就老老实实记新的一版。
+       */
+      const list = takes[shotId] ?? []
+      const last = list[0]
+      const amendable = last !== undefined
+        && last.status === 'succeeded'
+        && last.providerId === 'studio-edit'
+        && last.model === note
+        && typeof node.data.takeId === 'string'
+        && node.data.takeId === last.id
+      if (amendable) {
+        await replaceTakeAsset(shotId, last.id, asset.id)
+        const merged = await loadTakes(shotId)
+        checkpoint()
+        showTakeIn(nodeId, last.id, merged)
+        setEditing(null)
+        setStatus(`已更新这一版：${note}（连续同一种操作只留一版）`)
+        return
+      }
       const { take } = await addTake(shotId, asset.id, note)
-      const list = await loadTakes(shotId)
+      const created = await loadTakes(shotId)
       checkpoint()
-      showTakeIn(nodeId, take.id, list)
+      showTakeIn(nodeId, take.id, created)
       void selectTake(shotId, take.id).catch(() => { /* the card already shows it */ })
       setEditing(null)
       setStatus(`已保存为新版本：${note}`)
     } catch (cause) {
       setStatus(cause instanceof Error ? cause.message : '保存失败')
     }
-  }, [checkpoint, loadTakes, markDirty, setNodes, showTakeIn])
+  }, [checkpoint, loadTakes, markDirty, setNodes, showTakeIn, takes])
 
   /** Open the crop/rotate editor for the picture a node currently shows. */
   const editImage = useCallback((nodeId: string, options: { crop?: boolean } = {}) => {

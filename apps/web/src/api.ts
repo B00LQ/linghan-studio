@@ -545,6 +545,21 @@ export const addTake = (shotId: string, assetId: string, note: string): Promise<
     }),
   })
 
+/**
+ * 把一条版本换成另一张素材（连续同一种编辑时「改这一版」）。
+ *
+ * 换下来的那张图如果没人再引用，服务端会顺手删掉 —— 连续旋转的中间态不该堆在素材库里。
+ * @param shotId - the shot the version belongs to.
+ * @param takeId - the version to change.
+ * @param assetId - the asset it should point at.
+ * @returns the updated take.
+ */
+export const replaceTakeAsset = (shotId: string, takeId: string, assetId: string): Promise<{ take: TakeInfo }> =>
+  request(`/api/shots/${encodeURIComponent(shotId)}/takes/${encodeURIComponent(takeId)}/asset`, {
+    method: 'POST',
+    body: JSON.stringify({ assetId }),
+  })
+
 /** One stored asset as the server describes it. */
 export interface AssetInfo {
   id: string
