@@ -69,7 +69,7 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
       const result = await saveSettings(draft)
       setState(result)
       setDraft({})
-      setMessage(`已保存 ${String(result.saved.length)} 项，**立刻生效**（不用重启）`)
+      setMessage(`已保存 ${String(result.saved.length)} 项，立刻生效（不用重启）`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '保存失败')
     } finally {
@@ -98,7 +98,7 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
       <header className="page-head">
         <h1>设置</h1>
         <p className="muted">
-          这里改的值**立刻生效**，不用重启；环境变量仍然有效，只是设置页的值压得住它。
+          这里改的值立刻生效，不用重启；环境变量仍然有效，只是设置页的值压得住它。
         </p>
       </header>
 
@@ -198,7 +198,7 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
             ) : (
               <>
                 <p className="setting-test is-bad">✗ 还缺：{pddMissing.join('、')}</p>
-                <p className="muted">缺东西时它**不会**出现在画布的工作流下拉里（菜单只列这台机器真能跑的），装好之后刷新页面就有了。</p>
+                <p className="muted">缺东西时它不会出现在画布的工作流下拉里（菜单只列这台机器真能跑的），装好之后刷新页面就有了。</p>
                 <pre className="settings-code">{[
                   '# 1. 插件（装完必须重启 ComfyUI 才会加载）',
                   'git clone https://github.com/Jalen-Brunson/ComfyUI-MiniMax-H3-PDD-Acc \\',
@@ -216,7 +216,7 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
             <header><h2>只读信息</h2></header>
             <p className="muted">
               数据目录：<code>{state.dataDir}</code>（数据库与素材都在这里，改了要重启）<br />
-              端口：<code>{state.port}</code> · 访问密码：{state.passwordSet ? '已设置' : '**没有设置**（登录门已关闭）'}
+              端口：<code>{state.port}</code> · 访问密码：{state.passwordSet ? '已设置' : '没有设置（登录门已关闭）'}
             </p>
           </section>
         </>
