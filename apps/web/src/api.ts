@@ -222,6 +222,13 @@ export const submitJob = (input: {
   params?: Record<string, number | string>
   /** `text` = 交给文本后端（LLM）；省略就是 ComfyUI 渲染。 */
   kind?: 'text'
+  /**
+   * 固定种子（复现某一版时带上）。省略就随机。
+   *
+   * **必须显式写进请求体**：只写进类型是不够的 —— 这个字段曾经因此被静默丢掉，
+   * 而「复现这一版」看起来一切正常（同提示词、同工作流），只是抽出了另一张。
+   */
+  seed?: number
 }): Promise<{ job: StudioJob }> =>
   request('/api/jobs', {
     method: 'POST',
@@ -230,6 +237,7 @@ export const submitJob = (input: {
       nodeId: input.nodeId,
       prompt: input.prompt,
       ...(input.kind === undefined ? {} : { kind: input.kind }),
+      ...(input.seed === undefined ? {} : { seed: input.seed }),
       ...(input.size === undefined ? {} : { size: input.size }),
       ...(input.count === undefined ? {} : { count: input.count }),
       ...(input.workflowId === undefined ? {} : { workflow: input.workflowId }),

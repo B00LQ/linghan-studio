@@ -123,6 +123,13 @@ export interface RenderRequest {
    * 加一个功能就加一个键，不必改驱动签名。
    */
   params?: Record<string, number | string>
+  /**
+   * 固定种子（复现某一版时带上）。省略就随机。
+   *
+   * 「用这一版的参数再跑一次」必须包含它：同参数 + 同种子才是复现这一版，
+   * 只同参数那是「同样的提示词再抽一次」。
+   */
+  seed?: number
 }
 
 /** Gateway surface the HTTP layer mounts. */
@@ -342,6 +349,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     onQueued?: (comfyPromptId: string) => void,
     inputs: Record<string, { bytes: Buffer; name: string }> = {},
     params: Record<string, number | string> = {},
+    seed?: number,
   ): Promise<GeneratedImage[]> => {
     // 云端与占位驱动都只出图片，所以它们的 mime 是常量；视频只可能来自本地
     // ComfyUI 工作流，也只有那条路需要按文件名判类型。
@@ -358,6 +366,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         ...(duration === undefined ? {} : { duration }),
         ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
         ...(Object.keys(params).length === 0 ? {} : { params }),
+        ...(seed === undefined ? {} : { seed }),
       }, onProgress, onQueued)
     }
     log(`gateway: placeholder driver answered "${prompt.slice(0, 40)}" at ${String(size.width)}x${String(size.height)}`)
@@ -417,6 +426,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     inputs?: Record<string, string>
     /** 非提示词、非尺寸的取值（裁切的 start/duration），一并记下以便重跑。 */
     params?: Record<string, number | string>
+    /** 片长（秒）。**必须记**：不记的话「用这一版的参数再跑一次」会退回工作流默认的 5 秒。 */
+    duration?: number
     error?: string
   }): string => {
     if (input.shotId === '') return ''
@@ -438,6 +449,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         ...(input.workflowId === undefined || input.workflowId === '' ? {} : { workflow: input.workflowId }),
         ...(input.inputs === undefined || Object.keys(input.inputs).length === 0 ? {} : { inputs: input.inputs }),
         ...(input.params === undefined || Object.keys(input.params).length === 0 ? {} : { params: input.params }),
+        // 片长也记进参数里：重跑时要还原「这条几秒」，而不是回到工作流的默认值。
+        ...(input.duration === undefined ? {} : { duration: input.duration }),
       },
       ...(input.seed === undefined ? {} : { seed: input.seed }),
       latencyMs: input.latencyMs,
@@ -475,7 +488,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
       artifacts = await generate(prompt, size, count, (progress) => {
         if (shotId !== '') deps.onProgress?.({ shotId, progress })
         hooks.onProgress?.(progress)
-      }, request.workflowId ?? '', request.duration, hooks.onQueued, inputs, params)
+      }, request.workflowId ?? '', request.duration, hooks.onQueued, inputs, params, request.seed)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // A failed attempt is still a take — without it the version history lies by omission.
@@ -488,6 +501,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         count,
         workflowId: request.workflowId ?? '',
         ...(Object.keys(inputs).length === 0 ? {} : { inputs: Object.fromEntries(Object.entries(inputs).map(([name, file]) => [name, file.name])) }),
+        ...(request.duration === undefined ? {} : { duration: request.duration }),
         error: message,
       })
       throw error
@@ -512,6 +526,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         // 光看提示词分不出来。
         ...(Object.keys(inputs).length === 0 ? {} : { inputs: Object.fromEntries(Object.entries(inputs).map(([name, file]) => [name, file.name])) }),
         ...(Object.keys(params).length === 0 ? {} : { params }),
+        ...(request.duration === undefined ? {} : { duration: request.duration }),
       })
       return {
         url: `/api/assets/${asset.id}`,
@@ -541,6 +556,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         ...(typeof body.params === 'object' && body.params !== null && !Array.isArray(body.params)
           ? { params: body.params as Record<string, number | string> }
           : {}),
+        // 固定种子（复现某一版用）。省略就随机。
+        ...(typeof body.seed === 'number' ? { seed: body.seed } : {}),
       })
       const data = images.map((image) => image.takeId === undefined
         ? { url: image.url }

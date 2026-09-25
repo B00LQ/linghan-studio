@@ -114,6 +114,13 @@ export interface ComfyUiRequest {
    * 驱动签名」的路子，而工作流本来就是数据，多给几个键它自己会忽略。
    */
   params?: Record<string, number | string>
+  /**
+   * 固定种子。
+   *
+   * 省略就随机。「用这一版的参数再跑一次」要把它带上 —— 同参数 + 同种子才是复现，
+   * 只同参数那是「再抽一次」。一批多张时从它开始按张递增。
+   */
+  seed?: number
 }
 
 /**
@@ -548,7 +555,12 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
       // Count > 1 runs sequentially: a 12 GB card cannot hold two concurrent
       // diffusion models, and ComfyUI's own queue would serialise them anyway.
       for (let index = 0; index < request.count; index += 1) {
-        const seed = Math.floor(Math.random() * 1_000_000_000)
+        // 给了种子就用它：**「用这一版的参数再跑一次」要包括种子**，否则那只是
+        // 「同样的提示词再抽一次」，而不是复现。一批多张时按 index 递进，
+        // 否则四张会一模一样。
+        const seed = request.seed === undefined
+          ? Math.floor(Math.random() * 1_000_000_000)
+          : (request.seed + index) % 1_000_000_000
         const batch = request.count > 1 ? { index: index + 1, total: request.count } : undefined
         for (const file of await runOnce(workflow, request, seed, batch, report, onQueued)) {
           artifacts.push({ ...file, seed })

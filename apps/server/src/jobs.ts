@@ -54,6 +54,13 @@ export interface JobRequest {
    * （裁切的 `start` / `duration`，以后别的编辑节点也走这里）。
    */
   params?: Record<string, number | string>
+  /**
+   * 固定种子（重拍/复现用）。省略就随机。
+   *
+   * 值来自 take 里记下的那个 —— 「用这一版的参数再跑一次」要包括种子，
+   * 否则复现的是「提示词」，不是「这一版」。
+   */
+  seed?: number
 }
 
 /** One produced file as a job reports it. */

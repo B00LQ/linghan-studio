@@ -94,6 +94,8 @@ const CanvasContext = createContext<{
   /** Which node's prompt window is open; our own state, not xyflow's selection. */
   activeNodeId: string | null
   showTake: (nodeId: string, takeId: string) => void
+  /** 用某一版的参数再跑一次（含种子）；失败的版本就是重试。 */
+  rerunTake: (nodeId: string, take: TakeInfo) => Promise<void>
   /** Ask the node's running job to stop. */
   cancelRun: (nodeId: string) => void
   /** Open the crop/rotate editor on the picture a node is showing. */
@@ -138,6 +140,7 @@ const CanvasContext = createContext<{
   takes: {},
   activeNodeId: null,
   showTake: () => { /* replaced by the provider */ },
+  rerunTake: async () => { /* replaced by the provider */ },
   cancelRun: () => { /* replaced by the provider */ },
   editImage: () => { /* replaced by the provider */ },
   quickEdit: () => { /* replaced by the provider */ },
@@ -231,9 +234,14 @@ function PromptInput({ value, placeholder, onInput, onBegin }: {
 
 /** One canvas node's rendering. */
 function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
-  const { takes, activeNodeId, showTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor, blockedOf, textModel, textNote } = useContext(CanvasContext)
+  const { takes, activeNodeId, showTake, rerunTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor, blockedOf, textModel, textNote } = useContext(CanvasContext)
   const spec = specOf(data.kind)
   const history = typeof data.shotId === 'string' && data.shotId !== '' ? (takes[data.shotId] ?? []) : []
+  // 卡片上现在**显示**的是哪一版。版本条按「最早的在前」排，所以索引也从那边数。
+  // 「复现这一版」要作用在显示中的那一版上——那才是人正看着的东西。
+  const ordered = oldestFirst(history)
+  const shownIndex = ordered.findIndex((take) => take.id === data.takeId)
+  const shown = shownIndex === -1 ? undefined : ordered[shownIndex]
   const running = runningNodeId === id || data.status === 'running'
   // The window follows our own active-node state rather than xyflow's `selected`
   // flag: xyflow owns its selection internally, and marking a node selected by
@@ -310,8 +318,15 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                   type="button"
                   key={take.id}
                   className={`history-cell ${take.id === data.takeId ? 'is-shown' : ''} ${take.mark === 'selected' ? 'is-chosen' : ''}`}
-                  title={take.status === 'failed' ? (take.error ?? '生成失败') : `第 ${String(index + 1)} 版 · ${String(Math.round((take.latencyMs ?? 0) / 1000))}s`}
-                  onClick={() => { showTake(id, take.id) }}
+                  title={take.status === 'failed'
+                    // 失败的格子点一下就是**重试它**：`showTakeIn` 对没有素材的版本会
+                    // 直接返回（没什么可显示的），所以那个点击原本什么都不做，正好拿来用。
+                    ? `${take.error ?? '生成失败'}｜点一下用同样的参数重试`
+                    : `第 ${String(index + 1)} 版 · ${String(Math.round((take.latencyMs ?? 0) / 1000))}s｜点一下显示这一版`}
+                  onClick={() => {
+                    if (take.status === 'failed') void rerunTake(id, take)
+                    else showTake(id, take.id)
+                  }}
                 >
                   {take.status === 'succeeded' && take.assetId !== ''
                     ? (producesVideo(String(data.kind))
@@ -322,6 +337,25 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                   <span className="cell-no">{index + 1}</span>
                 </button>
               ))}
+            </div>
+          ) : null}
+          {/* 版本条下面这一行：**用这一版重跑**。
+              债务清单第 21 条：版本能记录、能比较、能选用，却一直不能「用这一版的参数
+              再跑一次」—— 而参数与种子其实都存着，缺的只是这个入口。
+              （失败的版本不走这里：它显示不出来，点它的格子就是重试。） */}
+          {spec.picture && shown !== undefined ? (
+            <div className="take-actions" data-testid="take-actions">
+              <button
+                type="button"
+                className="link nodrag"
+                data-testid="rerun-take"
+                disabled={running}
+                title={`复现第 ${String(shownIndex + 1)} 版：同样的参数与种子再跑一遍（不是重新抽一次）`}
+                onClick={() => { void rerunTake(id, shown) }}
+              >
+                ↻ 复现这一版
+              </button>
+              {shown.seed === undefined ? null : <span className="take-actions-note">种子 {String(shown.seed)}</span>}
             </div>
           ) : null}
           <PromptInput
@@ -1377,6 +1411,47 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   }, [settleJob])
 
   /**
+   * 提交一个作业，并把它记在这个节点上。
+   *
+   * 生成（要经过一遍解析与拒绝）与重拍（参数已经确定）都落到这里，所以
+   * 「提交之后画布该做什么」只有一份：设运行态、记 jobId、报一句状态、交给 settleJob。
+   * @param nodeId - the node the job belongs to.
+   * @param payload - the job request, minus whatever `prepare` fills in.
+   * @param pending - what to tell the operator right after submitting.
+   * @param prepare - optional async step that adds fields (creating a shot is a request of its own).
+   */
+  const submitAndTrack = useCallback(async (
+    nodeId: string,
+    payload: Parameters<typeof submitJob>[0],
+    pending: string,
+    prepare?: () => Promise<Partial<Parameters<typeof submitJob>[0]>>,
+  ) => {
+    setRunningNodeId(nodeId)
+    runStartedAt.current.set(nodeId, Date.now())
+    setProgress((current) => {
+      const next = { ...current }
+      delete next[nodeId]
+      return next
+    })
+    setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, status: 'running' as const } } : node))
+    try {
+      const extra = prepare === undefined ? {} : await prepare()
+      const { job } = await submitJob({ ...payload, ...extra })
+      jobsByNode.current.set(nodeId, job.id)
+      setStatus(pending)
+      void settleJob(job)
+    } catch (error) {
+      // 提交本身失败是**同步**失败（画布不存在、缺字段、服务端拒绝），
+      // 如实报错，不要让它看起来像「在跑」。
+      markDirty()
+      setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, status: 'failed' as const } } : node))
+      setStatus(error instanceof Error ? error.message : '提交失败')
+      setRunningNodeId(null)
+      runStartedAt.current.delete(nodeId)
+    }
+  }, [markDirty, setNodes, settleJob])
+
+  /**
    * Generate for one node.
    *
    * Submits a **job** and returns: a render is no longer an HTTP request. An
@@ -1448,15 +1523,27 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       }
     }
 
-    setRunningNodeId(nodeId)
-    runStartedAt.current.set(nodeId, Date.now())
-    setProgress((current) => {
-      const next = { ...current }
-      delete next[nodeId]
-      return next
-    })
-    setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, status: 'running' as const } } : node))
-    try {
+    await submitAndTrack(nodeId, {
+      projectId,
+      nodeId,
+      prompt,
+      ...(isText ? { kind: 'text' as const } : {}),
+      size: sizeFor(target.data),
+      count: typeof target.data.count === 'number' ? target.data.count : 1,
+      ...(workflowId === '' ? {} : { workflowId }),
+      // 片长只对视频类工作流有意义；别的图里没有 $duration，多传一个数字它也不认。
+      ...(typeof target.data.duration === 'number' ? { duration: target.data.duration } : {}),
+      // 剪辑参数（从第几秒开始）走 params：工作流用不到的键它自己忽略，
+      // 所以这里不需要「哪种节点传哪些参数」的对照表。
+      ...(typeof target.data.start === 'number' ? { params: { start: target.data.start } } : {}),
+      // 文本：节点里那段字是**指令**，上游那段字是「接着写」的素材。
+      // 两段都在时才给上下文——只给一段的话，模型会把同一句话读两遍。
+      ...(isText && own !== '' && upstream !== '' ? { params: { context: upstream } } : {}),
+    }, isText
+      ? '已提交：等文本模型写…'
+      : spec.kind === 'video'
+        ? '已提交：视频要十几分钟，可以先去干别的'
+        : spec.capability === 'video-edit' ? '已提交：剪辑不用显卡，几秒就完' : '已提交…', async () => {
       // The history id is the node's own; the operator never sees a "shot".
       // 先建好：第一帧进度可能在节点自己知道 shotId 之前就到了。
       // **文本不建镜头**：它不是文件，没有「版本」这套，建了只会留一个空镜头。
@@ -1466,41 +1553,51 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         shotId = created.shot.id
         shotToNode.current.set(shotId, nodeId)
       }
-      const { job } = await submitJob({
-        projectId,
-        nodeId,
-        prompt,
-        ...(shotId === '' ? {} : { shotId }),
-        ...(isText ? { kind: 'text' as const } : {}),
-        size: sizeFor(target.data),
-        count: typeof target.data.count === 'number' ? target.data.count : 1,
-        ...(workflowId === '' ? {} : { workflowId }),
-        // 片长只对视频类工作流有意义；别的图里没有 $duration，多传一个数字它也不认。
-        ...(typeof target.data.duration === 'number' ? { duration: target.data.duration } : {}),
-        // 剪辑参数（从第几秒开始）走 params：工作流用不到的键它自己忽略，
-        // 所以这里不需要「哪种节点传哪些参数」的对照表。
-        ...(typeof target.data.start === 'number' ? { params: { start: target.data.start } } : {}),
-        // 文本：节点里那段字是**指令**，上游那段字是「接着写」的素材。
-        // 两段都在时才给上下文——只给一段的话，模型会把同一句话读两遍。
-        ...(isText && own !== '' && upstream !== '' ? { params: { context: upstream } } : {}),
-      })
-      jobsByNode.current.set(nodeId, job.id)
-      setStatus(isText
-        ? '已提交：等文本模型写…'
-        : spec.kind === 'video'
-          ? '已提交：视频要十几分钟，可以先去干别的'
-          : spec.capability === 'video-edit' ? '已提交：剪辑不用显卡，几秒就完' : '已提交…')
-      void settleJob(job)
-    } catch (error) {
-      // 提交本身失败是**同步**失败（画布不存在、缺字段、服务端拒绝），
-      // 如实报错，不要让它看起来像「在跑」。
-      markDirty()
-      setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, status: 'failed' as const } } : node))
-      setStatus(error instanceof Error ? error.message : '提交失败')
-      setRunningNodeId(null)
-      runStartedAt.current.delete(nodeId)
+      if (shotId !== '') {
+        // **立刻把镜头写进节点。** 失败时服务端不会回 shotId（作业没成功），而失败的
+        // 那一条 take 恰恰记在这个镜头上 —— 不写的话，失败的版本在版本条上永远看不见，
+        // 「失败也留痕」就只是数据库里的事。
+        markDirty()
+        setNodes((current) => current.map((node) => node.id === nodeId
+          ? { ...node, data: { ...node.data, shotId } }
+          : node))
+      }
+      return shotId === '' ? {} : { shotId }
+    })
+  }, [blockedOf, markDirty, missingInputs, projectId, setNodes, settleJob, submitAndTrack, workflowFor])
+
+  /**
+   * 用某一版 take 的参数**再跑一次**（含种子）。
+   *
+   * 债务清单第 21 条：版本条能记录、能比较、能选用，却一直不能「用这一版的参数再跑一次」——
+   * 而参数与种子其实都存着，缺的只是这个入口。失败的版本同样能重试（同一件事）。
+   *
+   * **种子必须一起传**：只传参数那是「同样的提示词再抽一次」，不是复现这一版。
+   * 重跑落在**同一条版本线**上（沿用 take 的 shotId），所以它长在原来那一版旁边。
+   * @param nodeId - the node the version belongs to.
+   * @param take - the version to reproduce.
+   */
+  const rerunTake = useCallback(async (nodeId: string, take: TakeInfo) => {
+    if (jobsByNode.current.has(nodeId)) {
+      setStatus('这个节点已经在跑了')
+      return
     }
-  }, [blockedOf, markDirty, missingInputs, projectId, setNodes, settleJob, workflowFor])
+    const params = take.params ?? {}
+    const prompt = typeof params.prompt === 'string' ? params.prompt : ''
+    const workflowId = typeof params.workflow === 'string' ? params.workflow : ''
+    await submitAndTrack(nodeId, {
+      projectId,
+      nodeId,
+      prompt,
+      ...(take.shotId === '' ? {} : { shotId: take.shotId }),
+      ...(typeof params.size === 'string' && params.size !== '' ? { size: params.size } : {}),
+      ...(typeof params.count === 'number' ? { count: params.count } : {}),
+      ...(workflowId === '' ? {} : { workflowId }),
+      ...(typeof params.duration === 'number' ? { duration: params.duration } : {}),
+      ...(typeof params.params === 'object' && params.params !== null ? { params: params.params as Record<string, number | string> } : {}),
+      ...(take.seed === undefined ? {} : { seed: take.seed }),
+    }, take.status === 'failed' ? '正在重试这一版…' : '正在复现这一版（同参数同种子）…')
+  }, [projectId, setStatus, submitAndTrack])
 
   /** Show a specific version in the card, and remember it as the chosen one.
    *
@@ -1774,6 +1871,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     takes,
     activeNodeId: selection,
     showTake,
+    rerunTake,
     cancelRun,
     editImage,
     quickEdit,
@@ -1824,7 +1922,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     workflowFor,
     sizeFor,
     // `tick` is not read: it exists so the ETA above is recomputed every 500 ms.
-  }), [beginEdit, blockedOf, cancelRun, compare, editImage, generate, nodes, progress, quickEdit, runningNodeId, runnable, selection, setParam, showTake, sizeFor, stats, takes, textBackend, tick, workflowFor])
+  }), [beginEdit, blockedOf, cancelRun, compare, editImage, generate, nodes, progress, quickEdit, rerunTake, runningNodeId, runnable, selection, setParam, showTake, sizeFor, stats, takes, textBackend, tick, workflowFor])
 
   // 左键双击空白处 → 添加节点面板。
   //

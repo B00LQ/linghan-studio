@@ -175,6 +175,7 @@ const jobs = createJobRegistry({
       ...(request.duration === undefined ? {} : { duration: request.duration }),
       ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
       ...(request.params === undefined ? {} : { params: request.params }),
+      ...(request.seed === undefined ? {} : { seed: request.seed }),
     }, {
       onQueued: hooks.queued,
       onProgress: (progress) => { hooks.progress(progress as unknown as Record<string, unknown>) },
@@ -489,6 +490,8 @@ const server = createServer((req, res) => {
           ...(typeof body.params === 'object' && body.params !== null && !Array.isArray(body.params)
             ? { params: body.params as Record<string, number | string> }
             : {}),
+          // 固定种子：画布上的「复现这一版」就是靠它把这一版原样再跑一遍。
+          ...(typeof body.seed === 'number' ? { seed: body.seed } : {}),
           ...(typeof body.shotId === 'string' && body.shotId !== '' ? { shotId: body.shotId } : {}),
         })
         // 202：请求已被接受，活儿还没干完。这不是错误状态。

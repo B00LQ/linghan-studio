@@ -162,6 +162,38 @@ const run = async () => {
   check('回到「约 N 秒」', settled !== null && /^约 \d+ 秒$/u.test(settled.text), settled?.text ?? '')
   check('进度条已消失', settled?.width === null, String(settled?.width))
 
+  log('⑧ 用这一版的参数再跑一次（债务第 21 条：重拍 / 重试）')
+  // 这一节**真点一次**「复现这一版」，因为它要验的正是客户端怎么组装那个请求：
+  // 参数漏了哪一项、种子忘了带，都只在点下去之后才看得出来。代价是多出一次图（约 6 秒）。
+  const before = (await api.call(`/api/shots/${shotId}/takes`)).json.takes ?? []
+  const shown = before[0] ?? null
+  const rerunButton = await s.evaluate(`(() => {
+    const el = document.querySelector('[data-testid="rerun-take"]');
+    return el === null ? null : { label: (el.textContent || '').trim(), title: el.title || '', disabled: el.disabled };
+  })()`)
+  check('版本条下面出现了「复现这一版」', rerunButton !== null && rerunButton.label.includes('复现'), JSON.stringify(rerunButton))
+  check('提示里说清了是「同参数同种子」', (rerunButton?.title ?? '').includes('种子'), rerunButton?.title ?? '')
+  if (rerunButton !== null) {
+    await s.clickSelector('[data-testid="rerun-take"]')
+    const regenerated = await until(async () => {
+      const takes = (await api.call(`/api/shots/${shotId}/takes`)).json.takes ?? []
+      return takes.length > before.length ? takes : null
+    }, 120_000)
+    check('重跑落在**同一条版本线**上（不是另起一条）',
+      regenerated !== null && regenerated.length === before.length + 1,
+      `${String(before.length)} -> ${String(regenerated?.length ?? 0)} 版`)
+    const fresh = regenerated?.[0]
+    check('新版本的种子与那一版相同（这才叫复现，不是再抽一次）',
+      fresh?.seed !== undefined && fresh.seed === shown?.seed,
+      `旧 ${String(shown?.seed)} / 新 ${String(fresh?.seed)}`)
+    check('新版本的提示词与那一版相同',
+      fresh?.params?.prompt === shown?.params?.prompt,
+      JSON.stringify({ old: shown?.params?.prompt, fresh: fresh?.params?.prompt }).slice(0, 120))
+    check('新版本的工作流与那一版相同',
+      fresh?.params?.workflow === shown?.params?.workflow,
+      `${String(shown?.params?.workflow)} -> ${String(fresh?.params?.workflow)}`)
+  }
+
   check('全程没有 JS 报错', s.consoleErrors.length === 0, s.consoleErrors.slice(0, 2).join(' | '))
   await s.shot('generation-progress.png')
   s.kill()
