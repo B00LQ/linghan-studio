@@ -26,11 +26,14 @@ const TEXT: Footprint = { w: 260, h: 150 }
 const IMAGE: Footprint = { w: 320, h: 430 }
 /** 视频卡按 16:9 排，比图片矮一些。 */
 const VIDEO: Footprint = { w: 360, h: 300 }
+/** 裁切/拼接也是视频卡：同一个播放器，同样 16:9。 */
+const CLIP: Footprint = VIDEO
 
 /** The footprint for a node kind. */
 export function footprintOf(kind: string): Footprint {
   if (kind === 'image') return IMAGE
   if (kind === 'video') return VIDEO
+  if (kind === 'trim' || kind === 'concat') return CLIP
   return TEXT
 }
 

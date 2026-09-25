@@ -19,7 +19,7 @@ import { loadConfig } from './config.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
-import { applyGeneration, applyOps, inboundImageUrl, readDocument, writeDocument } from './ops.ts'
+import { applyGeneration, applyOps, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
 import { makeZip, type ZipEntry } from './zip.ts'
@@ -121,7 +121,8 @@ const jobs = createJobRegistry({
     // 镜头：没有就现建一个，和画布点击、Agent 调用走的是同一条路。
     let shotId = request.shotId ?? ''
     if (shotId === '' || store.getShot(shotId) === undefined) {
-      shotId = store.addShot(request.projectId, request.prompt.slice(0, 40), request.prompt).id
+      // 剪辑/拼接没有提示词，镜头标题会空着——那不好看也不好找，给一句通用的。
+      shotId = store.addShot(request.projectId, request.prompt.slice(0, 40) || '剪辑', request.prompt).id
     }
     const history = store.listTakes(shotId)
     // 入边上的输入图（首帧/尾帧/参考图）。**端口 id 就是工作流里的占位符名**
@@ -130,13 +131,13 @@ const jobs = createJobRegistry({
     // 只读这一份文档解析连线；落盘前会再读一次，因为渲染这十几分钟里别人可能改了画布，
     // 拿旧的这份去写会把他的改动覆盖掉。
     const before = readDocument(store, request.projectId)
-    const images: Record<string, string> = {}
+    const inputs: Record<string, string> = {}
     for (const edge of before.edges) {
       if (edge.target !== request.nodeId) continue
       const name = String(edge.targetHandle ?? '')
-      if (name === '' || images[name] !== undefined) continue
-      const url = inboundImageUrl(before, request.nodeId, name)
-      if (url !== '') images[name] = url
+      if (name === '' || inputs[name] !== undefined) continue
+      const url = inboundAssetUrl(before, request.nodeId, name)
+      if (url !== '') inputs[name] = url
     }
     const files = await gateway.renderImage({
       prompt: request.prompt,
@@ -145,7 +146,8 @@ const jobs = createJobRegistry({
       ...(request.count === undefined ? {} : { count: request.count }),
       ...(request.workflowId === undefined ? {} : { workflowId: request.workflowId }),
       ...(request.duration === undefined ? {} : { duration: request.duration }),
-      ...(Object.keys(images).length === 0 ? {} : { images }),
+      ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
+      ...(request.params === undefined ? {} : { params: request.params }),
     }, {
       onQueued: hooks.queued,
       onProgress: (progress) => { hooks.progress(progress as unknown as Record<string, unknown>) },
@@ -431,7 +433,12 @@ const server = createServer((req, res) => {
           json(res, 404, { error: '画布不存在' })
           return
         }
-        if (nodeId === '' || prompt === '') {
+        // 提示词为空**不一定**是错：剪辑/拼接那类工作流根本不生成画面，图里没有 `$prompt`。
+        // 该不该要提示词由**工作流**说了算（summarize().needsPrompt），不是一刀切——
+        // 一刀切的症状是「点生成什么也没发生，只回一句 400」。
+        const chosen = workflowList().find((item) => item.id === (typeof body.workflow === 'string' ? body.workflow : ''))
+        const needsPrompt = chosen === undefined || summarize(chosen).needsPrompt
+        if (nodeId === '' || (prompt === '' && needsPrompt)) {
           json(res, 400, { error: '缺少 nodeId 或 prompt' })
           return
         }
@@ -443,6 +450,9 @@ const server = createServer((req, res) => {
           ...(typeof body.count === 'number' ? { count: body.count } : {}),
           ...(typeof body.workflow === 'string' && body.workflow !== '' ? { workflowId: body.workflow } : {}),
           ...(typeof body.duration === 'number' ? { duration: body.duration } : {}),
+          ...(typeof body.params === 'object' && body.params !== null && !Array.isArray(body.params)
+            ? { params: body.params as Record<string, number | string> }
+            : {}),
           ...(typeof body.shotId === 'string' && body.shotId !== '' ? { shotId: body.shotId } : {}),
         })
         // 202：请求已被接受，活儿还没干完。这不是错误状态。

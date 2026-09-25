@@ -141,7 +141,7 @@ export interface GenerationStats {
 export const fetchGenerationStats = (): Promise<GenerationStats> => request<GenerationStats>('/api/generation/stats')
 
 /** What a stored workflow produces. */
-export type WorkflowCapability = 'image' | 'video'
+export type WorkflowCapability = 'image' | 'video' | 'video-edit'
 
 /** Where a render job is in its life. */
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
@@ -192,6 +192,8 @@ export const submitJob = (input: {
   workflowId?: string
   duration?: number
   shotId?: string
+  /** 非提示词、非尺寸的取值（裁切的 start…），直接当工作流占位符的值用。 */
+  params?: Record<string, number | string>
 }): Promise<{ job: StudioJob }> =>
   request('/api/jobs', {
     method: 'POST',
@@ -204,6 +206,7 @@ export const submitJob = (input: {
       ...(input.workflowId === undefined ? {} : { workflow: input.workflowId }),
       ...(input.duration === undefined ? {} : { duration: input.duration }),
       ...(input.shotId === undefined ? {} : { shotId: input.shotId }),
+      ...(input.params === undefined ? {} : { params: input.params }),
     }),
   })
 
@@ -243,6 +246,11 @@ export interface WorkflowInfo {
    * 以及生成前拦一道、给人话（而不是跑出一张和参考图无关的图）。
    */
   requires: string[]
+  /**
+   * 这套工作流要不要提示词。剪辑/拼接不要（它们不生成画面，只裁/接），
+   * 画布据此决定「提示词为空」算不算错误。
+   */
+  needsPrompt: boolean
 }
 
 /** Where one logical value goes in a workflow's graph. */

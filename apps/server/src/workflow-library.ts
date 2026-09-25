@@ -44,7 +44,7 @@ export interface WorkflowBinding {
 }
 
 /** What a workflow produces, inferred from the graph's output nodes. */
-export type WorkflowCapability = 'image' | 'video'
+export type WorkflowCapability = 'image' | 'video' | 'video-edit'
 
 /**
  * Node classes that write a video (or an animation).
@@ -332,7 +332,7 @@ export function checkWorkflow(graph: Record<string, WorkflowNode>, objectInfo: R
  * 默认跑的仍是已知能出片的那条，快的这条要人选。这不是保守，是「换默认值」和「多给
  * 一个选项」是两件事：前者会在人没准备好时改变产出质量。
  */
-const BUILT_IN = new Set(['z-image-turbo', 'z-image-turbo-img2img', 'minimax-h3-video', 'minimax-h3-video-fast', 'minimax-h3-video-pdd'])
+const BUILT_IN = new Set(['z-image-turbo', 'z-image-turbo-img2img', 'minimax-h3-video', 'minimax-h3-video-fast', 'minimax-h3-video-pdd', 'video-trim', 'video-concat'])
 
 /** A stored workflow plus its provenance. */
 export interface WorkflowSummary {
@@ -347,6 +347,13 @@ export interface WorkflowSummary {
   models: string[]
   /** Whether the prompt binding is set (a workflow without one cannot run). */
   ready: boolean
+  /**
+   * 这套工作流要不要提示词。
+   *
+   * 剪辑/拼接不要（它们不生成画面，只是在容器层面裁/接），画布据此决定「提示词为空」
+   * 算不算错误——对生成类工作流是错，对剪辑类不是。
+   */
+  needsPrompt: boolean
   /**
    * 必须接上的输入（端口 id）。
    *
@@ -394,7 +401,7 @@ export function loadWorkflows(dataDir: string, builtInDir: string): StudioWorkfl
     }
   }
 
-  for (const name of ['z-image-turbo.json', 'z-image-turbo-img2img.json', 'minimax-h3-video.json', 'minimax-h3-video-fast.json', 'minimax-h3-video-pdd.json']) {
+  for (const name of ['z-image-turbo.json', 'z-image-turbo-img2img.json', 'minimax-h3-video.json', 'minimax-h3-video-fast.json', 'minimax-h3-video-pdd.json', 'video-trim.json', 'video-concat.json']) {
     const parsed = readOne(join(builtInDir, name), name.replace(/\.json$/u, ''))
     if (parsed !== undefined) workflows.push(parsed)
   }
@@ -413,6 +420,12 @@ export function loadWorkflows(dataDir: string, builtInDir: string): StudioWorkfl
 /** Summarize one workflow for the list view. */
 export function summarize(workflow: StudioWorkflow): WorkflowSummary {
   const binding = workflow.bindings.prompt
+  // 「要不要提示词」= 图里有 `$prompt`，**或者**上传的工作流把提示词绑到了某个输入上。
+  // 只看 `$prompt` 会把「有绑定、只是没用占位符」的导入工作流判成不要提示词，
+  // 那是错的（它照样要人写提示词）。
+  const needsPrompt = binding !== undefined
+    || Object.values(workflow.graph).some((node) => Object.values(node.inputs ?? {}).some((value) => value === '$prompt'))
+  const promptReady = !needsPrompt || (binding !== undefined && binding.node !== '' && binding.input !== '')
   return {
     id: workflow.id,
     title: workflow.title,
@@ -426,7 +439,8 @@ export function summarize(workflow: StudioWorkflow): WorkflowSummary {
       ...Object.values(workflow.models ?? {}),
       ...Object.values(workflow.graph).flatMap((node) => Object.values(node.inputs ?? {}).map(str)),
     ].filter((value) => MODEL_EXT.test(value)))],
-    ready: binding !== undefined && binding.node !== '' && binding.input !== '',
+    ready: promptReady,
+    needsPrompt,
     requires: workflow.requires ?? [],
   }
 }

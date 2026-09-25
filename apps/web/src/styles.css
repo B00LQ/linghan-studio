@@ -960,6 +960,17 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   background: var(--panel-2);
   color: var(--text);
 }
+/* 裁切的「从第几秒 / 要几秒」：窄一点，两个并排也不挤掉模型名。 */
+.prompt-window .bar input.clip-number {
+  width: 54px;
+  font-size: 11px;
+  padding: 3px 5px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
 .prompt-window .send {
   width: 30px;
   height: 30px;

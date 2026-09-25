@@ -49,7 +49,7 @@ export interface CanvasDocument {
 
 /** One operation to apply. */
 export type CanvasOp =
-  | { type: 'add_node'; kind: 'text' | 'image' | 'video' | 'config' | 'grid'; text?: string; size?: string; count?: number; duration?: number; x?: number; y?: number }
+  | { type: 'add_node'; kind: 'text' | 'image' | 'video' | 'trim' | 'concat' | 'config' | 'grid'; text?: string; size?: string; count?: number; duration?: number; start?: number; x?: number; y?: number }
   | { type: 'set_text'; nodeId: string; text: string }
   | { type: 'set_config'; nodeId: string; size?: string; count?: number }
   | { type: 'connect'; from: string; to: string; port?: string }
@@ -105,12 +105,14 @@ export function writeDocument(store: StudioStore, projectId: string, doc: Canvas
 }
 
 /** Build one node with the canvas's real shape. */
-export function makeNode(kind: 'text' | 'image' | 'video' | 'config' | 'grid', options: {
+export function makeNode(kind: 'text' | 'image' | 'video' | 'trim' | 'concat' | 'config' | 'grid', options: {
   text?: string
   size?: string
   count?: number
-  /** Clip length in seconds; video nodes only. */
+  /** Clip length in seconds; video and trim nodes. */
   duration?: number
+  /** 裁切起点（秒）；只对 trim 有意义。 */
+  start?: number
   x?: number
   y?: number
   url?: string
@@ -133,7 +135,13 @@ export function makeNode(kind: 'text' | 'image' | 'video' | 'config' | 'grid', o
         ? { kind, text: options.text ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1, status: 'idle' }
         : kind === 'video'
           ? { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1344x768', duration: options.duration ?? 5, status: 'idle' }
-          : { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1 }
+          // 裁切/拼接的默认值与前端 `initialData` **逐字一致**：Agent 建的和人建的
+          // 必须长得一样，否则「两个入口等价」就只是口号。
+          : kind === 'trim'
+            ? { kind, url: options.url ?? '', start: options.start ?? 0, duration: options.duration ?? 3, status: 'idle' }
+            : kind === 'concat'
+              ? { kind, url: options.url ?? '', status: 'idle' }
+              : { kind, text: options.text ?? '', url: options.url ?? '', size: options.size ?? '1024x1024', count: options.count ?? 1 }
   if (options.shotId !== undefined) base.shotId = options.shotId
   if (options.takeId !== undefined) base.takeId = options.takeId
   if (options.takeNumber !== undefined) base.takeNumber = options.takeNumber
@@ -204,6 +212,7 @@ export function applyOps(doc: CanvasDocument, ops: CanvasOp[]): OpResult[] {
         ...(op.size === undefined ? {} : { size: op.size }),
         ...(op.count === undefined ? {} : { count: op.count }),
         ...(op.duration === undefined ? {} : { duration: op.duration }),
+        ...(op.start === undefined ? {} : { start: op.start }),
         x: op.x ?? 80 + index * 40,
         y: op.y ?? 80 + index * 30,
       })
@@ -308,28 +317,32 @@ export function resolvePrompt(doc: CanvasDocument, node: CanvasNode): string {
 export const TARGET_PORT_BY_KIND: Record<string, Record<string, string | undefined>> = {
   text: { image: 'prompt', video: 'prompt' },
   image: { video: 'first', image: 'ref' },
+  // 视频接到剪辑节点上：裁切只有一个入口，拼接有两个（默认进**前一段**，
+  // 想接后一段就显式给 port: 'in1'）。
+  video: { trim: 'in', concat: 'in0' },
 }
 
 /**
  * Port ids an Agent may name explicitly on a connection.
  *
- * 「首帧」「参考图」有默认值（按两头的类型自动选），「尾帧」没有——它只能被显式点名。
- * 这份常量同时是**工具 schema 的枚举**与测试的判据，避免枚举在 schema 里另抄一遍。
+ * 「首帧」「参考图」「拼接的前一段」有默认值（按两头类型自动选），其余的要显式点名：
+ * 尾帧 `last`、拼接的后一段 `in1`。这份常量同时是**工具 schema 的枚举**与测试的判据，
+ * 避免枚举在 schema 里另抄一遍。
  */
-export const CONNECTABLE_PORTS = ['prompt', 'first', 'last', 'ref'] as const
+export const CONNECTABLE_PORTS = ['prompt', 'first', 'last', 'ref', 'in', 'in0', 'in1'] as const
 
 /**
- * The asset url feeding one inbound image port of a node.
+ * The asset url feeding one inbound asset port of a node.
  *
- * 图生视频的首帧/尾帧就是这么来的：入边指向的那个图片节点带什么素材，就用什么当首帧。
- * 解析发生在**服务端**，所以画布点击、Agent 调用、作业运行器三条路都自动支持，
- * 不需要客户端把图再传一遍（它已经在素材库里了）。
+ * 图生视频的首帧/尾帧、图生图的参考图、剪辑节点的待剪片段都是这么来的：入边指向的
+ * 那个节点带什么素材，就用什么。解析发生在**服务端**，所以画布点击、Agent 调用、
+ * 作业运行器三条路都自动支持，不需要客户端把素材再传一遍（它已经在素材库里了）。
  * @param doc - canvas document.
  * @param nodeId - the consuming node.
- * @param handle - inbound handle id (`first` / `last`).
- * @returns the upstream image's asset url, or empty when nothing usable is connected.
+ * @param handle - inbound handle id (`first` / `last` / `ref` / `in0` …).
+ * @returns the upstream asset's url, or empty when nothing usable is connected.
  */
-export function inboundImageUrl(doc: CanvasDocument, nodeId: string, handle: string): string {
+export function inboundAssetUrl(doc: CanvasDocument, nodeId: string, handle: string): string {
   // 没有 targetHandle 的边（旧文档，以及 Agent 用 canvas_connect 建的）也算候选：
   // Agent 没有「端口」这个概念，它的边只会是「把某个节点的产物接到这个节点上」。
   // 真正决定能不能当首帧的是**上游有没有画面**（`data.url`），所以这里不必先判类型——
@@ -341,6 +354,6 @@ export function inboundImageUrl(doc: CanvasDocument, nodeId: string, handle: str
   if (edge === undefined) return ''
   const source = doc.nodes.find((item) => item.id === edge.source)
   const url = source?.data.url
-  // 上游节点存在但还没出图（url 为空）时也返回空：那时「没有首帧」才是事实。
+  // 上游节点存在但还没出片（url 为空）时也返回空：那时「没有输入」才是事实。
   return typeof url === 'string' ? url : ''
 }

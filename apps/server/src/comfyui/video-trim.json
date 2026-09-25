@@ -1,0 +1,32 @@
+{
+  "id": "video-trim",
+  "title": "视频剪辑 · 裁切一段",
+  "capability": "video-edit",
+  "source": "用 ComfyUI 核心的 LoadVideo + Video Slice + SaveVideo 裁一段，**不过扩散模型**：它只是容器层面的剪切，所以是秒级的，不是分钟级。`$in` 是画布上「视频剪辑」节点的视频入口（端口 id 就是占位符名，见 ops.ts 的说明）。用 Video Slice 而不是 VideoTrim：后者的时间是 VIDEO_EDIT 那种 socketless 结构参数，API 格式里不好表达，而 Slice 的 start_time/duration 是两个普通浮点数。",
+  "requiredNodes": ["LoadVideo", "Video Slice", "SaveVideo"],
+  "requires": ["in"],
+  "defaults": {
+    "start": 0,
+    "duration": 3
+  },
+  "models": {},
+  "graph": {
+    "load": {
+      "class_type": "LoadVideo",
+      "inputs": { "file": "$in" }
+    },
+    "slice": {
+      "class_type": "Video Slice",
+      "inputs": {
+        "video": ["load", 0],
+        "start_time": "$start",
+        "duration": "$duration",
+        "strict_duration": false
+      }
+    },
+    "save": {
+      "class_type": "SaveVideo",
+      "inputs": { "video": ["slice", 0], "filename_prefix": "$prefix", "format": "mp4" }
+    }
+  }
+}

@@ -106,6 +106,14 @@ export interface ComfyUiRequest {
    * 服务端按入边填这张表，工作流用不到的键它自己会忽略。多一套命名就多一处会漂的地方。
    */
   inputs?: Record<string, { bytes: Buffer; name: string }>
+  /**
+   * 剪辑参数这类「非提示词、非尺寸」的取值，直接当工作流占位符的值用
+   * （例如裁切的 `$start` / `$duration`）。
+   *
+   * 不把它们做成一个个具名字段（duration/steps/…）：那是「每加一个功能就改一次
+   * 驱动签名」的路子，而工作流本来就是数据，多给几个键它自己会忽略。
+   */
+  params?: Record<string, number | string>
 }
 
 /**
@@ -319,6 +327,8 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
       bindings: parsed.bindings ?? {},
       defaults: parsed.defaults ?? {},
       models: parsed.models ?? {},
+      optional: parsed.optional ?? [],
+      requires: parsed.requires ?? [],
     }
     if (id === '') cached = built
     return built
@@ -416,6 +426,7 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     const graph = resolveGraph(libraryWorkflow, {
       ...libraryWorkflow.defaults,
       ...inputValues,
+      ...(request.params ?? {}),
       width: request.width,
       height: request.height,
       ...(request.steps === undefined ? {} : { steps: request.steps }),
@@ -479,7 +490,20 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     // native video nodes (`SaveVideo` / `SaveWEBM`) put an mp4 there too, with an
     // `animated` flag beside it. So the mime has to come from the filename — the
     // key name is not evidence of the type.
-    const produced = Object.values(entry.outputs ?? {}).flatMap((node) => node.images ?? [])
+    //
+    // **但只取「汇点」节点的产物。** 预览型节点也会报 outputs：`LoadVideo` 把读进来的
+    // 文件当成一次输出（`images` + `animated`），于是「把所有 outputs 平铺」这条在剪辑
+    // 链路里会把**输入那段片子**当成产物返回——症状是「点了裁切，出来的还是原来那段」，
+    // 而 HTTP 一切正常、take 也记了。真正的产物只可能来自没有被任何节点消费的节点。
+    const consumed = new Set<string>()
+    for (const node of Object.values(graph)) {
+      for (const value of Object.values(node.inputs ?? {})) {
+        if (Array.isArray(value) && typeof value[0] === 'string') consumed.add(value[0])
+      }
+    }
+    const produced = Object.entries(entry.outputs ?? {})
+      .filter(([id]) => !consumed.has(id))
+      .flatMap(([, node]) => node.images ?? [])
     if (produced.length === 0) throw new Error('ComfyUI 没有返回任何文件')
     report({ stage: 'saving', ...(batch === undefined ? {} : { image: batch.index, images: batch.total }) })
     const files: { bytes: Buffer; mime: string; kind: string }[] = []

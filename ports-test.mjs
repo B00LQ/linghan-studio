@@ -11,7 +11,7 @@
  * 这三件事都在**看不见的地方**：错了不会崩，只会「连了线却没生效」或者
  * 「提交了一个不存在的文件名」。所以在这里逐条钉住，用内存里的文档，不碰显卡。
  */
-import { CONNECTABLE_PORTS, TARGET_PORT_BY_KIND, inboundImageUrl, resolvePrompt } from './apps/server/src/ops.ts'
+import { CONNECTABLE_PORTS, TARGET_PORT_BY_KIND, inboundAssetUrl, resolvePrompt } from './apps/server/src/ops.ts'
 import { CANVAS_NODES } from './apps/web/src/canvas/ports.ts'
 import { loadWorkflows, resolveGraph } from './apps/server/src/workflow-library.ts'
 
@@ -90,9 +90,9 @@ const pickDoc = doc([
   edge('e1', 'img-1', 'vid-1', 'first'),
   edge('e2', 'img-2', 'vid-1', 'last'),
 ])
-check('first 取到对应那张图', inboundImageUrl(pickDoc, 'vid-1', 'first') === '/api/assets/aaa', inboundImageUrl(pickDoc, 'vid-1', 'first'))
-check('last 取到另一张', inboundImageUrl(pickDoc, 'vid-1', 'last') === '/api/assets/bbb', inboundImageUrl(pickDoc, 'vid-1', 'last'))
-check('没接的那个是空的', inboundImageUrl(pickDoc, 'vid-1', 'first').length > 0 && inboundImageUrl(pickDoc, 'img-1', 'first') === '')
+check('first 取到对应那张图', inboundAssetUrl(pickDoc, 'vid-1', 'first') === '/api/assets/aaa', inboundAssetUrl(pickDoc, 'vid-1', 'first'))
+check('last 取到另一张', inboundAssetUrl(pickDoc, 'vid-1', 'last') === '/api/assets/bbb', inboundAssetUrl(pickDoc, 'vid-1', 'last'))
+check('没接的那个是空的', inboundAssetUrl(pickDoc, 'vid-1', 'first').length > 0 && inboundAssetUrl(pickDoc, 'img-1', 'first') === '')
 
 const twice = doc([
   node('img-a', 'image', { url: '/api/assets/old' }),
@@ -100,13 +100,13 @@ const twice = doc([
   node('vid-2', 'video', {}),
 ], [edge('e1', 'img-a', 'vid-2', 'first'), edge('e2', 'img-b', 'vid-2', 'first')])
 check('同一个口上接了两条时取最后一条（后连的是最新意图）',
-  inboundImageUrl(twice, 'vid-2', 'first') === '/api/assets/new', inboundImageUrl(twice, 'vid-2', 'first'))
+  inboundAssetUrl(twice, 'vid-2', 'first') === '/api/assets/new', inboundAssetUrl(twice, 'vid-2', 'first'))
 
 const noUrl = doc([
   node('img-empty', 'image', { url: '' }),
   node('vid-3', 'video', {}),
 ], [edge('e1', 'img-empty', 'vid-3', 'first')])
-check('上游还没出图时当作「没有首帧」', inboundImageUrl(noUrl, 'vid-3', 'first') === '')
+check('上游还没出图时当作「没有首帧」', inboundAssetUrl(noUrl, 'vid-3', 'first') === '')
 
 // Agent 建的边没有 handle（它的 canvas_connect 现在会补，但旧文档里没有），
 // 所以「没有 handle」也必须能被首帧认出来——判据是上游有没有画面，不是边长什么样。
@@ -114,12 +114,12 @@ const legacy = doc([
   node('img-1', 'image', { url: '/api/assets/legacy' }),
   node('vid-4', 'video', {}),
 ], [edge('e1', 'img-1', 'vid-4')])
-check('没有 handle 的旧边也算候选', inboundImageUrl(legacy, 'vid-4', 'first') === '/api/assets/legacy', inboundImageUrl(legacy, 'vid-4', 'first'))
+check('没有 handle 的旧边也算候选', inboundAssetUrl(legacy, 'vid-4', 'first') === '/api/assets/legacy', inboundAssetUrl(legacy, 'vid-4', 'first'))
 const legacyText = doc([
   node('txt-1', 'text', { text: 'x' }),
   node('vid-5', 'video', {}),
 ], [edge('e1', 'txt-1', 'vid-5')])
-check('接到视频上的文本不会被当成首帧', inboundImageUrl(legacyText, 'vid-5', 'first') === '')
+check('接到视频上的文本不会被当成首帧', inboundAssetUrl(legacyText, 'vid-5', 'first') === '')
 
 log('③ 提示词只认文本那条入边（视频节点现在还有图片入边）')
 const promptDoc = doc([

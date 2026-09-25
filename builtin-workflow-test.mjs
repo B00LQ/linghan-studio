@@ -25,6 +25,8 @@ const EXPECTED = [
   'minimax-h3-video',
   'minimax-h3-video-fast',
   'minimax-h3-video-pdd',
+  'video-trim',
+  'video-concat',
 ]
 
 let failures = 0
@@ -80,7 +82,10 @@ for (const workflow of builtIns) {
   const tag = `[${workflow.id}] `
   const perKindTag = `[${workflow.id}] `
   console.log(`\n=== ${workflow.id}（${workflow.capability}）===`)
-  check(`${tag}节点数 ≥ 6`, Object.keys(workflow.graph).length >= 6, String(Object.keys(workflow.graph).length))
+  // 阈值按能力分：剪辑/拼接只有「载入 → 裁/接 → 保存」三四个节点，拿生成那张图的
+  // 门槛（≥ 6）去卡它，只会让人以为工作流坏了。
+  const minNodes = workflow.capability === 'video-edit' ? 3 : 6
+  check(`${tag}节点数 ≥ ${String(minNodes)}`, Object.keys(workflow.graph).length >= minNodes, String(Object.keys(workflow.graph).length))
 
   // 蒸馏 LoRA 和步数必须配对。4 步蒸馏跑 8 步、8 步蒸馏跑 4 步，都是**不在训练日程
   // 上**——画质会掉，而画布上看不出来（片子照样出得来，只是更糊/更抖）。这条断言
@@ -122,9 +127,12 @@ for (const workflow of builtIns) {
     check(`${tag}requires 的 ${name} 确实是图里的占位符`, placeholders.has(name), [...placeholders].join(','))
   }
   // 模型文件名要有值：这几条是「写错名字要等十几分钟才知道」的重点。
-  // 蒸馏那一格按工作流**实际挂的是哪个**来查：社区 turbo 挂 `$lora`，官方 PDD 挂 `$pdd`。
+  // **只查这套工作流真的引用了的那些**：剪辑/拼接根本不加载模型（它们不生成画面）。
+  // 蒸馏那一格按工作流实际挂的是哪个来查：社区 turbo 挂 `$lora`，官方 PDD 挂 `$pdd`。
   const distillKey = placeholders.has('pdd') ? 'pdd' : 'lora'
-  for (const key of ['unet', 'clip', 'vae', ...(placeholders.has(distillKey) ? [distillKey] : [])]) {
+  const modelKeys = ['unet', 'clip', 'vae', distillKey].filter((key) => placeholders.has(key))
+  check(`${tag}引用的模型都写在 models 里`, modelKeys.length > 0 || !placeholders.has('unet'), modelKeys.join(','))
+  for (const key of modelKeys) {
     check(`${tag}$ ${key} 在 models 里有值`, typeof workflow.models?.[key] === 'string' && workflow.models[key] !== '', workflow.models?.[key])
   }
 
@@ -138,11 +146,15 @@ for (const workflow of builtIns) {
   }
   check(`${tag}解析后没有残留的 $占位符`, leftover.length === 0, leftover.join(', '))
   // 请求本身的值要真的落进图里。逐字段找一遍，而不是认死节点 id（不同工作流 id 不同）。
+  // **只查这套工作流真的引用了的那些**：剪辑/拼接不生成画面，图里没有 $prompt/$seed/$width，
+  // 「值没落进去」对它们是正常状态。
   const landed = (needle) => Object.values(resolved).some((node) =>
     Object.values(node.inputs ?? {}).some((value) => value === needle))
-  check(`${tag}提示词写进了图里`, landed('探针提示词'))
-  check(`${tag}种子写进了图里`, landed(4242))
-  check(`${tag}宽高写进了图里`, landed(1344) && landed(768))
+  if (placeholders.has('prompt')) check(`${tag}提示词写进了图里`, landed('探针提示词'))
+  if (placeholders.has('seed')) check(`${tag}种子写进了图里`, landed(4242))
+  if (placeholders.has('width') && placeholders.has('height')) {
+    check(`${tag}宽高写进了图里`, landed(1344) && landed(768))
+  }
   // 可选/必需输入要真的接上（`$ref` 解析成了文件名，而不是留在图上）。
   for (const name of [...(workflow.optional ?? []), ...(workflow.requires ?? [])]) {
     check(`${tag}「${name}」接上时真的进了图`, landed(`probe-${name}.png`), `probe-${name}.png`)

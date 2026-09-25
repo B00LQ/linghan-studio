@@ -1,0 +1,34 @@
+{
+  "id": "video-concat",
+  "title": "视频剪辑 · 拼接两段",
+  "capability": "video-edit",
+  "source": "用 ComfyUI 核心的 LoadVideo + ConcatenateVideo + SaveVideo 把两段按顺序接起来，**不过扩散模型**（秒级）。`$in0` / `$in1` 是画布上「视频拼接」节点的两个视频入口（端口 id 即占位符名）。ConcatenateVideo 的 `videos` 是 autogrow 输入，和 ComfyMathExpression 的 `values` 一样要写成**扁平的带点键**（`videos.video0`），不是嵌套字典——这一条有前科，见 builtin-workflow-test.mjs 里的说明。",
+  "requiredNodes": ["LoadVideo", "ConcatenateVideo", "SaveVideo"],
+  "requires": ["in0", "in1"],
+  "defaults": {
+    "codec": "auto"
+  },
+  "models": {},
+  "graph": {
+    "load0": {
+      "class_type": "LoadVideo",
+      "inputs": { "file": "$in0" }
+    },
+    "load1": {
+      "class_type": "LoadVideo",
+      "inputs": { "file": "$in1" }
+    },
+    "join": {
+      "class_type": "ConcatenateVideo",
+      "inputs": {
+        "videos.video0": ["load0", 0],
+        "videos.video1": ["load1", 0],
+        "codec": "$codec"
+      }
+    },
+    "save": {
+      "class_type": "SaveVideo",
+      "inputs": { "video": ["join", 0], "filename_prefix": "$prefix", "format": "mp4" }
+    }
+  }
+}

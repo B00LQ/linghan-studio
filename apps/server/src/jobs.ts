@@ -41,6 +41,11 @@ export interface JobRequest {
   duration?: number
   /** Existing shot to record takes against; empty means "create one". */
   shotId?: string
+  /**
+   * 非提示词、非尺寸的取值，直接当工作流占位符的值用
+   * （裁切的 `start` / `duration`，以后别的编辑节点也走这里）。
+   */
+  params?: Record<string, number | string>
 }
 
 /** One produced file as a job reports it. */

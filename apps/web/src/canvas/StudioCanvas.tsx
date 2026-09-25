@@ -41,7 +41,7 @@ import { CompareView } from './CompareView.tsx'
 import { NodeTools } from './NodeTools.tsx'
 import { transformImage, type EditOps } from './imageEdit.ts'
 import type { BrowserAsset } from '../components/AssetBrowser.tsx'
-import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, specOf, type CanvasNodeKind, type PortKind } from './ports.ts'
+import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, producesVideo, specOf, type CanvasNodeKind, type PortKind } from './ports.ts'
 import { describeProgress, type NodeProgress } from './progress.ts'
 
 /** Data carried by every Studio node. */
@@ -268,7 +268,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
           </span>
           : null}
         {data.kind !== 'text' && history.length > 1 && typeof data.takeNumber !== 'number'
-          ? <span className="shot-meta">{history.length} {data.kind === 'video' ? '条' : '张'}</span>
+          ? <span className="shot-meta">{history.length} {producesVideo(String(data.kind)) ? '条' : '张'}</span>
           : null}
       </header>
 
@@ -277,7 +277,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
       ) : typeof data.url === 'string' && data.url !== '' ? (
         // 视频用真正的播放器：MiniMax H3 出的 mp4 里带音轨，
         // 「有没有声音」是这个模型的一半卖点，用静音缩略图糊弄过去等于藏了一半。
-        data.kind === 'video'
+        producesVideo(String(data.kind))
           ? <video className="node-video" src={data.url} controls playsInline preload="metadata" />
           : <img src={data.url} alt={data.text ?? '生成结果'} />
       ) : (
@@ -287,7 +287,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
           <ul>
             <li>在下方输入提示词，按 ↑ 生成</li>
             <li>或从左侧文本节点拉线接入提示词</li>
-            {data.kind === 'video' ? <li>视频很慢：本机 12 GB 卡上一条约几分钟</li> : null}
+            {producesVideo(String(data.kind)) ? <li>视频很慢：本机 12 GB 卡上一条约几分钟</li> : null}
           </ul>
         </div>
       )}
@@ -306,7 +306,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                   onClick={() => { showTake(id, take.id) }}
                 >
                   {take.status === 'succeeded' && take.assetId !== ''
-                    ? (data.kind === 'video'
+                    ? (producesVideo(String(data.kind))
                       // 缩略图也要是个视频元素：<img src="....mp4"> 什么都不显示。
                       ? <video src={`/api/assets/${take.assetId}`} muted playsInline preload="metadata" />
                       : <img src={`/api/assets/${take.assetId}`} alt={`第 ${String(index + 1)} 版`} />)
@@ -356,35 +356,65 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                     否则它会拿到一套出图的工作流，然后卡在一个永远不出现的视频上。 */}
                 <select
                   className="nodrag workflow-select"
-                  title={data.kind === 'video' ? '用哪套工作流出视频（在「工作流」页导入）' : '用哪套工作流出图（在「工作流」页导入）'}
+                  title={spec.capability === 'video-edit'
+                    ? '用哪套剪辑工作流'
+                    : data.kind === 'video' ? '用哪套工作流出视频（在「工作流」页导入）' : '用哪套工作流出图（在「工作流」页导入）'}
                   value={workflowFor(id, data)}
                   onChange={(event) => { setParam(id, { workflow: event.target.value }) }}
                 >
-                  {runnable.filter((item) => item.capability === spec.kind).map((item) => (
+                  {runnable.filter((item) => item.capability === spec.capability).map((item) => (
                     <option key={item.id} value={item.id}>{item.title}</option>
                   ))}
                 </select>
-                <select
-                  className="nodrag"
-                  value={sizeFor(data)}
-                  onChange={(event) => { setParam(id, { size: event.target.value }) }}
-                >
-                  {data.kind === 'video' ? (
+                {/* 画幅只对「生成」类工作流有意义：剪辑/拼接沿用源片子的画幅。 */}
+                {spec.capability === 'video-edit' ? null : (
+                  <select
+                    className="nodrag"
+                    value={sizeFor(data)}
+                    onChange={(event) => { setParam(id, { size: event.target.value }) }}
+                  >
+                    {data.kind === 'video' ? (
+                      <>
+                        {/* 只列已经实测过的两档：这套模型的可用分辨率桶不是随便填的，
+                            没试过的值不该摆在菜单里当承诺。 */}
+                        <option value="1344x768">1344×768（768p）</option>
+                        <option value="768x448">768×448（快一倍）</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="1024x1024">1024×1024</option>
+                        <option value="1280x720">1280×720</option>
+                        <option value="768x512">768×512</option>
+                      </>
+                    )}
+                  </select>
+                )}
+                {spec.capability === 'video-edit' ? (
+                  // 剪辑/拼接**没有画幅也没有张数**，所以参数条只给裁切的两个数：
+                  // 从第几秒开始、要几秒。拼接什么都不用给（顺序由左右两个入口决定）。
+                  data.kind === 'trim' ? (
                     <>
-                      {/* 只列已经实测过的两档：这套模型的可用分辨率桶不是随便填的，
-                          没试过的值不该摆在菜单里当承诺。 */}
-                      <option value="1344x768">1344×768（768p）</option>
-                      <option value="768x448">768×448（快一倍）</option>
+                      <input
+                        className="nodrag clip-number"
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        title="从第几秒开始"
+                        value={String(typeof data.start === 'number' ? data.start : 0)}
+                        onChange={(event) => { setParam(id, { start: Math.max(0, Number(event.target.value)) }) }}
+                      />
+                      <input
+                        className="nodrag clip-number"
+                        type="number"
+                        min={0.5}
+                        step={0.5}
+                        title="要几秒"
+                        value={String(typeof data.duration === 'number' ? data.duration : 3)}
+                        onChange={(event) => { setParam(id, { duration: Math.max(0.5, Number(event.target.value)) }) }}
+                      />
                     </>
-                  ) : (
-                    <>
-                      <option value="1024x1024">1024×1024</option>
-                      <option value="1280x720">1280×720</option>
-                      <option value="768x512">768×512</option>
-                    </>
-                  )}
-                </select>
-                {data.kind === 'video' ? (
+                  ) : null
+                ) : data.kind === 'video' ? (
                   // 时长按模型的帧数约束给：MiniMax H3 只接受 5+17n 帧，
                   // 所以这里给的是「约几秒」而不是精确秒数（图里那段算式会把它对齐）。
                   <select
@@ -1133,7 +1163,10 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
    *    收到一句「缺参考图」，而不是被悄悄换成别的。
    */
   const workflowFor = useCallback((nodeId: string, data: StudioNodeData): string => {
-    const want = specOf(String(data.kind ?? ''))?.kind
+    // 筛的是 **capability 而不是 kind**：裁切/拼接的 kind 是 trim/concat，但它们跑的是
+    // `video-edit` 那一类工作流（LoadVideo → Video Slice / ConcatenateVideo）。少了这一层，
+    // 剪辑节点会在下拉里看到一整套 MiniMax H3 生成工作流。
+    const want = specOf(String(data.kind ?? ''))?.capability
     if (want === undefined) return ''
     const available = runnable.filter((item) => item.capability === want)
     const chosen = typeof data.workflow === 'string' ? data.workflow : ''
@@ -1165,6 +1198,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
    */
   const sizeFor = useCallback((data: StudioNodeData): string => {
     if (typeof data.size === 'string' && data.size !== '') return data.size
+    if (specOf(String(data.kind ?? ''))?.capability === 'video-edit') return '1024x1024'
     return specOf(String(data.kind ?? ''))?.kind === 'video' ? '1344x768' : '1024x1024'
   }, [])
 
@@ -1331,7 +1365,8 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       return
     }
     const prompt = (target.data.text ?? '').trim() || inboundText(nodeId, nodesRef.current, edgesRef.current)
-    if (prompt === '') {
+    // 剪辑/拼接不生成画面，提示词为空是对的（那套工作流里根本没有 `$prompt`）。
+    if (prompt === '' && spec.capability !== 'video-edit') {
       setStatus('提示词为空：在节点下方写，或从文本节点拉线接入')
       return
     }
@@ -1347,7 +1382,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       // 两种「没有」要分清：真的没导入过，还是导入了但这台机器跑不了（缺节点、
       // 缺模型）。下拉里后者是不显示的，所以这里必须说出来，否则人只会觉得
       // 「明明有工作流却说没有」。
-      const sameKind = workflows.filter((item) => item.capability === spec.kind)
+      const sameKind = workflows.filter((item) => item.capability === spec.capability)
       setStatus(sameKind.length === 0
         ? `没有可用于「${spec.title}」节点的工作流：去「工作流」页导入一套`
         : `「${spec.title}」的工作流这台机器现在跑不了（缺节点或缺模型）：去「工作流」页看缺什么`)
@@ -1388,11 +1423,16 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         size: sizeFor(target.data),
         count: typeof target.data.count === 'number' ? target.data.count : 1,
         workflowId,
-        // 片长只对视频工作流有意义；图片工作流里没有 $duration，多传一个数字它也不认。
-        ...(spec.kind === 'video' && typeof target.data.duration === 'number' ? { duration: target.data.duration } : {}),
+        // 片长只对视频类工作流有意义；别的图里没有 $duration，多传一个数字它也不认。
+        ...(typeof target.data.duration === 'number' ? { duration: target.data.duration } : {}),
+        // 剪辑参数（从第几秒开始）走 params：工作流用不到的键它自己忽略，
+        // 所以这里不需要「哪种节点传哪些参数」的对照表。
+        ...(typeof target.data.start === 'number' ? { params: { start: target.data.start } } : {}),
       })
       jobsByNode.current.set(nodeId, job.id)
-      setStatus(spec.kind === 'video' ? '已提交：视频要十几分钟，可以先去干别的' : '已提交…')
+      setStatus(spec.kind === 'video'
+        ? '已提交：视频要十几分钟，可以先去干别的'
+        : spec.capability === 'video-edit' ? '已提交：剪辑不用显卡，几秒就完' : '已提交…')
       void settleJob(job)
     } catch (error) {
       // 提交本身失败是**同步**失败（画布不存在、缺字段、服务端拒绝），
@@ -1699,10 +1739,17 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
        * 没有样本时宁可**不说**——步数与进度条已经在如实报进展了。
        */
       const kind = String(node?.data.kind ?? '')
-      const known = kind === 'video' || kind === 'image'
+      // 产出什么**资产**：视频类（含裁切/拼接）都产出 video。
+      const assetKind = producesVideo(kind) ? 'video' : kind === 'image' ? 'image' : ''
+      // 只有「生成类」节点才允许退到「同类中位数」：裁切/拼接产出的也是 video，
+      // 但它们是秒级的 —— 拿生成那条 8 分钟的中位数去预估剪辑，等于把刚修过的
+      // 那个谎（拿图片的中位数去预计视频）又说一遍。
+      const generative = assetKind !== '' && specOf(kind)?.capability === assetKind
       // 先精确到「这一类 + 这一套工作流」，没有才退到「这一类」，再没有就不说。
-      const exact = known && node !== undefined ? stats.byWorkflow[`${kind}/${workflowFor(node.id, node.data)}`] : undefined
-      const estimateMs = exact?.medianMs ?? (known ? (stats.byKind[kind]?.medianMs ?? 0) : stats.medianMs)
+      const exact = assetKind === '' || node === undefined
+        ? undefined
+        : stats.byWorkflow[`${assetKind}/${workflowFor(node.id, node.data)}`]
+      const estimateMs = exact?.medianMs ?? (generative ? (stats.byKind[assetKind]?.medianMs ?? 0) : 0)
       // 开始时间按节点记：两件活同时跑时，一个全局时间戳会让两边的倒计时都错。
       const startedAt = runStartedAt.current.get(nodeId) ?? 0
       const view = describeProgress({
@@ -2069,7 +2116,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
           return (
             <CompareView
               nodeLabel={nodeLabel(nodes, comparing)}
-              mediaKind={node?.data.kind === 'video' ? 'video' : 'image'}
+              mediaKind={node !== undefined && producesVideo(String(node.data.kind)) ? 'video' : 'image'}
               takes={takes[shotId] ?? []}
               {...(typeof node?.data.takeId === 'string' ? { currentTakeId: node.data.takeId } : {})}
               onUse={(takeId) => { showTake(comparing, takeId) }}

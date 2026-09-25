@@ -1,22 +1,24 @@
 /**
  * Canvas node catalogue and port model.
  *
- * Three node kinds: 文本、图片、视频. 视频 was added only when a local model could
- * actually produce one — a node kind that cannot run is a promise the canvas
- * cannot keep. An earlier version also had a separate "shot" node and a
- * "version board" node, and the concept count — not the code — is what made the
- * canvas hard to read: a content node owns its prompt, its generation, and its
- * own history.
+ * Five node kinds: 文本、图片、视频、裁切、拼接. 视频 was added only when a local model
+ * could actually produce one — a node kind that cannot run is a promise the canvas
+ * cannot keep; 裁切/拼接 followed the same rule (ComfyUI core has `Video Slice` /
+ * `ConcatenateVideo`, so they run for real and take seconds, not minutes).
+ * An earlier version also had a separate "shot" node and a "version board" node, and
+ * the concept count — not the code — is what made the canvas hard to read: a content
+ * node owns its prompt, its generation, and its own history.
  *
  * Ports still have types, because the 「引用该节点生成」menu has to answer "what
  * can consume what I just dragged out?".
  */
+import type { WorkflowCapability } from '../api.ts'
 
 /** What a port carries. */
 export type PortKind = 'text' | 'image' | 'video'
 
 /** Node kinds the canvas can draw. */
-export type CanvasNodeKind = 'text' | 'image' | 'video' | 'group'
+export type CanvasNodeKind = 'text' | 'image' | 'video' | 'trim' | 'concat' | 'group'
 
 /** One port on a canvas node. */
 export interface PortDef {
@@ -40,6 +42,16 @@ export interface CanvasNodeSpec {
   inputs: PortDef[]
   /** Outbound ports. */
   outputs: PortDef[]
+  /**
+   * 这类节点跑哪种工作流。
+   *
+   * 大多数节点「产出什么」就等于它的 kind（图片节点跑图片工作流），但剪辑/拼接不是：
+   * 它们是 `video-edit` 那一类（`LoadVideo → Video Slice / ConcatenateVideo`，
+   * **不过扩散模型**，所以是秒级而不是分钟级）。没有这一层，剪辑节点会在下拉里
+   * 看到一整套 MiniMax H3 视频生成工作流。
+   * `undefined` = 这类节点不跑工作流（文本节点：要 LLM 供应商，按钮是禁用的）。
+   */
+  capability?: WorkflowCapability
   /** Placeholder for the prompt window. */
   placeholder: string
   /** Whether the window offers 画幅 / 张数 controls. */
@@ -78,6 +90,7 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
       { id: 'ref', kind: 'image', label: '参考图' },
     ],
     outputs: [{ id: 'image', kind: 'image', label: '画面' }],
+    capability: 'image',
     placeholder: '可直接文字生图，或接入上游文本。例如：废车站的候车厅，斜射的晨光，尘埃',
     picture: true,
   },
@@ -95,7 +108,35 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
       { id: 'last', kind: 'image', label: '尾帧' },
     ],
     outputs: [{ id: 'video', kind: 'video', label: '视频' }],
+    capability: 'video',
     placeholder: '描述镜头与声音。例如：雨夜霓虹街头，纸灯笼在雨中轻晃，镜头缓慢推近，环境雨声',
+    picture: true,
+  },
+  {
+    kind: 'trim',
+    title: '裁切片段',
+    description: '裁一段：接一段视频，给出开始时间与长度。秒级完成，不用显卡',
+    // 视频入口只有一个：`in`（也是工作流里的 `$in`）。
+    // **没有提示词入口**：裁切不重新生成画面，那套工作流里根本没有 `$prompt`。
+    inputs: [{ id: 'in', kind: 'video', label: '视频' }],
+    outputs: [{ id: 'video', kind: 'video', label: '裁切结果' }],
+    capability: 'video-edit',
+    placeholder: '',
+    picture: true,
+  },
+  {
+    kind: 'concat',
+    title: '拼接两段',
+    description: '把两段视频按顺序接成一条（左到右）。秒级完成，不用显卡',
+    // 两个入口 order 即拼接顺序：in0 在前、in1 在后。要接三段就串两个节点——
+    // 「无限个入口」在画布上既不好画，也不好在 API 里表达，而串起来效果一样。
+    inputs: [
+      { id: 'in0', kind: 'video', label: '前一段' },
+      { id: 'in1', kind: 'video', label: '后一段' },
+    ],
+    outputs: [{ id: 'video', kind: 'video', label: '拼接结果' }],
+    capability: 'video-edit',
+    placeholder: '',
     picture: true,
   },
 ]
@@ -103,6 +144,18 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
 /** Look up a spec by node kind. */
 export function specOf(kind: string): CanvasNodeSpec | undefined {
   return CANVAS_NODES.find((spec) => spec.kind === kind)
+}
+
+/**
+ * 这类节点产出的是不是视频（含裁切/拼接）。
+ *
+ * 别用 `kind === 'video'` 去判：裁切与拼接也出视频，它们同样需要播放器、
+ * 同样该用「条」而不是「张」说话。判据是**产出端口**的类型，不是节点叫什么。
+ * @param kind - node kind stored in data.
+ * @returns whether anything it produces is a video.
+ */
+export function producesVideo(kind: string): boolean {
+  return specOf(kind)?.outputs.some((port) => port.kind === 'video') ?? false
 }
 
 /** The kind a port carries, when the node kind and port id are known. */
@@ -140,6 +193,10 @@ export function initialData(kind: CanvasNodeKind, extra: Record<string, unknown>
   if (kind === 'text') return { kind, text: '', ...extra }
   // 视频没有「张数」：一次出一条，多出的只会是版本；它多一个「时长」。
   if (kind === 'video') return { kind, text: '', url: '', size: '1344x768', duration: 5, ...extra }
+  // 裁切只有「从第几秒开始、要几秒」两个参数——没有画幅、没有提示词。
+  if (kind === 'trim') return { kind, url: '', start: 0, duration: 3, ...extra }
+  // 拼接两段：只有输入，没有任何参数。
+  if (kind === 'concat') return { kind, url: '', ...extra }
   return { kind, text: '', url: '', size: '1024x1024', count: 1, ...extra }
 }
 
