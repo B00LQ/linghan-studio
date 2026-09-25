@@ -15,3 +15,4 @@ data/
 *.tsbuildinfo
 .vite/
 coverage/
+dist-desktop/
