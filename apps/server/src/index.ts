@@ -24,7 +24,7 @@ import { createTextBackend } from './text.ts'
 import { createAudioBackend } from './audio.ts'
 import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
-import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
+import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, resetWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
 import { makeZip, type ZipEntry } from './zip.ts'
 import { applyUpdate, checkForUpdate, installedVersions, isPortableHome, runningVersion } from './update.ts'
 
@@ -363,6 +363,24 @@ function parseBindings(value: unknown): Record<string, WorkflowBinding> {
     bindings[key] = { node: item.node, input: item.input }
   }
   return bindings
+}
+
+/**
+ * Accept only `{ name: "file.safetensors" }`.
+ *
+ * 这是「换模型/换量化档」的入口（债务第 15 条）：文件名是纯文本，只做两件必须做的事 ——
+ * **去掉路径分隔符**（一个模型名不该能指到目录外）与去掉空值。
+ */
+function parseModels(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null) return {}
+  const models: Record<string, string> = {}
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw !== 'string') continue
+    const name = raw.trim().replace(/[\\/]/gu, '').slice(0, 200)
+    if (key.trim() === '' || name === '') continue
+    models[key.trim()] = name
+  }
+  return models
 }
 
 /** Send a JSON response. */
@@ -1040,7 +1058,9 @@ const server = createServer((req, res) => {
         // 而不是打开映射表单才发现少了两个模型。
         const workflows = workflowList()
         const enriched = await Promise.all(workflows.map(async (workflow) => {
-          const check = await gateway.checkWorkflow(workflow.graph)
+          // `models` 一起传：内置工作流的图里是 `$unet` 这样的占位符，
+          // 不换真名字的话「本机缺哪个模型」永远是空的。
+          const check = await gateway.checkWorkflow(workflow.graph, workflow.models ?? {})
           return {
             ...summarize(workflow),
             missingNodes: check.missingNodes,
@@ -1096,25 +1116,40 @@ const server = createServer((req, res) => {
         return
       }
       if (workflowMatch !== null && method === 'PUT') {
-        // 二次修改：只换绑定/默认值/名字，图不动——图是从 ComfyUI 导出来的，通常是对的。
+        // 二次修改：只换绑定/默认值/名字/模型文件名，图不动——图是从 ComfyUI 导出来的，
+        // 通常是对的。**内置的也改得**：改动写成一份覆盖，随程序发布的那份文件不动
+        // （债务第 10/15 条：换量化档、改 PDD 的 nfe 以前只能导出→改→再导入）。
         const workflowId = decodeURIComponent(workflowMatch[1] as string)
         const body = parseJson(await readText(req))
         const updated = updateWorkflow(config.dataDir, workflowId, {
           ...(typeof body.title === 'string' ? { title: body.title } : {}),
           ...(body.bindings === undefined ? {} : { bindings: parseBindings(body.bindings) }),
           ...(typeof body.defaults === 'object' && body.defaults !== null ? { defaults: body.defaults as Record<string, number | string> } : {}),
+          ...(typeof body.models === 'object' && body.models !== null ? { models: parseModels(body.models) } : {}),
         })
         if (updated === undefined) {
-          json(res, 409, { error: '改不了：要么不存在，要么是内置工作流（它是随程序发布的文件）' })
+          json(res, 404, { error: '工作流不存在' })
           return
         }
         json(res, 200, { workflow: summarize(updated) })
         return
       }
+      // 内置工作流「恢复出厂」：删掉那份覆盖。上传的那种请直接删（DELETE）。
+      const workflowResetMatch = /^\/api\/workflows\/([^/]+)\/reset$/u.exec(pathname)
+      if (workflowResetMatch !== null && method === 'POST') {
+        const workflowId = decodeURIComponent(workflowResetMatch[1] as string)
+        if (!isBuiltIn(workflowId)) {
+          json(res, 400, { error: '只有内置工作流有「恢复内置默认」——上传的那份直接删或者改就行' })
+          return
+        }
+        const found = readWorkflow(config.dataDir, builtInWorkflowDir, workflowId)
+        json(res, 200, { ok: true, reset: resetWorkflow(config.dataDir, workflowId), workflow: found === undefined ? null : summarize(found) })
+        return
+      }
       if (workflowMatch !== null && method === 'DELETE') {
         const workflowId = decodeURIComponent(workflowMatch[1] as string)
         if (!deleteWorkflow(config.dataDir, workflowId)) {
-          json(res, 409, { error: '内置工作流不能删除（它是随程序发布的文件）' })
+          json(res, 409, { error: '内置工作流不能删除（它是随程序发布的文件）——要改就在原地改，或者点「恢复内置默认」退回去' })
           return
         }
         json(res, 200, { ok: true })

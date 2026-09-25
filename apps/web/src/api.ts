@@ -299,6 +299,8 @@ export interface WorkflowInfo {
   needsPrompt: boolean
   /** 采样步数（工作流 defaults 里写了才有）。版本条与下拉都要用它说「这一版几步出的」。 */
   steps?: number
+  /** 内置工作流被改过（存在一份覆盖）。 */
+  edited?: boolean
 }
 
 /** Where one logical value goes in a workflow's graph. */
@@ -353,20 +355,34 @@ export interface WorkflowDetail {
   graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>
   bindings: Record<string, WorkflowBinding>
   defaults: Record<string, number | string>
+  /** `$name` → 文件名（模型/权重）。换量化档就是改这里。 */
+  models?: Record<string, string>
   builtIn: boolean
+  /** 内置的这份被改过（存在一份覆盖）。 */
+  edited?: boolean
 }
 
 /** Read one workflow in full. */
 export const getWorkflow = (workflowId: string): Promise<{ workflow: WorkflowDetail }> =>
   request(`/api/workflows/${encodeURIComponent(workflowId)}`)
 
-/** Change an uploaded workflow's name, mapping or defaults. The graph stays. */
+/**
+ * Change a workflow's name, mapping, defaults or model file names. The graph stays.
+ *
+ * **内置的也改得**：改动写成一份覆盖（随程序发布的那份文件不动），
+ * 所以「改坏了」随时能退回去。上传的那份是原地改。
+ */
 export const updateWorkflow = (workflowId: string, patch: {
   title?: string
   bindings?: Record<string, WorkflowBinding>
   defaults?: Record<string, number | string>
+  models?: Record<string, string>
 }): Promise<{ workflow: WorkflowInfo }> =>
   request(`/api/workflows/${encodeURIComponent(workflowId)}`, { method: 'PUT', body: JSON.stringify(patch) })
+
+/** 把内置工作流退回出厂状态（删掉那份覆盖）。 */
+export const resetWorkflow = (workflowId: string): Promise<{ ok: boolean; reset: boolean; workflow: WorkflowInfo | null }> =>
+  request(`/api/workflows/${encodeURIComponent(workflowId)}/reset`, { method: 'POST' })
 
 /** Delete an uploaded workflow. Built-ins are shipped files and cannot go. */
 export const deleteWorkflow = (workflowId: string): Promise<{ ok: boolean }> =>

@@ -95,15 +95,37 @@ const run = async () => {
     JSON.stringify(verdict.suggested?.width))
   check('步数绑在 KSampler 上', verdict.suggested?.steps?.node === '8', JSON.stringify(verdict.suggested?.steps))
 
-  log('④ 保存：不绑提示词会被拒绝（否则生成出来是空的）')
+  log('④ 保存：要不要提示词由**图**决定，不是由绑定决定')
+  /**
+   * 这条断言原来写的是「不绑提示词 = 不可调用」，而它和 `summarize` 的口径不一致：
+   * 「要不要提示词」= 图里有 `$prompt`，**或者**绑了提示词。上面那份图里的提示词是
+   * **字面量**（`雨夜霓虹街头`），本来就不需要人再给 —— 所以 `ready` 是 true 才对。
+   * 真正该拦的是「图里写着 `$prompt` 却没人给它值」：那种跑出来是空的。
+   * 两种都测，判据才立得住。
+   */
   const noPrompt = await api.call('/api/workflows', {
     method: 'POST',
     body: JSON.stringify({ title: `没绑提示词 ${STAMP}`, graph: serverGraph, bindings: {} }),
   })
-  check('服务端允许保存但标记为不可调用', noPrompt.status === 200 && noPrompt.json.workflow?.ready === false,
+  check('提示词是字面量的图：能保存，而且标记为可调用（它不需要人再给提示词）',
+    noPrompt.status === 200 && noPrompt.json.workflow?.ready === true,
     `HTTP ${String(noPrompt.status)} ready=${String(noPrompt.json.workflow?.ready)}`)
   const noPromptId = noPrompt.json.workflow?.id ?? ''
   if (noPromptId !== '') await api.call(`/api/workflows/${noPromptId}`, { method: 'DELETE' })
+
+  const placeholderOnly = await api.call('/api/workflows', {
+    method: 'POST',
+    body: JSON.stringify({
+      title: `占位符没绑 ${STAMP}`,
+      graph: { 5: { class_type: 'CLIPTextEncode', inputs: { text: '$prompt' } } },
+      bindings: {},
+    }),
+  })
+  check('图里写着 $prompt 却没人给值：能保存但标记为不可调用（跑出来会是空的）',
+    placeholderOnly.status === 200 && placeholderOnly.json.workflow?.ready === false,
+    `HTTP ${String(placeholderOnly.status)} ready=${String(placeholderOnly.json.workflow?.ready)}`)
+  const placeholderId = placeholderOnly.json.workflow?.id ?? ''
+  if (placeholderId !== '') await api.call(`/api/workflows/${placeholderId}`, { method: 'DELETE' })
 
   log('⑤ 保存一份可用的：把模型换回本机有的，这样它真的能出图')
   const runnable = JSON.parse(JSON.stringify(serverGraph))
@@ -289,7 +311,96 @@ const run = async () => {
     check('take 里记着用的是哪次请求', typeof params.prompt === 'string' && params.prompt.includes('便利店'), JSON.stringify(params).slice(0, 120))
   }
 
-  log('⑧ 删除：上传的能删，内置的不能')
+  log('⑧ 内置工作流也改得（债务第 10/15 条）：改的是覆盖，随程序发布的那份文件不动')
+  // 这一节要证两件事，缺一不可：
+  // ① 人的改动真的生效（换量化档 / 改 nfe 不用再「导出→改→再导入」得到一条新 id）；
+  // ② **随程序发布的那份 JSON 一个字节都没变**，而且随时能「恢复内置默认」。
+  const shippedBefore = await s.evaluate(`(async () => {
+    const response = await fetch('/api/workflows/${builtIn.id}');
+    const body = await response.json();
+    return { title: body.workflow.title, edited: body.workflow.edited === true, models: body.workflow.models ?? {} };
+  })()`)
+  check('刚装好时内置的那套没被改过', shippedBefore.edited === false, JSON.stringify(shippedBefore))
+  const modelKey = Object.keys(shippedBefore.models)[0] ?? ''
+  check('内置那套有模型文件字段（换档要改的就是它）', modelKey !== '', JSON.stringify(shippedBefore.models))
+
+  if (modelKey !== '') {
+    const fakeModel = `验收-${STAMP}-未使用.safetensors`
+    const patched = await api.call(`/api/workflows/${builtIn.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ models: { ...shippedBefore.models, [modelKey]: fakeModel } }),
+    })
+    check('改内置工作流的模型文件名被接受（不再 409）', patched.status === 200, `HTTP ${String(patched.status)} ${JSON.stringify(patched.json).slice(0, 120)}`)
+    const afterPatch = (await api.call('/api/workflows')).json.workflows ?? []
+    const edited = afterPatch.find((w) => w.id === builtIn.id)
+    check('列表里标出「已改过」', edited?.edited === true, JSON.stringify(edited?.edited))
+    const detail = (await api.call(`/api/workflows/${builtIn.id}`)).json.workflow
+    check('读回来是改后的值', detail.models?.[modelKey] === fakeModel, String(detail.models?.[modelKey]))
+    // 图上用的是 `$key` 占位符，所以「换文件名」不需要动图 —— 这正是当初把它抽成 models 的理由。
+    check('图没有被改动（换文件名的语义就是只改那一张表）',
+      Object.values(detail.graph).some((node) => Object.values(node.inputs ?? {}).includes(`$${modelKey}`)),
+      JSON.stringify(Object.values(detail.graph).flatMap((node) => Object.values(node.inputs ?? {})).filter((v) => typeof v === 'string' && v.startsWith('$')).slice(0, 6)))
+    // 提交路径也要用上新名字：这一步才是「改了真的有用」的证据。
+    check('画布能读到这台机器缺那个假模型（说明新名字真的进了图）',
+      (edited?.missingModels ?? []).includes(fakeModel), JSON.stringify(edited?.missingModels))
+  }
+
+  log('⑧b 恢复内置默认：改动没了，文件也没被碰过')
+  const reset = await api.call(`/api/workflows/${builtIn.id}/reset`, { method: 'POST' })
+  check('恢复成功', reset.status === 200 && reset.json.reset === true, JSON.stringify(reset.json))
+  const restored = (await api.call(`/api/workflows/${builtIn.id}`)).json.workflow
+  check('模型文件名回到出厂值', modelKey === '' || restored.models?.[modelKey] === shippedBefore.models[modelKey],
+    `${String(restored.models?.[modelKey])} vs ${String(shippedBefore.models[modelKey])}`)
+  check('列表上「已改过」也消了', (((await api.call('/api/workflows')).json.workflows ?? []).find((w) => w.id === builtIn.id)?.edited) !== true)
+  check('再点一次「恢复」不会报错（本来就没改动）', (await api.call(`/api/workflows/${builtIn.id}/reset`, { method: 'POST' })).status === 200)
+  check('上传的那套没有「恢复内置默认」（它不是内置的）',
+    (await api.call(`/api/workflows/${saved.id}/reset`, { method: 'POST' })).status === 400)
+
+  log('⑧c 界面上：内置卡片有「编辑」与「恢复内置默认」')
+  await s.goto(`${BASE}/workflows`, 3500)
+  const builtInCard = `(() => [...document.querySelectorAll('.workflow-card')].find((c) => c.querySelector('[data-testid="edit-${builtIn.id}"]')) ?? null)()`
+  check('内置卡片上有「编辑」按钮', (await s.evaluate(`(${builtInCard}) !== null`)) === true)
+  check('内置卡片上也有「恢复内置默认」', (await s.evaluate(`document.querySelector('[data-testid="reset-${builtIn.id}"]') !== null`)) === true)
+  check('没改过时「恢复」是灰的', (await s.evaluate(`document.querySelector('[data-testid="reset-${builtIn.id}"]').disabled`)) === true)
+  check('点内置那套的「编辑」', await s.evaluate(`(() => { document.querySelector('[data-testid="edit-${builtIn.id}"]').click(); return true })()`))
+  await sleep(2000)
+  const editor = await s.evaluate(`(() => {
+    const box = document.querySelector('.workflow-mapping');
+    return box === null ? null : {
+      open: true,
+      hasModels: box.querySelector('[data-testid="workflow-models"]') !== null,
+      modelInputs: box.querySelectorAll('[data-testid^="model-"]').length,
+      hasDefaults: box.querySelector('[data-testid="workflow-defaults"]') !== null,
+    };
+  })()`)
+  check('编辑表单里能改模型文件名', editor?.hasModels === true && (editor?.modelInputs ?? 0) > 0, JSON.stringify(editor))
+  check('也能改其它默认值（PDD 的 nfe 就在这儿）', editor?.hasDefaults === true, JSON.stringify(editor))
+  // 改一个默认值再保存，确认内置的改动真的落下去（界面路径，不只是接口）。
+  if ((editor?.modelInputs ?? 0) > 0) {
+    const input = await s.evaluate(`(() => {
+      const el = document.querySelector('.workflow-mapping [data-testid^="model-"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, '验收改过的文件名.safetensors');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return el.value;
+    })()`)
+    check('输入框接受新文件名', input === '验收改过的文件名.safetensors', String(input))
+    check('点「保存修改」', await s.evaluate(`(() => { const b = document.querySelector('.workflow-mapping footer button'); if (!b) return false; b.click(); return true })()`))
+    await sleep(1800)
+    check('界面提示说清了「存成覆盖、原文件没动」',
+      ((await s.evaluate(`(document.querySelector('.workflow-notice')?.textContent || '')`))).includes('覆盖'),
+      await s.evaluate(`(document.querySelector('.workflow-notice')?.textContent || '')`))
+    const badge = await s.evaluate(`(() => {
+      const card = [...document.querySelectorAll('.workflow-card')].find((c) => c.querySelector('[data-testid="edit-${builtIn.id}"]'));
+      return { text: card?.textContent || '', resetDisabled: card?.querySelector('[data-testid="reset-${builtIn.id}"]')?.disabled };
+    })()`)
+    check('卡片上出现「已改过」，恢复按钮变成可点', badge.text.includes('已改过') && badge.resetDisabled === false, JSON.stringify(badge))
+    // 收尾：把这次验收写下的覆盖删掉，别把改动留给后面的用例。
+    const cleanup = await api.call(`/api/workflows/${builtIn.id}/reset`, { method: 'POST' })
+    check('收尾：恢复内置默认', cleanup.status === 200 && cleanup.json.reset === true, JSON.stringify(cleanup.json))
+  }
+
+  log('⑨ 删除：上传的能删，内置的不能')
   check('删掉自己上传的那套', (await api.call(`/api/workflows/${saved.id}`, { method: 'DELETE' })).ok)
   check('列表里没有了', !((await api.call('/api/workflows')).json.workflows ?? []).some((w) => w.id === saved.id))
   const refuse = await api.call(`/api/workflows/${builtIn.id}`, { method: 'DELETE' })

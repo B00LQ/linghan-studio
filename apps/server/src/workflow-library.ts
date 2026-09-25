@@ -100,6 +100,13 @@ export interface StudioWorkflow {
    * 跑出来的东西和参考图毫无关系）。只声明 optional 会让第二种情况悄悄出一张无关的图。
    */
   requires?: string[]
+  /**
+   * 这份内置工作流被改过（数据目录里有一份覆盖）。
+   *
+   * **只在内存里**：它是「读的时候算出来的事实」，不写进任何文件。
+   * 写进去的话，删掉覆盖之后那份文件还会说自己被改过。
+   */
+  edited?: boolean
 }
 
 /** Guess what a graph produces from the classes it uses. */
@@ -305,17 +312,42 @@ export function resolveGraph(workflow: StudioWorkflow, values: Record<string, un
   return graph
 }
 
-/** Validate a graph against what the local ComfyUI can do. */
-export function checkWorkflow(graph: Record<string, WorkflowNode>, objectInfo: Record<string, { input?: { required?: Record<string, unknown[]> } }> | null): WorkflowCheck {
-  const classes = [...new Set(Object.values(graph).map((node) => node.class_type))]
-  const { suggested, models } = suggestBindings(graph)
-  const candidates = suggestBindings(graph).candidates
+/**
+ * Validate a graph against what the local ComfyUI can do.
+ *
+ * ⚠️ **占位符必须先换成真实文件名**（第三个参数）：内置工作流的图里写的是 `$unet`，
+ * 真正的文件名放在 `models` 表里（那样 diff 才读得懂）。不换的话，`suggestBindings`
+ * 只认字面量文件名，于是内置工作流的「本机缺哪些模型」**永远是空的** ——
+ * 而这个检查恰恰是别人接手时最想知道的事（也正因如此，缺权重时界面会报「都齐了」，
+ * 然后生成在校验阶段失败）。
+ * @param graph - the graph to check.
+ * @param objectInfo - ComfyUI's object info, or null when unavailable.
+ * @param workflowModels - `$name` → 文件名（内置工作流的 `models` 表）。
+ */
+export function checkWorkflow(
+  graph: Record<string, WorkflowNode>,
+  objectInfo: Record<string, { input?: { required?: Record<string, unknown[]> } }> | null,
+  workflowModels: Record<string, string> = {},
+): WorkflowCheck {
+  const resolved: Record<string, WorkflowNode> = {}
+  for (const [id, node] of Object.entries(graph)) {
+    const inputs: Record<string, unknown> = {}
+    for (const [input, value] of Object.entries(node.inputs ?? {})) {
+      const text = str(value)
+      const replacement = text.startsWith('$') ? workflowModels[text.slice(1)] : undefined
+      inputs[input] = replacement ?? value
+    }
+    resolved[id] = { ...node, inputs }
+  }
+  const classes = [...new Set(Object.values(resolved).map((node) => node.class_type))]
+  const { suggested, models } = suggestBindings(resolved)
+  const candidates = suggestBindings(resolved).candidates
   const missingNodes = objectInfo === null ? [] : classes.filter((name) => !(name in objectInfo))
 
   const missingModels: { node: string; input: string; value: string }[] = []
   if (objectInfo !== null) {
     for (const reference of Object.values(models)) {
-      const classType = graph[reference.node]?.class_type ?? ''
+      const classType = resolved[reference.node]?.class_type ?? ''
       const options = objectInfo[classType]?.input?.required?.[reference.input]
       const list = Array.isArray(options) && Array.isArray(options[0]) ? (options[0] as unknown[]).map(String) : null
       // 拿不到选项列表就不断言缺文件——那是猜，不如不说。
@@ -370,10 +402,48 @@ export interface WorkflowSummary {
    * defaults 就是跑的时候真正用的那个值。
    */
   steps?: number
+  /** 内置工作流被改过（有覆盖）。 */
+  edited?: boolean
 }
 
 /** Where uploaded workflows live. */
 const folderOf = (dataDir: string): string => join(dataDir, 'workflows')
+
+/** 随程序发布的那几份模板就在这个文件旁边（`comfyui/*.json`）。 */
+const BUILT_IN_DIR = join(import.meta.dirname, 'comfyui')
+
+/**
+ * 内置工作流的**覆盖层**放在哪。
+ *
+ * 单独一个子目录，而不是直接改 `workflows/` 里那份：那个目录是「用户上传的」，
+ * 两种来源混在一起之后，「这份到底是谁的」就再也说不清了（列表里也会多出一条
+ * 同 id 的重复项）。
+ */
+const overridesOf = (dataDir: string): string => join(dataDir, 'workflows', 'overrides')
+
+/**
+ * 一份覆盖：只放**改过的**顶层字段。
+ *
+ * 顶层浅合并（`{...内置, ...覆盖}`）是有意的：`graph` / `models` / `bindings` / `defaults`
+ * 每一块都是一个整体，半合并（比如按节点 id 合并 graph）会产出「一半是新的、一半是旧的」
+ * 的第三种工作流 —— 那种东西跑出来的结果没人能预期。要改就整块换。
+ */
+type WorkflowOverride = Partial<Pick<StudioWorkflow, 'title' | 'capability' | 'graph' | 'bindings' | 'defaults' | 'models' | 'optional' | 'requires'>>
+
+/** 读一份覆盖（没有就 undefined）。 */
+function readOverride(dataDir: string, id: string): WorkflowOverride | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(overridesOf(dataDir), `${id}.json`), 'utf8')) as WorkflowOverride
+    return typeof parsed === 'object' && parsed !== null ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 这份内置工作流有没有被改过。 */
+export function hasOverride(dataDir: string, id: string): boolean {
+  return readOverride(dataDir, id) !== undefined
+}
 
 /**
  * Read every workflow: the shipped one plus whatever was uploaded.
@@ -412,7 +482,11 @@ export function loadWorkflows(dataDir: string, builtInDir: string): StudioWorkfl
 
   for (const name of ['z-image-turbo.json', 'z-image-turbo-img2img.json', 'minimax-h3-video.json', 'minimax-h3-video-fast.json', 'minimax-h3-video-pdd.json', 'video-trim.json', 'video-concat.json']) {
     const parsed = readOne(join(builtInDir, name), name.replace(/\.json$/u, ''))
-    if (parsed !== undefined) workflows.push(parsed)
+    if (parsed === undefined) continue
+    // 内置的可以被**改**（债务第 10/15 条）：改动存成一份覆盖，随程序发布的那份文件
+    // 一个字节都不动 —— 于是「改坏了」永远能退回去，升级也不会把人的改动覆盖掉。
+    const override = readOverride(dataDir, parsed.id)
+    workflows.push(override === undefined ? parsed : { ...parsed, ...override, edited: true })
   }
   try {
     for (const name of readdirSync(folderOf(dataDir))) {
@@ -451,6 +525,8 @@ export function summarize(workflow: StudioWorkflow): WorkflowSummary {
     ready: promptReady,
     needsPrompt,
     requires: workflow.requires ?? [],
+    /** 内置工作流被改过（存在一份覆盖）。界面据此显示「已改过」与「恢复内置默认」。 */
+    ...(workflow.edited === true ? { edited: true } : {}),
     // `steps` 在内置 JSON 里既有数字也有字符串（PDD 那条写的是 "4"），两种都认。
     ...(Number.isFinite(Number(workflow.defaults?.steps)) && workflow.defaults?.steps !== undefined
       ? { steps: Number(workflow.defaults.steps) }
@@ -513,24 +589,48 @@ export function isBuiltIn(id: string): boolean {
 }
 
 /**
- * Change an uploaded workflow in place.
+ * Change a workflow in place.
  *
  * The graph is usually right — it came out of ComfyUI — and what a creator wants
  * to fix later is the mapping: the prompt ended up on the wrong encoder, or the
  * step count should follow the node instead of a fixed number. Re-importing the
  * whole file to change one dropdown is the kind of friction that makes a feature
  * unused.
+ *
+ * **内置工作流也改得**（债务第 10/15 条）：改动写成一份覆盖
+ * （`data/workflows/overrides/<id>.json`），随程序发布的那份文件一个字节都不动。
+ * 于是「改坏了」永远能退回去，升级也不会把人的改动冲掉。
+ * 这条以前是「内置不能编辑」，而代价很具体：换量化档、改模型文件名、改 PDD 的 nfe
+ * 都得走「导出 → 改 → 再导入」，得到一条 id 不同的新工作流 —— 画布上每个节点都得重选。
  * @param dataDir - Studio's data directory.
  * @param id - workflow to change.
  * @param patch - fields to replace; omitted fields stay.
- * @returns the updated workflow, or undefined when it does not exist or is built in.
+ * @returns the updated workflow, or undefined when it does not exist.
  */
 export function updateWorkflow(dataDir: string, id: string, patch: {
   title?: string
   bindings?: Record<string, WorkflowBinding>
   defaults?: Record<string, number | string>
+  /** 模型/权重文件名（`$name` → 文件名）。换量化档、换 VAE 都在这儿改。 */
+  models?: Record<string, string>
 }): StudioWorkflow | undefined {
-  if (isBuiltIn(id)) return undefined
+  if (isBuiltIn(id)) {
+    // 内置：只留「改过的字段」。空 patch 不写文件（否则「打开又保存」会平白多一份覆盖）。
+    const base = loadWorkflows(dataDir, BUILT_IN_DIR).find((workflow) => workflow.id === id)
+    if (base === undefined) return undefined
+    const patchFields: WorkflowOverride = {
+      ...(patch.title === undefined || patch.title.trim() === '' ? {} : { title: patch.title.trim() }),
+      ...(patch.bindings === undefined ? {} : { bindings: patch.bindings }),
+      ...(patch.defaults === undefined ? {} : { defaults: patch.defaults }),
+      ...(patch.models === undefined ? {} : { models: patch.models }),
+    }
+    if (Object.keys(patchFields).length === 0) return base
+    // 和已有覆盖合并：改两次不该把第一次的改动丢掉。
+    const merged: WorkflowOverride = { ...readOverride(dataDir, id), ...patchFields }
+    mkdirSync(overridesOf(dataDir), { recursive: true })
+    writeFileSync(join(overridesOf(dataDir), `${id}.json`), JSON.stringify(merged, null, 2), 'utf8')
+    return { ...base, ...merged, edited: true }
+  }
   let raw: string
   try {
     raw = readFileSync(join(folderOf(dataDir), `${id}.json`), 'utf8')
@@ -543,7 +643,26 @@ export function updateWorkflow(dataDir: string, id: string, patch: {
     title: patch.title === undefined || patch.title.trim() === '' ? parsed.title : patch.title.trim(),
     bindings: patch.bindings ?? parsed.bindings,
     defaults: patch.defaults ?? parsed.defaults,
+    // `exactOptionalPropertyTypes`：`models` 是可选的，显式给 undefined 不算合法值，
+    // 所以「没改」的时候连键都不加。
+    ...(patch.models === undefined ? {} : { models: patch.models }),
   }
   writeFileSync(join(folderOf(dataDir), `${id}.json`), JSON.stringify(next, null, 2), 'utf8')
   return next
+}
+
+/**
+ * 把一份内置工作流退回出厂状态（删掉覆盖）。上传的那种走 `deleteWorkflow`。
+ * @param dataDir - Studio's data directory.
+ * @param id - built-in workflow id.
+ * @returns whether an override was removed.
+ */
+export function resetWorkflow(dataDir: string, id: string): boolean {
+  if (!isBuiltIn(id)) return false
+  try {
+    rmSync(join(overridesOf(dataDir), `${id}.json`))
+    return true
+  } catch {
+    return false
+  }
 }

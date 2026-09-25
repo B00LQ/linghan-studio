@@ -22,7 +22,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import {
-  deleteWorkflow, getWorkflow, listWorkflows, saveWorkflow, updateWorkflow, validateWorkflow,
+  deleteWorkflow, getWorkflow, listWorkflows, resetWorkflow, saveWorkflow, updateWorkflow, validateWorkflow,
   type WorkflowBinding, type WorkflowInfo, type WorkflowVerdict,
 } from '../api.ts'
 
@@ -56,6 +56,17 @@ interface Draft {
   graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>
   verdict: WorkflowVerdict
   bindings: Record<string, WorkflowBinding>
+  /**
+   * 模型/权重文件名（`$name` → 文件名）。
+   *
+   * 债务第 15 条要的就是这个：换量化档、换 VAE、换主模型，以前只能「导出→改→再导入」，
+   * 而导入会得到一条**新 id** 的工作流 —— 画布上每个节点都得重选。这里直接改。
+   */
+  models: Record<string, string>
+  /** 其它默认值（cfg、sampler、PDD 的 nfe…）。数字与字符串都可能是。 */
+  defaults: Record<string, number | string>
+  /** 这是内置的那份（改它等于写一份覆盖，原文件不动）。 */
+  builtIn: boolean
 }
 
 /**
@@ -102,6 +113,9 @@ export function WorkflowLibrary({ refreshToken, onChanged }: WorkflowLibraryProp
         title: typeof parsed.title === 'string' && parsed.title !== '' ? parsed.title : fallbackTitle,
         graph,
         verdict,
+        models: {},
+        defaults: {},
+        builtIn: false,
         bindings: Object.fromEntries(
           Object.entries((wrapped ? parsed.bindings : verdict.suggested) as Record<string, WorkflowBinding> ?? {})
             .filter(([, binding]) => binding?.node !== undefined && binding.node !== ''),
@@ -120,9 +134,31 @@ export function WorkflowLibrary({ refreshToken, onChanged }: WorkflowLibraryProp
     try {
       const { workflow } = await getWorkflow(id)
       const verdict = await validateWorkflow(workflow.graph)
-      setDraft({ id, title: workflow.title, graph: workflow.graph, verdict, bindings: workflow.bindings })
+      setDraft({
+        id,
+        title: workflow.title,
+        graph: workflow.graph,
+        verdict,
+        bindings: workflow.bindings,
+        models: workflow.models ?? {},
+        defaults: workflow.defaults ?? {},
+        builtIn: workflow.builtIn,
+      })
     } catch (problem) {
       setNotice(problem instanceof Error ? problem.message : '打不开这套工作流')
+    }
+  }
+
+  /** 内置工作流恢复出厂：删掉那份覆盖。 */
+  const restoreBuiltIn = async (id: string, title: string): Promise<void> => {
+    if (!window.confirm(`把「${title}」恢复成内置默认？你改过的地方会没有（画布上的选择不受影响）。`)) return
+    try {
+      const result = await resetWorkflow(id)
+      setNotice(result.reset ? `「${title}」已经恢复成内置默认` : `「${title}」本来就是内置默认，没有可恢复的改动`)
+      await reload()
+      onChanged()
+    } catch (problem) {
+      setNotice(problem instanceof Error ? problem.message : '恢复失败')
     }
   }
 
@@ -162,8 +198,16 @@ export function WorkflowLibrary({ refreshToken, onChanged }: WorkflowLibraryProp
         const saved = await saveWorkflow({ title: draft.title, graph: draft.graph, bindings: draft.bindings })
         setNotice(`已添加「${saved.workflow.title}」，现在可以在画布的提示词窗口里选它`)
       } else {
-        await updateWorkflow(draft.id, { title: draft.title, bindings: draft.bindings })
-        setNotice('改好了。画布里已经选着它的节点下次生成就会用新设置')
+        // 内置的改动会存成一份覆盖（原文件不动），上传的那份原地改。
+        await updateWorkflow(draft.id, {
+          title: draft.title,
+          bindings: draft.bindings,
+          defaults: draft.defaults,
+          models: draft.models,
+        })
+        setNotice(draft.builtIn
+          ? '改好了（存成一份覆盖，内置原文件没动，「恢复内置默认」随时能退回去）。画布里选着它的节点下次生成就用新设置'
+          : '改好了。画布里已经选着它的节点下次生成就会用新设置')
       }
       setDraft(null)
       await reload()
@@ -290,21 +334,32 @@ export function WorkflowLibrary({ refreshToken, onChanged }: WorkflowLibraryProp
             ) : null}
             <div className="workflow-actions">
               <button type="button" onClick={() => { void exportWorkflow(workflow.id) }}>导出</button>
-              {workflow.builtIn
-                ? <span className="muted">内置的不能改</span>
-                : (
-                  <>
-                    <button type="button" onClick={() => { void editExisting(workflow.id) }}>编辑</button>
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={() => {
-                        if (!window.confirm(`删除工作流「${workflow.title}」？`)) return
-                        void deleteWorkflow(workflow.id).then(() => { void reload(); onChanged() })
-                      }}
-                    >删除</button>
-                  </>
-                )}
+              {/* 内置的也**能改**（债务第 10/15 条）：改动写成一份覆盖，随程序发布的那份
+                  文件一个字节都不动。以前这里写的是「内置的不能改」，代价很具体 ——
+                  换量化档、改 PDD 的 nfe 都得导出→改→再导入，而导入得到一条新 id，
+                  画布上每个节点都得重选。 */}
+              <button type="button" data-testid={`edit-${workflow.id}`} onClick={() => { void editExisting(workflow.id) }}>编辑</button>
+              {workflow.builtIn ? (
+                <>
+                  {workflow.edited === true ? <span className="badge">已改过</span> : null}
+                  <button
+                    type="button"
+                    data-testid={`reset-${workflow.id}`}
+                    disabled={workflow.edited !== true}
+                    title={workflow.edited === true ? '删掉你的改动，退回随程序发布的那份' : '没有改过，没什么可恢复的'}
+                    onClick={() => { void restoreBuiltIn(workflow.id, workflow.title) }}
+                  >恢复内置默认</button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => {
+                    if (!window.confirm(`删除工作流「${workflow.title}」？`)) return
+                    void deleteWorkflow(workflow.id).then(() => { void reload(); onChanged() })
+                  }}
+                >删除</button>
+              )}
             </div>
           </article>
         ))}
@@ -386,7 +441,7 @@ export function WorkflowLibrary({ refreshToken, onChanged }: WorkflowLibraryProp
           {/* 参数参考：只列**这套工作流自己当前的值**。
               我们不知道每个模型的「官方推荐」，编一个看着权威的错数字比不写更糟。 */}
           {currentValues.length === 0 ? null : (
-            <details className="workflow-params" open>
+            <details className="workflow-params">
               <summary>参数参考（这套工作流现在用的值）</summary>
               <ul>
                 {currentValues.map((item) => (
@@ -398,10 +453,57 @@ export function WorkflowLibrary({ refreshToken, onChanged }: WorkflowLibraryProp
                 ))}
               </ul>
               <p className="muted">
-                这些数来自你自己的工作流，改它们请回 ComfyUI 改图再导入。
+                这些值来自你自己的工作流，不是我们编的官方推荐；要改就改下面那两栏，改完保存。
                 换模型时最常踩的两个坑：编码器（CLIP）与 VAE 必须和主模型配对，否则偏色；
                 LoRA 的强度没有通用值，看它的模型卡。
               </p>
+            </details>
+          )}
+
+          {/* 换模型 / 换量化档（债务第 15 条）。
+              这些文件名写在工作流的 `models` 里（图里是 `$unet` 这样的占位符），
+              所以换档只要改这一行，不用去动图。 */}
+          {Object.keys(draft.models).length === 0 ? null : (
+            <details className="workflow-params" open data-testid="workflow-models">
+              <summary>模型文件（换量化档 / 换 VAE 就在这儿改）</summary>
+              {Object.entries(draft.models).map(([key, value]) => (
+                <label className="field" key={key}>
+                  <span><code>{key}</code><em className="muted">工作流里的 ${key} 指向哪个文件</em></span>
+                  <input
+                    value={value}
+                    data-testid={`model-${key}`}
+                    onChange={(event) => { setDraft({ ...draft, models: { ...draft.models, [key]: event.target.value } }) }}
+                  />
+                </label>
+              ))}
+              <p className="muted">
+                改完点保存，画布里选着它的节点下次生成就用新文件。文件名必须与 ComfyUI 里那份**完全一致**
+                （含扩展名与子目录规则），写错了生成会在校验阶段被拒。
+              </p>
+            </details>
+          )}
+
+          {/* 其它默认值（cfg / sampler / PDD 的 nfe…）。
+              数字与字符串都可能：`nfe` 在 PDD 那条里就是个枚举字符串。 */}
+          {Object.keys(draft.defaults).length === 0 ? null : (
+            <details className="workflow-params" data-testid="workflow-defaults">
+              <summary>其它默认值（这套工作流跑的时候真正用的）</summary>
+              {Object.entries(draft.defaults).map(([key, value]) => (
+                <label className="field" key={key}>
+                  <span><code>{key}</code></span>
+                  <input
+                    value={String(value)}
+                    data-testid={`default-${key}`}
+                    onChange={(event) => {
+                      const raw = event.target.value
+                      // 原来是数字就还是数字（否则 `steps: "8"` 会被 ComfyUI 当成字符串拒掉）。
+                      const next = typeof value === 'number' && raw.trim() !== '' && Number.isFinite(Number(raw)) ? Number(raw) : raw
+                      setDraft({ ...draft, defaults: { ...draft.defaults, [key]: next } })
+                    }}
+                  />
+                </label>
+              ))}
+              <p className="muted">这些值不在图上，是提交时填进占位符的。</p>
             </details>
           )}
 

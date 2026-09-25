@@ -150,7 +150,8 @@ export interface StudioGateway {
    */
   applyConfig: () => void
   /** Validate an uploaded workflow before it is saved. */
-  checkWorkflow: (graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>) => Promise<WorkflowVerdict>
+  /** Validate a graph (uploaded or built in) against the local ComfyUI. */
+  checkWorkflow: (graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>, models?: Record<string, string>) => Promise<WorkflowVerdict>
   /**
    * Render images and store them, exactly as an HTTP generation would.
    *
@@ -383,14 +384,18 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
   /**
    * Validate an uploaded workflow against the local ComfyUI.
    * @param graph - the graph to check, API format.
+   * @param models - `$name` → 文件名（内置工作流的 `models` 表；上传的传空）。
    * @returns the check result.
    */
-  const checkWorkflow = async (graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>): Promise<WorkflowVerdict> => {
+  const checkWorkflow = async (
+    graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>,
+    models: Record<string, string> = {},
+  ): Promise<WorkflowVerdict> => {
     if (config.imageDriver !== 'comfyui') {
       // 别的驱动不跑 ComfyUI 工作流，如实说明，而不是假装校验过了。
       return { classes: [], missingNodes: [], missingModels: [], suggested: {}, models: {}, candidates: [], offline: true, note: `当前驱动是 ${config.imageDriver}，不执行 ComfyUI 工作流` }
     }
-    return { ...checkGraph(graph, await comfyui.objectInfo()), offline: false, note: '' }
+    return { ...checkGraph(graph, await comfyui.objectInfo(), models), offline: false, note: '' }
   }
 
   /**
