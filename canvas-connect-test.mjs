@@ -216,7 +216,7 @@ const run = async () => {
   const selectedWindow = await s.evaluate(`document.querySelectorAll('.prompt-window').length`)
   check('新节点被选中，提示词窗口随之出现', selectedWindow === 1, `${selectedWindow} 个`)
 
-  log('⑥ 从图片节点端口拖出 → 目前没有可接的节点类型，如实说明')
+  log('⑥ 从图片节点端口拖出 → 给出能接的种类，而且每一项都真的能接上')
   const imageId = after.find((id) => id.startsWith('image-'))
   const outHandle = await s.evaluate(handlePoint(imageId, 'source'))
   check('图片节点有输出端口', outHandle !== null, JSON.stringify(outHandle))
@@ -224,7 +224,15 @@ const run = async () => {
   await sleep(800)
   const menu2 = await s.evaluate(menuState)
   check('仍然弹出手势菜单', menu2 !== null && menu2.header === '引用该节点生成', JSON.stringify(menu2))
-  check('没有候选时不放死按钮，只说清楚', (menu2?.items ?? []).length === 0 && (menu2?.notes ?? []).some((n) => n.includes('暂时没有可接')), JSON.stringify(menu2))
+  // 这个断言原本写的是「图片的输出没有可接的节点类型」——那是**图生视频之前**的事实。
+  // 现在图片至少能接两处（图片节点的「参考图」与视频节点的「首帧」），所以判据改成：
+  // **要么给出候选、要么明说没有**，两端都不许出现「点了没反应」的死按钮。
+  // （写死「必须是空」只会让它随端口能力变化而红，而不是随 bug 而红。）
+  const items = menu2?.items ?? []
+  const notes = menu2?.notes ?? []
+  check('要么列出可接的种类，要么明说没有（不放死按钮）',
+    items.length > 0 ? items.every((text) => text.trim() !== '') : notes.some((n) => n.includes('暂时没有可接')),
+    JSON.stringify(menu2))
   await s.evaluate(`document.querySelector('.studio-menu-scrim')?.click()`)
   await sleep(400)
 

@@ -333,9 +333,15 @@ const run = async () => {
     const send = win.querySelector('.send');
     return { placeholder: win.querySelector('textarea')?.placeholder ?? '', model: win.querySelector('.model')?.textContent ?? '', disabled: send?.disabled, title: send?.getAttribute('title') ?? '' };
   })()`)
-  check('文本节点窗口占位文案不同', (textWindow?.placeholder ?? '').includes('故事'), textWindow?.placeholder)
+  // 判据落在「和图片节点那句不一样」上，而不是某个具体词：占位文案改过几次，
+  // 而这一条要证的是**两类节点的窗口说的是两件事**。
+  const imagePlaceholder = '可直接文字生图，或接入上游文本'
+  check('文本节点窗口占位文案和图片节点不同',
+    (textWindow?.placeholder ?? '') !== '' && !(textWindow?.placeholder ?? '').includes(imagePlaceholder),
+    textWindow?.placeholder)
   check('生成按钮禁用', textWindow?.disabled === true)
-  check('并说明为什么禁用', /未配置文本模型/.test(textWindow?.title ?? ''), textWindow?.title)
+  // 文案里说的是「没有配置文本模型」，不是「未配置」——判据跟着**意思**走。
+  check('并说明为什么禁用', /(没有配置|未配置)文本模型/u.test(textWindow?.title ?? ''), textWindow?.title)
 
   log('⑩ 整理布局在浮动条里，点击有效')
   const beforeTidy = await s.evaluate(`document.querySelectorAll('.react-flow__node').length`)

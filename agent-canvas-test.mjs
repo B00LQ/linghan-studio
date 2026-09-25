@@ -185,8 +185,12 @@ const run = async () => {
   const badProject = await tool('canvas_state', { projectId: 'not-a-project' })
   check('不存在的项目 → 400', badProject.status === 400 && /项目不存在/u.test(badProject.payload.error ?? ''))
 
-  const badKind = await tool('canvas_add_node', { projectId, kind: 'audio' })
+  // `audio` 以前是「非法类型」，**现在它是合法的**（独立音频节点那一轮加的）。
+  // 所以判据换成两半：真非法的要拒，而 audio 必须能建 —— 后者才是这一轮的功能。
+  const badKind = await tool('canvas_add_node', { projectId, kind: 'teleporter' })
   check('非法节点类型 → 400', badKind.status === 400 && /kind 必须是/u.test(badKind.payload.error ?? ''), String(badKind.payload.error))
+  const audioNode = await tool('canvas_add_node', { projectId, kind: 'audio' })
+  check('audio 现在是合法类型（独立音频节点那一轮）', audioNode.status === 200, JSON.stringify(audioNode.payload).slice(0, 100))
 
   log('⑩ 生成是作业：不等到出完也能接着查（Agent 出视频靠这条）')
   // waitMs=0：立刻返回 jobId。从前这条路会把 HTTP 请求挂到渲染结束 ——

@@ -165,7 +165,18 @@ const run = async () => {
   await sleep(1500)
   check('URL 是 /workflows', (await s.evaluate('location.pathname')) === '/workflows', await s.evaluate('location.pathname'))
   check('页面上有工作流库', (await s.evaluate(`document.querySelectorAll('.workflows-page .workflow-library').length`)) === 1)
-  const titles = await s.evaluate(`[...document.querySelectorAll('.workflow-card header strong')].map((n) => n.textContent.trim())`)
+  /** 等卡片列表里出现那一套（最多 10 秒）。 */
+  const untilTitles = async () => {
+    const started = Date.now()
+    for (;;) {
+      const list = await s.evaluate(`[...document.querySelectorAll('.workflow-card header strong')].map((n) => n.textContent.trim())`)
+      if (list.includes(`上传验收 ${STAMP}`) || Date.now() - started > 10_000) return list
+      await sleep(300)
+    }
+  }
+  // 用**有上限的等待**代替固定 sleep：这一页要发一次 /api/workflows，
+  // 固定等 1.5 秒在忙的时候会读到还没填好的列表 —— 那会变成一条随机红的断言。
+  const titles = await untilTitles()
   check('卡片里有刚上传的那套', titles.includes(`上传验收 ${STAMP}`), titles.join(' | '))
   check('有「导入工作流」按钮', (await s.evaluate(`[...document.querySelectorAll('.workflow-head button')].some((b) => (b.textContent || '').includes('导入工作流'))`)) === true)
 

@@ -989,7 +989,7 @@ const server = createServer((req, res) => {
         }
       }
 
-      const shotsMatch = /^\/api\/projects\/([^/]+)\/shots$/u.exec(pathname)
+      const shotsMatch = /^\/api\/canvases\/([^/]+)\/shots$/u.exec(canvasPath)
       if (shotsMatch !== null) {
         const projectId = decodeURIComponent(shotsMatch[1] as string)
         if (method === 'GET') {

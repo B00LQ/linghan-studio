@@ -138,8 +138,11 @@ const run = async () => {
     await sleep(5000)
   }
   check('URL 是根路径', (await s.evaluate(`location.pathname`)) === '/', await s.evaluate(`location.pathname`))
-  check('左侧导航出现', (await s.evaluate(`document.querySelectorAll('.studio-nav > button').length`)) === 4,
-    await s.evaluate(`[...document.querySelectorAll('.studio-nav > button')].map((b) => b.textContent.trim()).join('/')`))
+  // 判据按**标签**来，不写死个数：导航在长（工作流、设置都是后加的），
+  // 而这条要证的是「五个入口都在」，不是「正好四个按钮」。
+  const navLabels = await s.evaluate(`[...document.querySelectorAll('.studio-nav > button')].map((b) => b.textContent.trim())`)
+  check('左侧导航出现', ['首页', '项目', '资产', '工作流', '设置'].every((label) => navLabels.includes(label)),
+    navLabels.join('/'))
   check('显示主页', (await s.evaluate(`document.querySelectorAll('.home').length`)) === 1)
 
   log('② 主页各区块（图4 的框架）')
