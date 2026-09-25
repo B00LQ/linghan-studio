@@ -117,7 +117,17 @@ export interface GenerationStats {
   /** Negotiated capability: `steps` when real step progress arrives. */
   capabilities: { progress: 'steps' | 'none' }
   /** Durations learned from this machine's own successful runs. */
-  estimate: { samples: number; medianMs: number; p90Ms: number; recentMs: number[] }
+  estimate: {
+    samples: number
+    medianMs: number
+    p90Ms: number
+    recentMs: number[]
+    /**
+     * The same numbers split by what came out, because one median over both is
+     * wrong for both: a 5 秒视频 takes minutes and a picture takes seconds.
+     */
+    byKind: Record<string, { samples: number; medianMs: number; p90Ms: number }>
+  }
 }
 
 /** Read progress capability and the historical duration estimate. */
@@ -125,6 +135,82 @@ export const fetchGenerationStats = (): Promise<GenerationStats> => request<Gene
 
 /** What a stored workflow produces. */
 export type WorkflowCapability = 'image' | 'video'
+
+/** Where a render job is in its life. */
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+/** One render job as the server reports it. */
+export interface StudioJob {
+  id: string
+  request: {
+    projectId: string
+    nodeId: string
+    prompt: string
+    size?: string
+    count?: number
+    workflowId?: string
+    duration?: number
+    shotId?: string
+  }
+  status: JobStatus
+  createdAt: number
+  startedAt: number
+  finishedAt: number
+  /** Driver progress reports, forwarded verbatim. */
+  progress?: { stage?: string; value?: number; max?: number }
+  /** Produced files, on success. */
+  files?: { url: string; assetId: string; takeId?: string }[]
+  /** Node's version count after the render. */
+  takes?: number
+  /** Shot the takes were recorded against (created on submit when absent). */
+  shotId?: string
+  error?: string
+  /** 需要额外告诉人的事（例如「取消晚了一步，结果留下了」）。 */
+  note?: string
+}
+
+/**
+ * Submit a render and return immediately.
+ *
+ * The whole point: an 11 分钟 video must not be an 11 分钟 HTTP request. Node's
+ * `fetch` gives up after 5 分钟, nginx after 60 秒, and the caller's failure would
+ * say nothing about work that is still running.
+ */
+export const submitJob = (input: {
+  projectId: string
+  nodeId: string
+  prompt: string
+  size?: string
+  count?: number
+  workflowId?: string
+  duration?: number
+  shotId?: string
+}): Promise<{ job: StudioJob }> =>
+  request('/api/jobs', {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId: input.projectId,
+      nodeId: input.nodeId,
+      prompt: input.prompt,
+      ...(input.size === undefined ? {} : { size: input.size }),
+      ...(input.count === undefined ? {} : { count: input.count }),
+      ...(input.workflowId === undefined ? {} : { workflow: input.workflowId }),
+      ...(input.duration === undefined ? {} : { duration: input.duration }),
+      ...(input.shotId === undefined ? {} : { shotId: input.shotId }),
+    }),
+  })
+
+/** One job by id. */
+export const getJob = (jobId: string): Promise<{ job: StudioJob }> =>
+  request(`/api/jobs/${encodeURIComponent(jobId)}`)
+
+/** Jobs that have not finished — what a reloaded canvas re-attaches to. */
+export const listJobs = (projectId: string): Promise<{ jobs: StudioJob[] }> =>
+  request(`/api/jobs?projectId=${encodeURIComponent(projectId)}`)
+
+/** Ask for a job to stop. Refused (409) once it has finished. */
+export const cancelJob = (jobId: string): Promise<{ ok: boolean; job: StudioJob }> =>
+  request(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
 
 /** One workflow as the list shows it. */
 export interface WorkflowInfo {
@@ -436,8 +522,14 @@ export const uploadAsset = async (file: Blob): Promise<{ asset: AssetInfo }> => 
   return payload as { asset: AssetInfo }
 }
 
-/** Generate images through the Studio gateway. */
-export const generateImages = (input: { prompt: string; size?: string; count?: number; shotId?: string; workflowId?: string }): Promise<{ data: GeneratedImage[] }> =>
+/**
+ * Generate through the Studio gateway.
+ *
+ * One call for both media: which one comes back is decided by the workflow the
+ * node picked (`capability`), not by the endpoint — the same node → gateway →
+ * driver path that made 「Agent 画的」and「人画的」indistinguishable.
+ */
+export const generateImages = (input: { prompt: string; size?: string; count?: number; shotId?: string; workflowId?: string; duration?: number }): Promise<{ data: GeneratedImage[] }> =>
   request('/v1/images/generations', {
     method: 'POST',
     body: JSON.stringify({
@@ -449,5 +541,7 @@ export const generateImages = (input: { prompt: string; size?: string; count?: n
       ...(input.shotId === undefined || input.shotId === '' ? {} : { shotId: input.shotId }),
       // Which stored workflow to run; the server uses its default when empty.
       ...(input.workflowId === undefined || input.workflowId === '' ? {} : { workflow: input.workflowId }),
+      // Clip length in seconds; only video workflows have a $duration to fill.
+      ...(input.duration === undefined ? {} : { duration: input.duration }),
     }),
   })

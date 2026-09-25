@@ -1,0 +1,141 @@
+{
+  "id": "minimax-h3-video-fast",
+  "title": "MiniMax H3 视频 · 4 步加速（含音频）",
+  "capability": "video",
+  "source": "与 minimax-h3-video 同一张图、同一个 base（Comfy-Org MiniMax-H3 fl2va），只把蒸馏 LoRA 从 8 步换成 4 步（minimax_h3_fl2v_turbo_4step_v1.0_768p，624 张量/416 个 LoRA 键与 8 步版完全同位，可直接替换），步数 8→4；采样器、调度器、引导方式一律不动，所以两条工作流的快慢只归因于蒸馏本身。注意这份蒸馏是按 768p（1344×768）训练的，用 768×448 出片属于超纲，先比一比再长期用。",
+  "requiredNodes": [
+    "UNETLoader",
+    "LoraLoaderModelOnly",
+    "CLIPLoader",
+    "VAELoader",
+    "PrimitiveFloat",
+    "ComfyMathExpression",
+    "MiniMaxH3ImageToVideo",
+    "BasicGuider",
+    "KSamplerSelect",
+    "BasicScheduler",
+    "RandomNoise",
+    "SamplerCustomAdvanced",
+    "VAEDecode",
+    "VAEDecodeAudio",
+    "CreateVideo",
+    "SaveVideo"
+  ],
+  "defaults": {
+    "width": 1344,
+    "height": 768,
+    "duration": 5,
+    "steps": 4,
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "denoise": 1,
+    "fps": 24,
+    "strength": 1
+  },
+  "models": {
+    "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "clip": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+    "clipType": "minimax",
+    "vae": "minimax_h3_video_vae_int8_convrot.safetensors",
+    "audioVae": "minimax_h3_audio_vae_fp32.safetensors",
+    "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+    "weightDtype": "default"
+  },
+  "graph": {
+    "unet": {
+      "class_type": "UNETLoader",
+      "inputs": { "unet_name": "$unet", "weight_dtype": "$weightDtype" }
+    },
+    "lora": {
+      "class_type": "LoraLoaderModelOnly",
+      "inputs": { "model": ["unet", 0], "lora_name": "$lora", "strength_model": "$strength" }
+    },
+    "clip": {
+      "class_type": "CLIPLoader",
+      "inputs": { "clip_name": "$clip", "type": "$clipType" }
+    },
+    "vae": {
+      "class_type": "VAELoader",
+      "inputs": { "vae_name": "$vae" }
+    },
+    "vaeAudio": {
+      "class_type": "VAELoader",
+      "inputs": { "vae_name": "$audioVae" }
+    },
+    "duration": {
+      "class_type": "PrimitiveFloat",
+      "inputs": { "value": "$duration" }
+    },
+    "length": {
+      "class_type": "ComfyMathExpression",
+      "inputs": {
+        "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+        "values.a": ["duration", 0]
+      }
+    },
+    "i2v": {
+      "class_type": "MiniMaxH3ImageToVideo",
+      "inputs": {
+        "clip": ["clip", 0],
+        "vae": ["vae", 0],
+        "prompt": "$prompt",
+        "width": "$width",
+        "height": "$height",
+        "length": ["length", 1]
+      }
+    },
+    "guider": {
+      "class_type": "BasicGuider",
+      "inputs": { "model": ["lora", 0], "conditioning": ["i2v", 0] }
+    },
+    "sampler": {
+      "class_type": "KSamplerSelect",
+      "inputs": { "sampler_name": "$sampler" }
+    },
+    "scheduler": {
+      "class_type": "BasicScheduler",
+      "inputs": {
+        "model": ["lora", 0],
+        "scheduler": "$scheduler",
+        "steps": "$steps",
+        "denoise": "$denoise"
+      }
+    },
+    "noise": {
+      "class_type": "RandomNoise",
+      "inputs": { "noise_seed": "$seed" }
+    },
+    "sample": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "noise": ["noise", 0],
+        "guider": ["guider", 0],
+        "sampler": ["sampler", 0],
+        "sigmas": ["scheduler", 0],
+        "latent_image": ["i2v", 1]
+      }
+    },
+    "decodeVideo": {
+      "class_type": "VAEDecode",
+      "inputs": { "samples": ["sample", 0], "vae": ["vae", 0] }
+    },
+    "decodeAudio": {
+      "class_type": "VAEDecodeAudio",
+      "inputs": { "samples": ["sample", 0], "vae": ["vaeAudio", 0] }
+    },
+    "makeVideo": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "images": ["decodeVideo", 0],
+        "audio": ["decodeAudio", 0],
+        "fps": "$fps",
+        "bit_depth": 8,
+        "color_space": "sRGB"
+      }
+    },
+    "save": {
+      "class_type": "SaveVideo",
+      "inputs": { "video": ["makeVideo", 0], "filename_prefix": "$prefix", "format": "mp4" }
+    }
+  }
+}

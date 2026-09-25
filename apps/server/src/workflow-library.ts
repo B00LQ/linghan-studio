@@ -280,8 +280,14 @@ export function checkWorkflow(graph: Record<string, WorkflowNode>, objectInfo: R
   return { classes, missingNodes, missingModels, suggested, models, candidates }
 }
 
-/** Marker so the list can tell built-in from uploaded. */
-const BUILT_IN = new Set(['z-image-turbo'])
+/**
+ * Marker so the list can tell built-in from uploaded.
+ *
+ * 顺序也是**默认值**：`workflowFor` 取同类里第一个，所以 8 步那份留在前面 —— 新节点
+ * 默认跑的仍是已知能出片的那条，快的这条要人选。这不是保守，是「换默认值」和「多给
+ * 一个选项」是两件事：前者会在人没准备好时改变产出质量。
+ */
+const BUILT_IN = new Set(['z-image-turbo', 'minimax-h3-video', 'minimax-h3-video-fast', 'minimax-h3-video-pdd'])
 
 /** A stored workflow plus its provenance. */
 export interface WorkflowSummary {
@@ -334,7 +340,7 @@ export function loadWorkflows(dataDir: string, builtInDir: string): StudioWorkfl
     }
   }
 
-  for (const name of ['z-image-turbo.json']) {
+  for (const name of ['z-image-turbo.json', 'minimax-h3-video.json', 'minimax-h3-video-fast.json', 'minimax-h3-video-pdd.json']) {
     const parsed = readOne(join(builtInDir, name), name.replace(/\.json$/u, ''))
     if (parsed !== undefined) workflows.push(parsed)
   }

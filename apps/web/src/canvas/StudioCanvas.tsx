@@ -33,7 +33,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import { listWorkflows, type WorkflowInfo } from '../api.ts'
-import { createShot, deleteAsset, downloadAssets, fetchGenerationStats, generateImages, listAssets, listTakes, loadCanvas, saveCanvas, selectTake, uploadAsset, addTake, type CanvasDoc, type TakeInfo } from '../api.ts'
+import { createShot, deleteAsset, downloadAssets, fetchGenerationStats, listAssets, listTakes, loadCanvas, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo } from '../api.ts'
 import { arrangeLayout, arrangeSubset, findFreeSlot, findOverlaps, nodeRect } from './layout.ts'
 import { NodePanel, AssetPanel } from './CanvasPanels.tsx'
 import { ImageEditor } from './ImageEditor.tsx'
@@ -94,6 +94,8 @@ const CanvasContext = createContext<{
   /** Which node's prompt window is open; our own state, not xyflow's selection. */
   activeNodeId: string | null
   showTake: (nodeId: string, takeId: string) => void
+  /** Ask the node's running job to stop. */
+  cancelRun: (nodeId: string) => void
   /** Open the crop/rotate editor on the picture a node is showing. */
   editImage: (nodeId: string, options?: { crop?: boolean }) => void
   /** Apply one transform now and file the result as a new version. */
@@ -111,14 +113,27 @@ const CanvasContext = createContext<{
   progressOf: (nodeId: string) => NodeProgress | null
   /** Progress display, already formatted for the node's own window. */
   statusOf: (nodeId: string) => { text: string; fraction: number | null }
-  /** Historical duration estimate in milliseconds; 0 when unknown. */
-  estimateMs: number
-  /** Workflows this node can pick from. */
-  workflows: WorkflowInfo[]
+  /**
+   * Workflows this node can pick from — **only the ones this machine can run**.
+   *
+   * 缺节点的（比如官方 PDD 那条要有 ComfyUI-MiniMax-H3-PDD-Acc 插件）、缺模型的、
+   * 以及没绑提示词的，都在这里就已经滤掉了，所以下拉里不会出现注定报错的条目。
+   */
+  runnable: WorkflowInfo[]
+  /**
+   * Which workflow this node will actually run.
+   *
+   * Shared with the dropdown so what is shown and what is submitted cannot drift
+   * apart — that drift is what let a video node run an image workflow.
+   */
+  workflowFor: (data: StudioNodeData) => string
+  /** Same rule for the size control: what is shown is what is submitted. */
+  sizeFor: (data: StudioNodeData) => string
 }>({
   takes: {},
   activeNodeId: null,
   showTake: () => { /* replaced by the provider */ },
+  cancelRun: () => { /* replaced by the provider */ },
   editImage: () => { /* replaced by the provider */ },
   quickEdit: () => { /* replaced by the provider */ },
   compare: () => { /* replaced by the provider */ },
@@ -129,8 +144,9 @@ const CanvasContext = createContext<{
   labelOf: () => '',
   progressOf: () => null,
   statusOf: () => ({ text: '', fraction: null }),
-  estimateMs: 0,
-  workflows: [],
+  runnable: [],
+  workflowFor: () => '',
+  sizeFor: () => '1024x1024',
 })
 
 /** Distribute handles evenly down a card edge. */
@@ -207,7 +223,7 @@ function PromptInput({ value, placeholder, onInput, onBegin }: {
 
 /** One canvas node's rendering. */
 function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
-  const { takes, activeNodeId, showTake, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, workflows } = useContext(CanvasContext)
+  const { takes, activeNodeId, showTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor } = useContext(CanvasContext)
   const spec = specOf(data.kind)
   const history = typeof data.shotId === 'string' && data.shotId !== '' ? (takes[data.shotId] ?? []) : []
   const running = runningNodeId === id || data.status === 'running'
@@ -246,31 +262,34 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
         <span>{labelOf(id) || spec?.title || data.kind}</span>
         {running ? <span className="dot running" /> : null}
         {data.status === 'failed' ? <span className="dot failed" /> : null}
-        {data.kind === 'image' && typeof data.takeNumber === 'number'
+        {data.kind !== 'text' && typeof data.takeNumber === 'number'
           ? <span className={`take-badge ${data.chosen === true ? 'is-chosen' : ''}`}>
             {data.chosen === true ? '✓ ' : ''}第 {String(data.takeNumber)} 版
           </span>
           : null}
-        {data.kind === 'image' && history.length > 1 && typeof data.takeNumber !== 'number'
-          ? <span className="shot-meta">{history.length} 张</span>
+        {data.kind !== 'text' && history.length > 1 && typeof data.takeNumber !== 'number'
+          ? <span className="shot-meta">{history.length} {data.kind === 'video' ? '条' : '张'}</span>
           : null}
       </header>
 
-      {data.kind === 'image' ? (
-        typeof data.url === 'string' && data.url !== ''
-          ? <img src={data.url} alt={data.text ?? '生成结果'} />
-          : (
-            <div className="empty-card">
-              <div className="placeholder" />
-              <p>尝试：</p>
-              <ul>
-                <li>在下方输入提示词，按 ↑ 生成</li>
-                <li>或从左侧文本节点拉线接入提示词</li>
-              </ul>
-            </div>
-          )
-      ) : (
+      {data.kind === 'text' ? (
         <div className="body">{data.text ?? ''}</div>
+      ) : typeof data.url === 'string' && data.url !== '' ? (
+        // 视频用真正的播放器：MiniMax H3 出的 mp4 里带音轨，
+        // 「有没有声音」是这个模型的一半卖点，用静音缩略图糊弄过去等于藏了一半。
+        data.kind === 'video'
+          ? <video className="node-video" src={data.url} controls playsInline preload="metadata" />
+          : <img src={data.url} alt={data.text ?? '生成结果'} />
+      ) : (
+        <div className="empty-card">
+          <div className="placeholder" />
+          <p>尝试：</p>
+          <ul>
+            <li>在下方输入提示词，按 ↑ 生成</li>
+            <li>或从左侧文本节点拉线接入提示词</li>
+            {data.kind === 'video' ? <li>视频很慢：本机 12 GB 卡上一条约几分钟</li> : null}
+          </ul>
+        </div>
       )}
 
       {/* 选中后才有：贴着卡片下方的提示词窗口。 */}
@@ -287,7 +306,10 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                   onClick={() => { showTake(id, take.id) }}
                 >
                   {take.status === 'succeeded' && take.assetId !== ''
-                    ? <img src={`/api/assets/${take.assetId}`} alt={`第 ${String(index + 1)} 版`} />
+                    ? (data.kind === 'video'
+                      // 缩略图也要是个视频元素：<img src="....mp4"> 什么都不显示。
+                      ? <video src={`/api/assets/${take.assetId}`} muted playsInline preload="metadata" />
+                      : <img src={`/api/assets/${take.assetId}`} alt={`第 ${String(index + 1)} 版`} />)
                     : <span className="cell-failed">失败</span>}
                   <span className="cell-no">{index + 1}</span>
                 </button>
@@ -308,6 +330,16 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                 <span className="run-bar"><i style={{ width: `${String(Math.round((statusOf(id).fraction ?? 0) * 100))}%` }} /></span>
               )}
               <span className="run-text">{statusOf(id).text}</span>
+              {/* 视频一条十几分钟，「点了只能等」是不能接受的：这里给一个出口。 */}
+              {running ? (
+                <button
+                  type="button"
+                  className="link nodrag"
+                  data-testid="cancel-run"
+                  title="中止这次生成"
+                  onClick={() => { cancelRun(id) }}
+                >取消</button>
+              ) : null}
             </div>
           ) : null}
           <div className="bar">
@@ -319,33 +351,61 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                 {/* 用哪套工作流是这个节点的属性：换了一套就该一直用它，
                     而不是每次都去工作流页重选。
                     没有「默认工作流」这个选项：那等于把「第一套」再写一遍，
-                    用户看到两个条目其实是一回事。 */}
+                    用户看到两个条目其实是一回事。
+                    按**节点类型**筛，不按「图片」筛：视频节点只该看到视频工作流，
+                    否则它会拿到一套出图的工作流，然后卡在一个永远不出现的视频上。 */}
                 <select
                   className="nodrag workflow-select"
-                  title="用哪套工作流出图（在「工作流」页导入）"
-                  value={typeof data.workflow === 'string' ? data.workflow : (workflows.find((item) => item.capability === 'image')?.id ?? '')}
+                  title={data.kind === 'video' ? '用哪套工作流出视频（在「工作流」页导入）' : '用哪套工作流出图（在「工作流」页导入）'}
+                  value={workflowFor(data)}
                   onChange={(event) => { setParam(id, { workflow: event.target.value }) }}
                 >
-                  {workflows.filter((item) => item.capability === 'image').map((item) => (
+                  {runnable.filter((item) => item.capability === spec.kind).map((item) => (
                     <option key={item.id} value={item.id}>{item.title}</option>
                   ))}
                 </select>
                 <select
                   className="nodrag"
-                  value={typeof data.size === 'string' ? data.size : '1024x1024'}
+                  value={sizeFor(data)}
                   onChange={(event) => { setParam(id, { size: event.target.value }) }}
                 >
-                  <option value="1024x1024">1024×1024</option>
-                  <option value="1280x720">1280×720</option>
-                  <option value="768x512">768×512</option>
+                  {data.kind === 'video' ? (
+                    <>
+                      {/* 只列已经实测过的两档：这套模型的可用分辨率桶不是随便填的，
+                          没试过的值不该摆在菜单里当承诺。 */}
+                      <option value="1344x768">1344×768（768p）</option>
+                      <option value="768x448">768×448（快一倍）</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="1024x1024">1024×1024</option>
+                      <option value="1280x720">1280×720</option>
+                      <option value="768x512">768×512</option>
+                    </>
+                  )}
                 </select>
-                <select
-                  className="nodrag"
-                  value={String(typeof data.count === 'number' ? data.count : 1)}
-                  onChange={(event) => { setParam(id, { count: Number(event.target.value) }) }}
-                >
-                  {[1, 2, 3, 4].map((n) => <option key={n} value={String(n)}>{n} 张</option>)}
-                </select>
+                {data.kind === 'video' ? (
+                  // 时长按模型的帧数约束给：MiniMax H3 只接受 5+17n 帧，
+                  // 所以这里给的是「约几秒」而不是精确秒数（图里那段算式会把它对齐）。
+                  <select
+                    className="nodrag"
+                    title="片长。模型只接受特定帧数，所以是「约」"
+                    value={String(typeof data.duration === 'number' ? data.duration : 5)}
+                    onChange={(event) => { setParam(id, { duration: Number(event.target.value) }) }}
+                  >
+                    <option value="3">约 3 秒</option>
+                    <option value="5">约 5 秒</option>
+                    <option value="7">约 7 秒</option>
+                  </select>
+                ) : (
+                  <select
+                    className="nodrag"
+                    value={String(typeof data.count === 'number' ? data.count : 1)}
+                    onChange={(event) => { setParam(id, { count: Number(event.target.value) }) }}
+                  >
+                    {[1, 2, 3, 4].map((n) => <option key={n} value={String(n)}>{n} 张</option>)}
+                  </select>
+                )}
               </>
             ) : null}
             {/* 进度与预计时间单独一行、紧贴生成按钮上方。 */}
@@ -400,12 +460,20 @@ function GroupNodeView({ data, selected }: NodeProps<StudioNode>) {
   )
 }
 
-/** Read the text feeding one node, following a single inbound edge. */
+/**
+ * Read the text feeding one node, following a single inbound edge.
+ *
+ * Looks for the edge whose **source is a text node**, not simply the first
+ * inbound edge: a node can have several inputs (a video node has a prompt port,
+ * and a picture input is coming), and 「第一条入边」 would then answer '' whenever
+ * the other kind happened to be wired first.
+ */
 function inboundText(nodeId: string, nodes: StudioNode[], edges: Edge[]): string {
-  const source = edges.find((edge) => edge.target === nodeId)?.source
-  if (source === undefined) return ''
-  const node = nodes.find((item) => item.id === source)
-  return node?.data.kind === 'text' ? (node.data.text ?? '') : ''
+  for (const edge of edges.filter((item) => item.target === nodeId)) {
+    const node = nodes.find((item) => item.id === edge.source)
+    if (node?.data.kind === 'text') return node.data.text ?? ''
+  }
+  return ''
 }
 
 /** Remove the keys xyflow adds to items it renders, leaving a structural document. */
@@ -534,8 +602,29 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   const [agentIds, setAgentIds] = useState<string[]>(document?.agentContext ?? [])
   /** Latest progress report per node, keyed by node id. */
   const [progress, setProgress] = useState<Record<string, NodeProgress>>({})
-  /** Negotiated progress capability plus the historical duration estimate. */
-  const [stats, setStats] = useState<{ progress: 'steps' | 'none'; medianMs: number }>({ progress: 'none', medianMs: 0 })
+  /**
+   * 历史耗时，按产物类型分开。**它必须能重取**，两个原因：
+   *
+   * ① 这一次请求可能正好撞上服务重启而失败 —— 从前它失败就等于「这台机器没有历史」，
+   *    而且一失败就是一整页会话，标签从此闭嘴；
+   * ② 每跑完一条活儿中位数就变了，一个长会话里该越跑越准，而不是等下次刷新页面。
+   */
+  const [stats, setStats] = useState<{
+    medianMs: number
+    /** 按产物类型分开的历史耗时；视频和图片不能共用一个中位数。 */
+    byKind: Record<string, { samples: number; medianMs: number; p90Ms: number }>
+  }>({ medianMs: 0, byKind: {} })
+  /**
+   * 重取历史耗时。挂载时一次、每跑完一条活儿再一次 —— 失败只是「暂时没有估计」，
+   * 下一次还有机会，不会把这一页钉死在初始状态。
+   */
+  const refreshStats = useCallback(() => {
+    void fetchGenerationStats()
+      .then((result) => {
+        setStats({ medianMs: result.estimate.medianMs, byKind: result.estimate.byKind ?? {} })
+      })
+      .catch(() => { /* 没有估计也是一种正常状态：标签少说一句话而已 */ })
+  }, [])
   /** Workflows this canvas can choose from; loaded once per mount. */
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   /** Re-render tick while something is running, so the ETA counts down. */
@@ -585,7 +674,15 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     setMenuAt({ left, top, measured: true })
   }, [menu])
   /** When the current run started, for the elapsed-time half of the ETA. */
-  const runStartedAt = useRef(0)
+  /**
+   * Job in flight per node, by node id.
+   *
+   * A node may only have one, and knowing *which* one is what lets a late report
+   * from an older run be ignored instead of landing on a busy card.
+   */
+  const jobsByNode = useRef<Map<string, string>>(new Map())
+  /** When each node's current run started, so the ETA can count down per node. */
+  const runStartedAt = useRef<Map<string, number>>(new Map())
   /**
    * Which node owns which generation history.
    *
@@ -989,11 +1086,202 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   }, [checkpoint, markDirty, setNodes])
 
   /**
+   * 这台机器**现在真能跑**的工作流。
+   *
+   * 工作流页会把「缺哪个节点、缺哪个模型」列出来，但节点卡片上的下拉从前不管这些：
+   * 加了官方 PDD 加速那条之后（它依赖 ComfyUI-MiniMax-H3-PDD-Acc 插件和
+   * `models/pdd_acc/` 里那个 1.4 GB 的头库文件），没装的人会在菜单里看到一个注定
+   * 报错的选项。这和画幅菜单只放实测过的两档是同一条规矩——**菜单是承诺，不打算
+   * 兑现的别摆上去**。
+   *
+   * ComfyUI 连不上时 `missingNodes`/`missingModels` 是空的（问不出来就不乱说），
+   * 所以这里不会因为「问不到」把菜单清空：那种情况该在生成那一刻如实报错。
+   */
+  const runnable = useMemo(() => workflows.filter((item) =>
+    item.ready && item.missingNodes.length === 0 && item.missingModels.length === 0), [workflows])
+
+  /**
+   * Which workflow this node will actually run.
+   *
+   * **One function for both** the dropdown's displayed value and what gets
+   * submitted. They used to be computed separately: the dropdown fell back to
+   * 「第一套匹配本节点类型的」, while the request only carried `data.workflow` —
+   * empty until someone touched the dropdown. So the server quietly used *its*
+   * default. On an image node that default happened to be the same workflow and
+   * nobody noticed; on a video node it meant a video node ran an **image**
+   * workflow, 「3 秒完成」, and the card filled with a PNG that cannot play.
+   *
+   * 选过的那条如果**已经不可用**（插件被删、模型被移走），也不能继续按它显示：
+   * 显示什么就提交什么，所以这里退回同类里第一条可用的。
+   */
+  const workflowFor = useCallback((data: StudioNodeData): string => {
+    const want = specOf(String(data.kind ?? ''))?.kind
+    if (want === undefined) return ''
+    const available = runnable.filter((item) => item.capability === want)
+    const chosen = typeof data.workflow === 'string' ? data.workflow : ''
+    // 空字符串也是「没选过」：下拉里没有「默认」这个条目（那等于把第一条再写一遍，
+    // 用户看到两个条目其实是一回事）。
+    return available.some((item) => item.id === chosen) ? chosen : (available[0]?.id ?? '')
+  }, [runnable])
+
+  /**
+   * The size this node will actually ask for — same rule as {@link workflowFor}:
+   * 下拉显示什么就提交什么。`initialData` 会给每种节点写好默认尺寸，所以这条只在
+   * 手写文档/旧文档缺字段时才起作用；但「显示一个值、发另一个值」这个坑刚在
+   * 工作流上咬过一次，同一个控件里不想留第二份。
+   */
+  const sizeFor = useCallback((data: StudioNodeData): string => {
+    if (typeof data.size === 'string' && data.size !== '') return data.size
+    return specOf(String(data.kind ?? ''))?.kind === 'video' ? '1344x768' : '1024x1024'
+  }, [])
+
+  /**
+   * Put a job's state onto the node that asked for it.
+   *
+   * Called from three places — right after submitting, from the event stream,
+   * and once on load for jobs that were already running — because those are the
+   * same piece of news arriving by different routes. A page that reloads in the
+   * middle of an 11 分钟 render re-attaches here and shows the same thing the
+   * page that pressed the button saw.
+   * @param job - the job as the server describes it.
+   */
+  const settleJob = useCallback(async (job: StudioJob) => {
+    const nodeId = job.request.nodeId
+    const known = jobsByNode.current.get(nodeId)
+    // A job we know about but that is not this one is stale news (an earlier run
+    // that finished after a newer one started): applying it would put an old
+    // picture on a card that is busy making a new one.
+    if (known !== undefined && known !== job.id) return
+
+    if (job.status === 'queued' || job.status === 'running') {
+      if (known === undefined) {
+        // Re-attached after a reload: same bookkeeping the submitting page did.
+        jobsByNode.current.set(nodeId, job.id)
+        if (job.startedAt > 0) runStartedAt.current.set(nodeId, job.startedAt)
+        setRunningNodeId(nodeId)
+        markDirty()
+        setNodes((current) => current.map((node) => node.id === nodeId
+          ? { ...node, data: { ...node.data, status: 'running' as const } }
+          : node))
+      }
+      if (job.progress !== undefined) {
+        setProgress((current) => ({ ...current, [nodeId]: job.progress as NodeProgress }))
+      }
+      return
+    }
+
+    // Terminal: clear the run state first, so the card stops looking busy even if
+    // the rest below has nothing to do.
+    jobsByNode.current.delete(nodeId)
+    runStartedAt.current.delete(nodeId)
+    setRunningNodeId((current) => (current === nodeId ? null : current))
+    setProgress((current) => {
+      const next = { ...current }
+      delete next[nodeId]
+      return next
+    })
+
+    // **每次改到节点数据都要标脏。** 防抖保存只在 dirty 为真时写盘，而这条路径
+    // 整段渲染期间只改 `progress`（不是 nodes）——不标脏的话，作业完成时写进节点的
+    // shotId/url **永远不会存到服务端**。旧实现是靠「渲染期间多次 setNodes 不断重置
+    // 那个 900ms 定时器」侥幸成立的，是一连串巧合，不是设计。
+    markDirty()
+
+    // 刚落地的这条活儿就是最新的样本：重取一次，下一条同类的估计立刻更准。
+    refreshStats()
+
+    if (job.status === 'cancelled') {
+      // 取消晚了一步的话，结果其实已经作为新版本留下了 —— 卡片要显示它，
+      // 提示也要说出来，不能让人以为「取消了却多出一张」是 bug。
+      const late = job.files?.[0]
+      setNodes((current) => current.map((node) => node.id === nodeId
+        ? {
+          ...node,
+          data: {
+            ...node.data,
+            status: 'idle' as const,
+            ...(late === undefined
+              ? {}
+              : {
+                url: late.url,
+                ...(late.takeId === undefined ? {} : { takeId: late.takeId }),
+                takeNumber: job.takes ?? node.data.takeNumber,
+              }),
+            ...(job.shotId === undefined || job.shotId === '' ? {} : { shotId: job.shotId }),
+          },
+        }
+        : node))
+      if (job.shotId !== undefined && job.shotId !== '') {
+        shotToNode.current.set(job.shotId, nodeId)
+        await loadTakes(job.shotId)
+      }
+      setStatus(job.note ?? '已取消')
+      return
+    }
+    if (job.status === 'failed') {
+      setNodes((current) => current.map((node) => node.id === nodeId
+        ? { ...node, data: { ...node.data, status: 'failed' as const } }
+        : node))
+      setStatus(job.error ?? '生成失败')
+      return
+    }
+
+    const first = job.files?.[0]
+    const listed = first === undefined
+      ? {}
+      : { url: first.url, ...(first.takeId === undefined ? {} : { takeId: first.takeId }), takeNumber: job.takes ?? 1 }
+    setNodes((current) => current.map((node) => node.id === nodeId
+      ? {
+        ...node,
+        data: {
+          ...node.data,
+          status: 'idle' as const,
+          ...(job.shotId === undefined || job.shotId === '' ? {} : { shotId: job.shotId }),
+          ...listed,
+        },
+      }
+      : node))
+    if (job.shotId !== undefined && job.shotId !== '') {
+      shotToNode.current.set(job.shotId, nodeId)
+      await loadTakes(job.shotId)
+    }
+    const count = job.files?.length ?? 0
+    const kind = nodesRef.current.find((node) => node.id === nodeId)?.data.kind
+    setStatus(kind === 'video'
+      ? '视频已生成'
+      : `已生成 ${String(count)} 张（该节点共 ${String(job.takes ?? count)} 张）`)
+  }, [loadTakes, markDirty, refreshStats, setNodes])
+
+  /** Ask for a node's running job to stop. */
+  const cancelRun = useCallback(async (nodeId: string) => {
+    const jobId = jobsByNode.current.get(nodeId)
+    if (jobId === undefined) {
+      setStatus('这个节点现在没有在跑的作业')
+      return
+    }
+    setStatus('正在取消…')
+    try {
+      const { job } = await cancelJob(jobId)
+      // 服务端把取消也当成一次状态变化推回来，这里顺手落一次，
+      // 免得在没有 SSE 连接（比如测试里）的场合看不到结果。
+      void settleJob(job)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '取消失败')
+    }
+  }, [settleJob])
+
+  /**
    * Generate for one node.
    *
-   * A picture node produces into its own history: the first image becomes what
-   * the card shows, and every image of the batch becomes a version the operator
-   * can flip through. Nothing is silently dropped when 张数 > 1.
+   * Submits a **job** and returns: a render is no longer an HTTP request. An
+   * 11 分钟 video held open as a request dies to Node's own 5 分钟 fetch timeout,
+   * to nginx's 60 秒, to anything — and the caller's failure would say nothing
+   * about work that is still running. So the click returns at once, progress
+   * arrives on the existing event stream, and the outcome lands in `settleJob`.
+   *
+   * A picture node still produces into its own history: the first file becomes
+   * what the card shows, and every file of the batch becomes a version the
+   * operator can flip through. Nothing is silently dropped when 张数 > 1.
    */
   const generate = useCallback(async (nodeId: string) => {
     const target = nodesRef.current.find((node) => node.id === nodeId)
@@ -1004,66 +1292,76 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       setStatus(spec.generateBlocked)
       return
     }
+    // 同一个节点同时只跑一件：第二次点击只会让 ComfyUI 排两个一样的队。
+    if (jobsByNode.current.has(nodeId)) {
+      setStatus('这个节点已经在跑了')
+      return
+    }
     const prompt = (target.data.text ?? '').trim() || inboundText(nodeId, nodesRef.current, edgesRef.current)
     if (prompt === '') {
       setStatus('提示词为空：在节点下方写，或从文本节点拉线接入')
       return
     }
+    /**
+     * 解析不出工作流就**不要提交**。
+     *
+     * 从前这里不带 workflowId 就发出去了，服务端于是用自己的默认那套 —— 对视频节点
+     * 来说那是出图的工作流，结果是「3 秒完成，画框里一张放不出来的图」。
+     * 拿不到就明说，别让服务端替我挑一套错的。
+     */
+    const workflowId = workflowFor(target.data)
+    if (workflowId === '') {
+      // 两种「没有」要分清：真的没导入过，还是导入了但这台机器跑不了（缺节点、
+      // 缺模型）。下拉里后者是不显示的，所以这里必须说出来，否则人只会觉得
+      // 「明明有工作流却说没有」。
+      const sameKind = workflows.filter((item) => item.capability === spec.kind)
+      setStatus(sameKind.length === 0
+        ? `没有可用于「${spec.title}」节点的工作流：去「工作流」页导入一套`
+        : `「${spec.title}」的工作流这台机器现在跑不了（缺节点或缺模型）：去「工作流」页看缺什么`)
+      return
+    }
 
     setRunningNodeId(nodeId)
-    runStartedAt.current = Date.now()
+    runStartedAt.current.set(nodeId, Date.now())
     setProgress((current) => {
       const next = { ...current }
       delete next[nodeId]
       return next
     })
-    setStatus('生成中…')
     setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, status: 'running' as const } } : node))
     try {
       // The history id is the node's own; the operator never sees a "shot".
+      // 先建好：第一帧进度可能在节点自己知道 shotId 之前就到了。
       let shotId = typeof target.data.shotId === 'string' ? target.data.shotId : ''
       if (shotId === '') {
         const created = await createShot(projectId, prompt.slice(0, 40), prompt)
         shotId = created.shot.id
-        // Register before the render starts: the first progress frame can arrive
-        // long before the node's own state learns this id.
         shotToNode.current.set(shotId, nodeId)
       }
-      const history = await loadTakes(shotId)
-      const result = await generateImages({
+      const { job } = await submitJob({
+        projectId,
+        nodeId,
         prompt,
-        ...(typeof target.data.size === 'string' ? { size: target.data.size } : {}),
-        count: typeof target.data.count === 'number' ? target.data.count : 1,
         shotId,
-        ...(typeof target.data.workflow === 'string' && target.data.workflow !== '' ? { workflowId: target.data.workflow } : {}),
+        size: sizeFor(target.data),
+        count: typeof target.data.count === 'number' ? target.data.count : 1,
+        workflowId,
+        // 片长只对视频工作流有意义；图片工作流里没有 $duration，多传一个数字它也不认。
+        ...(spec.kind === 'video' && typeof target.data.duration === 'number' ? { duration: target.data.duration } : {}),
       })
-      const first = result.data[0]
-      const listed = target.data.kind === 'text'
-        ? latestListed(result.data)
-        : (first === undefined ? {} : {
-          url: first.url,
-          ...(first.takeId === undefined ? {} : { takeId: first.takeId }),
-          takeNumber: history.length + 1,
-        })
-      setNodes((current) => current.map((node) => node.id === nodeId
-        ? { ...node, data: { ...node.data, status: 'idle' as const, shotId, ...listed } }
-        : node))
-      await loadTakes(shotId)
-      setStatus(`已生成 ${String(result.data.length)} 张（该节点共 ${String(history.length + result.data.length)} 张）`)
+      jobsByNode.current.set(nodeId, job.id)
+      setStatus(spec.kind === 'video' ? '已提交：视频要十几分钟，可以先去干别的' : '已提交…')
+      void settleJob(job)
     } catch (error) {
+      // 提交本身失败是**同步**失败（画布不存在、缺字段、服务端拒绝），
+      // 如实报错，不要让它看起来像「在跑」。
+      markDirty()
       setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, status: 'failed' as const } } : node))
-      setStatus(error instanceof Error ? error.message : '生成失败')
-      const shotId = typeof target.data.shotId === 'string' ? target.data.shotId : ''
-      if (shotId !== '') await loadTakes(shotId)
-    } finally {
+      setStatus(error instanceof Error ? error.message : '提交失败')
       setRunningNodeId(null)
-      setProgress((current) => {
-        const next = { ...current }
-        delete next[nodeId]
-        return next
-      })
+      runStartedAt.current.delete(nodeId)
     }
-  }, [loadTakes, projectId, setNodes])
+  }, [markDirty, projectId, setNodes, settleJob, workflowFor])
 
   /** Show a specific version in the card, and remember it as the chosen one.
    *
@@ -1195,7 +1493,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   // The document is the source of truth, and an Agent writes to it directly.
   // This canvas only observes: when told the document changed, it reloads.
   const remotePendingRef = useRef(false)
-  const reloadDocument = useCallback(async () => {
+  const reloadDocument = useCallback(async (reason: 'agent' | 'render' = 'agent') => {
     if (dirtyRef.current) {
       remotePendingRef.current = true
       setStatus('Agent 改动了画布；本地改动保存后会同步过来')
@@ -1208,20 +1506,46 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       setNodes(loadedNodes)
       setEdges(normalizeEdges(next.edges, loadedNodes))
       setAgentIds(Array.isArray(next.agentContext) ? next.agentContext : [])
-      selectOnly(null)
-      setStatus('画布已随 Agent 的改动更新')
+      /**
+       * Keep the operator's selection.
+       *
+       * Reloading means 「别处改了文档」, not 「取消你的选择」. This matters most for
+       * the operator's own render: the server writes the document when a job
+       * finishes, so clearing the selection here would close the prompt window at
+       * the exact moment they are waiting to see the result — kicking them out of
+       * the place they were working.
+       */
+      const keep = selectionRef.current
+      selectOnly(keep !== null && loadedNodes.some((node) => node.id === keep) ? keep : null)
+      setStatus(reason === 'render' ? '生成完成' : '画布已随 Agent 的改动更新')
     } catch {
       // A failed refresh is not worth interrupting the operator over.
     }
-  }, [projectId, setEdges, setNodes])
+  }, [projectId, selectOnly, setEdges, setNodes])
 
   useEffect(() => {
     if (typeof EventSource === 'undefined') return
     const source = new EventSource(`/api/agent/events?projectId=${encodeURIComponent(projectId)}`)
+    /**
+     * Re-attach to whatever is already running.
+     *
+     * Called on connect *and* on every reconnect (`hello` is sent each time), so
+     * a dropped stream heals itself: without this, news that arrived while the
+     * page was away would be lost and the card would sit at 「在跑」 forever.
+     */
+    const reattach = (): void => {
+      void listJobs(projectId)
+        .then(({ jobs }) => { for (const job of jobs) void settleJob(job) })
+        .catch(() => { /* no jobs is a valid state */ })
+    }
+    source.addEventListener('hello', () => { reattach() })
     source.addEventListener('document_changed', (event) => {
       try {
-        const payload = JSON.parse((event as MessageEvent<string>).data) as { projectId?: string }
-        if (payload.projectId === undefined || payload.projectId === projectId) void reloadDocument()
+        const payload = JSON.parse((event as MessageEvent<string>).data) as { projectId?: string; reason?: string }
+        if (payload.projectId !== undefined && payload.projectId !== projectId) return
+        // 自己这次生成完成 vs 别的入口改了文档：说法不一样，行为也不一样
+        // （生成完成后选中要留着，Agent 改动则由来已久地清掉选中）。
+        void reloadDocument(payload.reason === 'render' ? 'render' : 'agent')
       } catch { /* ignore malformed frames */ }
     })
     // Progress rides the same connection as document changes: one stream per
@@ -1235,19 +1559,25 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         setProgress((current) => ({ ...current, [nodeId]: payload }))
       } catch { /* ignore malformed frames */ }
     })
+    // 作业状态：提交、进度、成功、失败、取消都走这一条。这是「刷新之后还能接上」
+    // 的另一半（另一半是 hello 时拉一次 /api/jobs）。
+    source.addEventListener('job', (event) => {
+      try {
+        const job = JSON.parse((event as MessageEvent<string>).data) as StudioJob
+        if (job.request.projectId !== projectId) return
+        void settleJob(job)
+      } catch { /* ignore malformed frames */ }
+    })
     return () => { source.close() }
-  }, [projectId, reloadDocument])
+  }, [projectId, reloadDocument, settleJob])
 
-  // How long generation takes on this machine, and whether the driver reports
-  // steps at all. Read once per canvas: it changes slowly and only informs a label.
+  // 历史耗时与可选工作流。历史**每个画布取一次**，跑完活儿再取（见 refreshStats）。
   useEffect(() => {
-    void fetchGenerationStats()
-      .then((result) => { setStats({ progress: result.capabilities.progress, medianMs: result.estimate.medianMs }) })
-      .catch(() => { /* no estimate is a valid state: the label just stays quiet */ })
+    refreshStats()
     void listWorkflows()
       .then((result) => { setWorkflows(result.workflows) })
       .catch(() => { setWorkflows([]) })
-  }, [projectId])
+  }, [projectId, refreshStats])
 
   // The ETA counts down, so it needs a clock. Only while something runs.
   useEffect(() => {
@@ -1305,6 +1635,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     takes,
     activeNodeId: selection,
     showTake,
+    cancelRun,
     editImage,
     quickEdit,
     compare,
@@ -1316,19 +1647,32 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     progressOf: (nodeId: string) => progress[nodeId] ?? null,
     statusOf: (nodeId: string) => {
       const report = progress[nodeId] ?? null
+      const node = nodes.find((item) => item.id === nodeId)
+      /**
+       * 预计时间按**这个节点产出什么**来取，而且**只用同类的历史**。
+       *
+       * 从前这里会退回全局中位数（几乎全是图片的），于是一条 10 分钟的视频
+       * 显示「预计 十几秒」，然后在接下来的十分钟里一直停在超时状态。
+       * 没有同类样本时宁可**不说**——步数与进度条已经在如实报进展了。
+       */
+      const kind = String(node?.data.kind ?? '')
+      const known = kind === 'video' || kind === 'image'
+      const estimateMs = (known ? stats.byKind[kind]?.medianMs : stats.medianMs) ?? (known ? 0 : stats.medianMs)
+      // 开始时间按节点记：两件活同时跑时，一个全局时间戳会让两边的倒计时都错。
+      const startedAt = runStartedAt.current.get(nodeId) ?? 0
       const view = describeProgress({
-        running: runningNodeId === nodeId || nodes.find((item) => item.id === nodeId)?.data.status === 'running',
+        running: runningNodeId === nodeId || node?.data.status === 'running',
         progress: report,
-        estimateMs: stats.medianMs,
-        elapsedMs: runStartedAt.current === 0 ? 0 : Date.now() - runStartedAt.current,
-        supportsSteps: stats.progress === 'steps',
+        estimateMs,
+        elapsedMs: startedAt === 0 ? 0 : Date.now() - startedAt,
       })
       return { text: view.text, fraction: view.fraction }
     },
-    estimateMs: stats.medianMs,
-    workflows,
+    runnable,
+    workflowFor,
+    sizeFor,
     // `tick` is not read: it exists so the ETA above is recomputed every 500 ms.
-  }), [beginEdit, compare, editImage, generate, nodes, progress, quickEdit, runningNodeId, selection, setParam, showTake, stats, takes, tick, workflows])
+  }), [beginEdit, cancelRun, compare, editImage, generate, nodes, progress, quickEdit, runningNodeId, runnable, selection, setParam, showTake, sizeFor, stats, takes, tick, workflowFor])
 
   // 左键双击空白处 → 添加节点面板。
   //
@@ -1658,6 +2002,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
           return (
             <CompareView
               nodeLabel={nodeLabel(nodes, comparing)}
+              mediaKind={node?.data.kind === 'video' ? 'video' : 'image'}
               takes={takes[shotId] ?? []}
               {...(typeof node?.data.takeId === 'string' ? { currentTakeId: node.data.takeId } : {})}
               onUse={(takeId) => { showTake(comparing, takeId) }}
@@ -1704,16 +2049,22 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
           />
         ) : null}
 
-        {/* 空画布提示：入口写在画布中央，而不是让人去工具栏里找。 */}        {nodes.length === 0 ? (
+        {/* 空画布提示：入口写在画布中央，而不是让人去工具栏里找。 */}
+        {nodes.length === 0 ? (
           <div className="studio-empty">
             <p>双击画布 添加节点</p>
             <div className="studio-empty-chips">
               {CANVAS_NODES.map((spec) => (
-                <button type="button" key={spec.kind} onClick={() => { addNode(spec.kind, { x: spec.kind === 'text' ? -320 : 80, y: -80 }) }}>
+                <button
+                  type="button"
+                  key={spec.kind}
+                  // 三种节点各给一个落点：都写 80 的话图片和视频会叠在同一个位置。
+                  onClick={() => { addNode(spec.kind, { x: spec.kind === 'text' ? -360 : spec.kind === 'image' ? 40 : 440, y: -80 }) }}
+                >
                   {spec.title}
                 </button>
               ))}
-              <button type="button" onClick={() => { beginUpload({ worldX: 460, worldY: -80 }) }}>上传素材</button>
+              <button type="button" onClick={() => { beginUpload({ worldX: 820, worldY: -80 }) }}>上传素材</button>
             </div>
           </div>
         ) : null}
@@ -1798,10 +2149,4 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       </div>
     </div>
   )
-}
-
-/** Keep only what a text node needs from a generation result (it has no picture). */
-function latestListed(images: { url: string; takeId?: string }[]): Record<string, unknown> {
-  const first = images[0]
-  return first === undefined ? {} : { url: first.url, ...(first.takeId === undefined ? {} : { takeId: first.takeId }) }
 }

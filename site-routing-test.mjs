@@ -150,6 +150,7 @@ const run = async () => {
     sections: [...document.querySelectorAll('.home-block h2')].map((h) => h.textContent),
     capabilities: document.querySelectorAll('.capability').length,
     planned: document.querySelectorAll('.capability.planned').length,
+    ready: document.querySelectorAll('.capability.ready').length,
     highlights: document.querySelectorAll('.highlight-card').length,
     categories: document.querySelectorAll('.category-tabs button').length,
     showcaseItems: document.querySelectorAll('.showcase-card').length,
@@ -165,7 +166,13 @@ const run = async () => {
   check('核心区块齐备（能力 / 最近画布 / 为什么用它）',
     ['能力', '最近画布', '为什么用它'].every((name) => home.sections.includes(name)), home.sections.join(' / '))
   check('能力入口渲染', home.capabilities >= 6, `${home.capabilities} 个`)
-  check('未接入的能力如实标注', home.planned >= 4, `${home.planned} 个待接入`)
+  // 期望值来自站点内容本身，不写死数字：视频那条从 planned 变成 ready 时
+  // 「>= 4」就假失败了 —— 而真正要守的是「界面上标成待接入的，正好是内容里标 planned 的那些」。
+  const siteContent = await (await api('/api/site')).json()
+  const plannedInContent = (siteContent.capabilities ?? []).filter((item) => item.status === 'planned').length
+  const readyInContent = (siteContent.capabilities ?? []).filter((item) => item.status === 'ready').length
+  check('未接入的能力如实标注', home.planned === plannedInContent && home.ready === readyInContent,
+    `界面 ${String(home.planned)} 待接入 / ${String(home.ready)} 就绪；内容 ${String(plannedInContent)} / ${String(readyInContent)}`)
   check('特色卡来自站点内容', home.highlights === 3)
   // 分类页签长在展示区里面，所以展示区不渲染时它们也不该在。
   check('没有展示项时连分类页签都不渲染', home.showcaseItems > 0 ? home.categories >= 1 : home.categories === 0,

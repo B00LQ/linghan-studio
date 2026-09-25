@@ -1,0 +1,144 @@
+{
+  "id": "minimax-h3-video-pdd",
+  "title": "MiniMax H3 视频 · 官方 PDD 加速 4 步（含音频）",
+  "capability": "video",
+  "source": "官方加速（alibaba-pai/MiniMax-H3-Acc-LoRAs，PDD 平行解码蒸馏）版：UNET → MiniMaxH3SigmaShift(12/3) → MiniMaxH3PDDAccApply → BasicGuider，sigmas 直接由 Apply 节点给出。它和 turbo LoRA 那份**不是**可以互相替代的同一种东西——PDD 文件里除了 rank-64 主干 LoRA 还带着一套「每区间最后一层投影」的头库，普通 LoRA 加载器读不了它、静默丢掉头库就等于没蒸馏，所以必须走 ComfyUI-MiniMax-H3-PDD-Acc 这个插件节点（本机已装在 custom_nodes）。配方是死的：采样器必须 euler、引导必须 CFG 1.0（BasicGuider）、shift 必须正好 12/3、不能叠其它蒸馏 LoRA 或缓存节点，否则节点会直接报错而不是悄悄出坏图。",
+  "requiredNodes": [
+    "UNETLoader",
+    "MiniMaxH3SigmaShift",
+    "MiniMaxH3PDDAccApply",
+    "CLIPLoader",
+    "VAELoader",
+    "PrimitiveFloat",
+    "ComfyMathExpression",
+    "MiniMaxH3ImageToVideo",
+    "BasicGuider",
+    "KSamplerSelect",
+    "RandomNoise",
+    "SamplerCustomAdvanced",
+    "VAEDecode",
+    "VAEDecodeAudio",
+    "CreateVideo",
+    "SaveVideo"
+  ],
+  "defaults": {
+    "width": 1344,
+    "height": 768,
+    "duration": 5,
+    "steps": "4",
+    "sampler": "euler",
+    "shiftVideo": 12,
+    "shiftAudio": 3,
+    "strength": 1,
+    "headStrength": 1,
+    "fps": 24
+  },
+  "models": {
+    "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "clip": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+    "clipType": "minimax",
+    "vae": "minimax_h3_video_vae_int8_convrot.safetensors",
+    "audioVae": "minimax_h3_audio_vae_fp32.safetensors",
+    "pdd": "MiniMax-H3-FL2VA-Acc-8Step.safetensors",
+    "weightDtype": "default"
+  },
+  "graph": {
+    "unet": {
+      "class_type": "UNETLoader",
+      "inputs": { "unet_name": "$unet", "weight_dtype": "$weightDtype" }
+    },
+    "shift": {
+      "class_type": "MiniMaxH3SigmaShift",
+      "inputs": { "model": ["unet", 0], "shift_video": "$shiftVideo", "shift_audio": "$shiftAudio" }
+    },
+    "pdd": {
+      "class_type": "MiniMaxH3PDDAccApply",
+      "inputs": {
+        "model": ["shift", 0],
+        "pdd_file": "$pdd",
+        "nfe": "$steps",
+        "lora_strength": "$strength",
+        "head_strength": "$headStrength",
+        "on_off_grid": "error"
+      }
+    },
+    "clip": {
+      "class_type": "CLIPLoader",
+      "inputs": { "clip_name": "$clip", "type": "$clipType" }
+    },
+    "vae": {
+      "class_type": "VAELoader",
+      "inputs": { "vae_name": "$vae" }
+    },
+    "vaeAudio": {
+      "class_type": "VAELoader",
+      "inputs": { "vae_name": "$audioVae" }
+    },
+    "duration": {
+      "class_type": "PrimitiveFloat",
+      "inputs": { "value": "$duration" }
+    },
+    "length": {
+      "class_type": "ComfyMathExpression",
+      "inputs": {
+        "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+        "values.a": ["duration", 0]
+      }
+    },
+    "i2v": {
+      "class_type": "MiniMaxH3ImageToVideo",
+      "inputs": {
+        "clip": ["clip", 0],
+        "vae": ["vae", 0],
+        "prompt": "$prompt",
+        "width": "$width",
+        "height": "$height",
+        "length": ["length", 1]
+      }
+    },
+    "guider": {
+      "class_type": "BasicGuider",
+      "inputs": { "model": ["pdd", 0], "conditioning": ["i2v", 0] }
+    },
+    "sampler": {
+      "class_type": "KSamplerSelect",
+      "inputs": { "sampler_name": "$sampler" }
+    },
+    "noise": {
+      "class_type": "RandomNoise",
+      "inputs": { "noise_seed": "$seed" }
+    },
+    "sample": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "noise": ["noise", 0],
+        "guider": ["guider", 0],
+        "sampler": ["sampler", 0],
+        "sigmas": ["pdd", 1],
+        "latent_image": ["i2v", 1]
+      }
+    },
+    "decodeVideo": {
+      "class_type": "VAEDecode",
+      "inputs": { "samples": ["sample", 0], "vae": ["vae", 0] }
+    },
+    "decodeAudio": {
+      "class_type": "VAEDecodeAudio",
+      "inputs": { "samples": ["sample", 0], "vae": ["vaeAudio", 0] }
+    },
+    "makeVideo": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "images": ["decodeVideo", 0],
+        "audio": ["decodeAudio", 0],
+        "fps": "$fps",
+        "bit_depth": 8,
+        "color_space": "sRGB"
+      }
+    },
+    "save": {
+      "class_type": "SaveVideo",
+      "inputs": { "video": ["makeVideo", 0], "filename_prefix": "$prefix", "format": "mp4" }
+    }
+  }
+}

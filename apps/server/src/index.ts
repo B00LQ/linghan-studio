@@ -18,7 +18,8 @@ import { createWorkflowRoutes } from './workflow/routes.ts'
 import { loadConfig } from './config.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
-import { applyOps, readDocument, writeDocument } from './ops.ts'
+import { createJobRegistry } from './jobs.ts'
+import { applyGeneration, applyOps, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
 import { makeZip, type ZipEntry } from './zip.ts'
@@ -103,6 +104,66 @@ const workflowRoutes = createWorkflowRoutes({
   log: (message) => { console.log(`[studio] ${message}`) },
 })
 const secureCookies = process.env.STUDIO_SECURE_COOKIES === '1'
+
+/**
+ * 渲染作业：一次生成不再等于一个 HTTP 请求。
+ *
+ * 图片 6 秒时那样无所谓，视频 11 分钟就不行了 —— Node 的 fetch 默认 5 分钟放弃、
+ * nginx 默认 60 秒 504、Agent 的调用同样超时，而「调用方失败」和「活干完了」
+ * 会同时为真。
+ *
+ * 运行器在这里（而不是在 jobs.ts 里）拼装，因为写画布文档要用 ops、通知画布要用
+ * bridge —— 只有这个组合根同时握着它们。
+ */
+const jobs = createJobRegistry({
+  log: (message) => { console.log(`[studio] ${message}`) },
+  // 每次状态变化都推给正在看这块画布的人；刷新过的页面则靠 /api/jobs 重新接上。
+  onChange: (job) => {
+    bridge.broadcast(job.request.projectId, 'job', job)
+  },
+  abort: async (comfyPromptId) => { await gateway.abortRender(comfyPromptId) },
+  async run(job, hooks) {
+    const request = job.request
+    // 镜头：没有就现建一个，和画布点击、Agent 调用走的是同一条路。
+    let shotId = request.shotId ?? ''
+    if (shotId === '' || store.getShot(shotId) === undefined) {
+      shotId = store.addShot(request.projectId, request.prompt.slice(0, 40), request.prompt).id
+    }
+    const history = store.listTakes(shotId)
+    const files = await gateway.renderImage({
+      prompt: request.prompt,
+      shotId,
+      ...(request.size === undefined ? {} : { size: request.size }),
+      ...(request.count === undefined ? {} : { count: request.count }),
+      ...(request.workflowId === undefined ? {} : { workflowId: request.workflowId }),
+      ...(request.duration === undefined ? {} : { duration: request.duration }),
+    }, {
+      onQueued: hooks.queued,
+      onProgress: (progress) => { hooks.progress(progress as unknown as Record<string, unknown>) },
+    })
+
+    // 落进文档这件事由**服务端**做：没有浏览器开着的时候，那次生成也该出现在画布上。
+    const doc = readDocument(store, request.projectId)
+    const applied = applyGeneration(doc, {
+      nodeId: request.nodeId,
+      shotId,
+      prompt: request.prompt,
+      historyLength: history.length,
+      files,
+    })
+    if (applied) {
+      writeDocument(store, request.projectId, doc)
+      // reason 用 'render' 而不是 'generate'：画布要区分「我自己这次生成完事了」
+      // 和「别的入口改了文档」——前者不该把人正在编辑的选中状态清掉。
+      bridge.broadcastDocument(request.projectId, 'render')
+    }
+    return {
+      files,
+      takes: store.listTakes(shotId).length,
+      shotId,
+    }
+  },
+})
 
 /** Largest upload accepted; the canvas only needs stills and short clips so far. */
 const UPLOAD_LIMIT_BYTES = 64 * 1024 * 1024
@@ -329,6 +390,62 @@ const server = createServer((req, res) => {
       if (pathname === '/api/image-backend' && method === 'GET') {
         json(res, 200, await gateway.backend())
         return
+      }
+
+      // 渲染作业：提交立刻返回，之后靠查/推。长任务（视频十几分钟）不能挂在
+      // 一个 HTTP 请求上——见 createJobRegistry 上面的说明。
+      if (pathname === '/api/jobs' && method === 'POST') {
+        const body = parseJson(await readText(req))
+        const projectId = typeof body.projectId === 'string' ? body.projectId : ''
+        const nodeId = typeof body.nodeId === 'string' ? body.nodeId : ''
+        const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
+        if (store.getProject(projectId) === undefined) {
+          json(res, 404, { error: '画布不存在' })
+          return
+        }
+        if (nodeId === '' || prompt === '') {
+          json(res, 400, { error: '缺少 nodeId 或 prompt' })
+          return
+        }
+        const job = jobs.submit({
+          projectId,
+          nodeId,
+          prompt,
+          ...(typeof body.size === 'string' && body.size !== '' ? { size: body.size } : {}),
+          ...(typeof body.count === 'number' ? { count: body.count } : {}),
+          ...(typeof body.workflow === 'string' && body.workflow !== '' ? { workflowId: body.workflow } : {}),
+          ...(typeof body.duration === 'number' ? { duration: body.duration } : {}),
+          ...(typeof body.shotId === 'string' && body.shotId !== '' ? { shotId: body.shotId } : {}),
+        })
+        // 202：请求已被接受，活儿还没干完。这不是错误状态。
+        json(res, 202, { job })
+        return
+      }
+      if (pathname === '/api/jobs' && method === 'GET') {
+        const projectId = url.searchParams.get('projectId') ?? undefined
+        // 默认只给「还没跑完的」：刷新后的画布要接上的正是这些。
+        // 想看全部（含已结束的）得显式要，否则历史会越堆越长。
+        const all = url.searchParams.get('all') === '1'
+        json(res, 200, { jobs: all ? jobs.list(projectId) : jobs.active(projectId) })
+        return
+      }
+      const jobMatch = /^\/api\/jobs\/([^/]+)$/u.exec(pathname)
+      if (jobMatch !== null) {
+        const jobId = decodeURIComponent(jobMatch[1] as string)
+        const job = jobs.get(jobId)
+        if (job === undefined) {
+          json(res, 404, { error: '作业不存在（服务端重启会丢掉未完成的作业）' })
+          return
+        }
+        if (method === 'GET') {
+          json(res, 200, { job })
+          return
+        }
+        if (method === 'DELETE') {
+          const accepted = await jobs.cancel(jobId)
+          json(res, accepted ? 200 : 409, accepted ? { ok: true, job: jobs.get(jobId) } : { error: '这个作业已经结束了' })
+          return
+        }
       }
 
       // 生成进度与预计时间：能力由驱动协商（有步进就报步进，没有就退回历史耗时）。

@@ -1,5 +1,5 @@
 /**
- * 新节点模型验收：两种节点、选中才出现的提示词窗口、窗口内生成、多版本。
+ * 新节点模型验收：节点种类与词表一致、选中才出现的提示词窗口、窗口内生成、多版本。
  *
  * 用法: node canvas-prompt-window-test.mjs <baseUrl> <password>
  *
@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { CANVAS_NODES } from './apps/web/src/canvas/ports.ts'
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8080'
 const PASSWORD = process.argv[3] || process.env.STUDIO_PASSWORD || 'studio-demo-2026'
@@ -149,14 +150,17 @@ const run = async () => {
     `中心 ${dock?.centerX} vs 画布中心 ${dock?.paneCenterX}`)
   check('浮动条贴近画布底部', dock !== null && dock.bottom < 40, `距底 ${dock?.bottom}px`)
 
-  log('③ 菜单只有「文本」和「图片」')
+  log('③ 菜单里的节点种类与词表一致（这次多了「视频」）')
   const pane = await s.evaluate(`(() => { const r = document.querySelector('.react-flow').getBoundingClientRect(); return { x: Math.round(r.x + r.width * 0.6), y: Math.round(r.y + r.height * 0.55) } })()`)
   await s.doubleClick(pane.x, pane.y)
   await sleep(700)
   const items = await s.evaluate(`[...document.querySelectorAll('.studio-menu button')].map((b) => (b.textContent || '').trim())`)
-  check('菜单项为 文本 / 图片 / 上传素材',
-    items.length === 3 && items.includes('文本') && items.includes('图片') && items.includes('上传素材'),
-    items.join(' | '))
+  // 期望值从 CANVAS_NODES 推导，不写死：写死的话每加一种节点都要来改测试，
+  // 而「菜单里该有的都在」才是真正要守的那条。ports.ts 不碰 DOM，可以直接 import。
+  const expected = [...CANVAS_NODES.map((spec) => spec.title), '上传素材']
+  check(`菜单项为 ${expected.join(' / ')}`,
+    items.length === expected.length && expected.every((label) => items.includes(label)),
+    `实际：${items.join(' | ')}`)
   check('没有镜头、也没有版本宫格', !items.some((t) => t.includes('镜头') || t.includes('宫格')))
 
   log('④ 未选中节点时，下方没有提示词窗口')

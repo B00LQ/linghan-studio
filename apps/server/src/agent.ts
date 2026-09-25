@@ -9,7 +9,7 @@
  * Every tool returns plain JSON, and every failure comes back as a message an
  * Agent can act on rather than a stack trace.
  */
-import { applyOps, makeNode, readDocument, resolvePrompt, writeDocument, type CanvasDocument, type CanvasOp } from './ops.ts'
+import { applyGeneration, applyOps, makeNode, readDocument, resolvePrompt, writeDocument, type CanvasDocument, type CanvasOp } from './ops.ts'
 import type { StudioGateway } from './gateway.ts'
 import type { StudioStore } from './store.ts'
 
@@ -272,23 +272,25 @@ export function createAgentFace(deps: AgentDeps): {
 
       deps.log(`agent: 生成 ${prompt.slice(0, 30)}… (history ${shotId.slice(0, 8)}, ${String(count)} 张)`)
       const images = await deps.gateway.renderImage({ prompt, size, count, shotId })
-      const first = images[0]
 
       mutate(projectId, 'generate', (target) => {
+        // 落点逻辑与作业运行器共用（见 ops.applyGeneration）：
+        // 「生成好了之后画布上应该发生什么」只能有一个答案。
         const anchor = target.nodes.find((item) => item.id === nodeId)
         if (anchor === undefined) return
+        if (kind === 'image') {
+          applyGeneration(target, {
+            nodeId,
+            shotId,
+            prompt,
+            historyLength: history.length,
+            files: images.map((image) => ({ url: image.url, ...(image.takeId === undefined ? {} : { takeId: image.takeId }) })),
+          })
+          return
+        }
         anchor.data.shotId = shotId
         anchor.data.status = 'idle'
         if (anchor.data.text === '') anchor.data.text = prompt
-        if (kind === 'image') {
-          // 画面落在节点自己身上，其余的张数成为它的其他版本。
-          if (first !== undefined) {
-            anchor.data.url = first.url
-            anchor.data.takeNumber = history.length + 1
-            if (first.takeId !== undefined) anchor.data.takeId = first.takeId
-          }
-          return
-        }
         const originX = anchor.position.x + 460
         const originY = anchor.position.y
         images.forEach((image, index) => {

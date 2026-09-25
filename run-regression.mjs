@@ -35,6 +35,16 @@ const SUITES = [
   { name: 'image-edit', script: 'image-edit-test.mjs', args: [BASE, PASSWORD] },
   // 单测而不是浏览器：只算裁剪/旋转的算术，不需要容器，也不碰 ComfyUI。
   { name: 'crop', script: 'crop-test.mjs', args: [] },
+  // 视频工作流的**静态**验收：对着 ComfyUI 的 /object_info 逐节点核字段名。
+  // 必须单独跑，因为一次真实生成要十几分钟——字段名写错不能等那么久才发现。
+  // 不需要 Studio 容器，只需要 ComfyUI 在跑。
+  { name: 'minimax-workflow', script: 'minimax-workflow-test.mjs', args: [] },
+  // 画布上的视频节点：不出一段真片（那要十几分钟），但用一段真 mp4 验
+  // 「浏览器到底解没解出画面」——<img src="x.mp4"> 什么都不显示。
+  { name: 'canvas-video', script: 'canvas-video-test.mjs', args: [BASE, PASSWORD] },
+  // 渲染作业的生命周期：提交立刻返回、没有浏览器也写回文档、能取消、刷新能接上。
+  // 用出图（6-10 秒）验，不拿出片（十几分钟）——队列的正确性与片子多长无关。
+  { name: 'jobs', script: 'jobs-test.mjs', args: [BASE, PASSWORD] },
   { name: 'assets', script: 'assets-test.mjs', args: [BASE, PASSWORD] },
   { name: 'workflows', script: 'workflow-library-test.mjs', args: [BASE, PASSWORD], slow: true },
   { name: 'canvas-typing', script: 'canvas-typing-test.mjs', args: [BASE, PASSWORD] },

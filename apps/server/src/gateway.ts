@@ -17,10 +17,19 @@ import { colorFor, gradientPng } from './png.ts'
 import type { StudioStore } from './store.ts'
 import { checkWorkflow as checkGraph, type StudioWorkflow, type WorkflowCheck } from './workflow-library.ts'
 
-/** One produced image, plus whatever the provider told us about how it was made. */
+/**
+ * One produced file, plus whatever the provider told us about how it was made.
+ *
+ * A file, not an image: a video workflow returns an mp4, so the mime and the
+ * asset kind travel with the bytes.
+ */
 interface GeneratedImage {
-  /** Image bytes. */
+  /** The bytes. */
   bytes: Buffer
+  /** Mime type, so the library stores the video as a video. */
+  mime: string
+  /** `image` / `video` / `audio` / `text`. */
+  kind: string
   /** Sampler seed, when the provider reported one. */
   seed?: number
 }
@@ -95,6 +104,8 @@ export interface RenderRequest {
   size?: string
   /** How many images to produce. */
   count?: number
+  /** Clip length in seconds, for video workflows. */
+  duration?: number
   /** Shot the images belong to; when set, each image records a take. */
   shotId?: string
   /** Which stored workflow to run; empty means the default one. */
@@ -118,8 +129,24 @@ export interface StudioGateway {
    *
    * The agent tool face calls this so that an Agent-driven generation and a
    * human click produce the same assets, the same takes, and the same record.
+   * The job runner calls it too, and passes hooks so a render can be cancelled:
+   * `hooks.onQueued` hands back the backend's own id for *this* render.
    */
-  renderImage: (request: RenderRequest) => Promise<RenderedImage[]>
+  renderImage: (
+    request: RenderRequest,
+    hooks?: {
+      onQueued?: (comfyPromptId: string) => void
+      onProgress?: (progress: GenerationProgress) => void
+    },
+  ) => Promise<RenderedImage[]>
+  /**
+   * Stop one render at the backend.
+   *
+   * A no-op for drivers that cannot be interrupted; the job still reports
+   * 「已取消」 and its result is discarded, which is the promise the operator
+   * actually cares about.
+   */
+  abortRender: (comfyPromptId: string) => Promise<void>
 }
 
 /** Write a JSON response with permissive CORS (the canvas may be on another origin). */
@@ -233,8 +260,14 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     count: number,
     onProgress?: (progress: GenerationProgress) => void,
     workflowId = '',
+    duration?: number,
+    onQueued?: (comfyPromptId: string) => void,
   ): Promise<GeneratedImage[]> => {
-    if (config.imageDriver === 'ark') return (await arkImage(prompt, size)).map((bytes) => ({ bytes }))
+    // 云端与占位驱动都只出图片，所以它们的 mime 是常量；视频只可能来自本地
+    // ComfyUI 工作流，也只有那条路需要按文件名判类型。
+    if (config.imageDriver === 'ark') {
+      return (await arkImage(prompt, size)).map((bytes) => ({ bytes, mime: 'image/png', kind: 'image' }))
+    }
     if (config.imageDriver === 'comfyui') {
       return comfyui.generate({
         prompt,
@@ -242,10 +275,11 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         height: size.height,
         count,
         ...(workflowId === '' ? {} : { workflowId }),
-      }, onProgress)
+        ...(duration === undefined ? {} : { duration }),
+      }, onProgress, onQueued)
     }
     log(`gateway: placeholder driver answered "${prompt.slice(0, 40)}" at ${String(size.width)}x${String(size.height)}`)
-    return Array.from({ length: count }, () => ({ bytes: placeholder(prompt, size) }))
+    return Array.from({ length: count }, () => ({ bytes: placeholder(prompt, size), mime: 'image/png', kind: 'image' }))
   }
 
   /**
@@ -316,20 +350,29 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
   }
 
   /** Render, store, and record takes — the single path both entries share. */
-  const renderImage = async (request: RenderRequest): Promise<RenderedImage[]> => {
+  const renderImage = async (
+    request: RenderRequest,
+    hooks: {
+      /** Called with the driver's own id for this render, so it can be cancelled. */
+      onQueued?: (comfyPromptId: string) => void
+      /** Called on every progress report, on top of the canvas broadcast. */
+      onProgress?: (progress: GenerationProgress) => void
+    } = {},
+  ): Promise<RenderedImage[]> => {
     const prompt = request.prompt.trim()
     const size = asSize(request.size)
     const count = asCount(request.count ?? 1)
     const shotId = request.shotId?.trim() ?? ''
     const started = Date.now()
-    let images: GeneratedImage[]
+    let artifacts: GeneratedImage[]
     try {
       // Progress is reported against the shot, not the HTTP request: the canvas
       // knows which node is running, and the request may be an Agent's call with
       // no browser attached at all.
-      images = await generate(prompt, size, count, (progress) => {
+      artifacts = await generate(prompt, size, count, (progress) => {
         if (shotId !== '') deps.onProgress?.({ shotId, progress })
-      }, request.workflowId ?? '')
+        hooks.onProgress?.(progress)
+      }, request.workflowId ?? '', request.duration, hooks.onQueued)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // A failed attempt is still a take — without it the version history lies by omission.
@@ -337,13 +380,16 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
       throw error
     }
     const latencyMs = Date.now() - started
-    return images.map((image) => {
-      const asset = store.saveAsset(image.bytes, 'image/png', 'image')
+    return artifacts.map((artifact) => {
+      // The mime and kind come from the driver, not from here: a video workflow
+      // returns an mp4, and hardcoding image/png here is what made the library
+      // store a video as an image.
+      const asset = store.saveAsset(artifact.bytes, artifact.mime, artifact.kind)
       const takeId = recordTake({
         shotId,
         status: 'succeeded',
         assetId: asset.id,
-        ...(image.seed === undefined ? {} : { seed: image.seed }),
+        ...(artifact.seed === undefined ? {} : { seed: artifact.seed }),
         latencyMs,
         prompt,
         size,
@@ -368,6 +414,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         shotId: asString(body.shotId),
         // 画布上这个节点选了哪套工作流。空 = 默认那套。
         workflowId: asString(body.workflow),
+        // 视频工作流用得到；图片工作流会忽略它（图里没有 $duration 就用不上）。
+        ...(body.duration === undefined ? {} : { duration: Number(body.duration) }),
       })
       const data = images.map((image) => image.takeId === undefined
         ? { url: image.url }
@@ -420,6 +468,12 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     capabilities,
     checkWorkflow,
     renderImage,
+    async abortRender(comfyPromptId) {
+      // 只有本地 ComfyUI 能真的被中止；云端 API 一旦提交就只能等它回来，
+      // 那时作业照样标记为已取消、结果丢掉——这是对使用者的承诺。
+      if (config.imageDriver !== 'comfyui') return
+      await comfyui.abort(comfyPromptId)
+    },
     async handle(req, res, path) {
       if (req.method === 'OPTIONS') {
         res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'GET,POST,OPTIONS' })

@@ -24,10 +24,14 @@ export interface Footprint {
 /** Footprints per kind; pictures are tall because the frame is square. */
 const TEXT: Footprint = { w: 260, h: 150 }
 const IMAGE: Footprint = { w: 320, h: 430 }
+/** 视频卡按 16:9 排，比图片矮一些。 */
+const VIDEO: Footprint = { w: 360, h: 300 }
 
 /** The footprint for a node kind. */
 export function footprintOf(kind: string): Footprint {
-  return kind === 'image' ? IMAGE : TEXT
+  if (kind === 'image') return IMAGE
+  if (kind === 'video') return VIDEO
+  return TEXT
 }
 
 /** A group is a frame around other nodes, not content: layout leaves it alone. */

@@ -80,7 +80,11 @@ export const DEFAULT_SITE: SiteContent = {
   capabilities: [
     { id: 'local-image', title: '本地出图', description: '接你自己的 ComfyUI，热态约 6 秒一张', status: 'ready' },
     { id: 'text', title: '文本', description: '写故事、场景与角色设定', status: 'ready' },
-    { id: 'video', title: '视频生成', description: '待接入视频模型', status: 'planned' },
+    // 视频这条按实测写：MiniMax H3 在 12 GB 卡上 768p 一条 5 秒片约十几分钟，
+    // 「热态 6 秒一张」那种速度的话不能套用，说了反而误导。
+    // 4 步蒸馏那条**先不写倍数**：采样步数确实减半，但端到端还压着模型装载与解码
+    // 两笔固定开销，倍数只有量出来才算数。
+    { id: 'video', title: '视频生成（含音频）', description: 'MiniMax H3 本地出片，5 秒 768p 约十几分钟；另有 4 步蒸馏工作流', status: 'ready' },
     { id: 'audio', title: '音频生成', description: '待接入语音供应商', status: 'planned' },
     { id: 'edit', title: '智能剪辑', description: '待接入', status: 'planned' },
     { id: 'director', title: '导演台', description: '待接入', status: 'planned' },

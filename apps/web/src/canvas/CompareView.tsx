@@ -18,6 +18,13 @@ import type { TakeInfo } from '../api.ts'
 export interface CompareViewProps {
   /** Node's display name, so the header says which picture. */
   nodeLabel: string
+  /**
+   * What these versions are.
+   *
+   * Needed because `<img src="…mp4">` renders nothing at all: the element has
+   * to match the media, and a take only carries an asset id, not a mime type.
+   */
+  mediaKind: 'image' | 'video'
   /** Versions of this node's history, newest first (as the API returns them). */
   takes: TakeInfo[]
   /** Take currently shown on the card. */
@@ -48,7 +55,7 @@ function describe(take: TakeInfo): string {
  * @param props - see {@link CompareViewProps}.
  * @returns the dialog.
  */
-export function CompareView({ nodeLabel, takes, currentTakeId, onUse, onClose }: CompareViewProps) {
+export function CompareView({ nodeLabel, mediaKind, takes, currentTakeId, onUse, onClose }: CompareViewProps) {
   // Oldest first, matching the 第 N 版 numbering the card and strip use.
   const ordered = [...takes].reverse()
   const usable = ordered.filter((take) => take.status === 'succeeded' && take.assetId !== '')
@@ -85,8 +92,8 @@ export function CompareView({ nodeLabel, takes, currentTakeId, onUse, onClose }:
       <div className="compare-body">
         <header>
           <span className="compare-title">对比「{nodeLabel}」的 {ordered.length} 个版本</span>
-          <span className="muted">{usable.length} 张可用</span>
-          <span className="muted">点图片放大，Esc 逐步退出</span>
+          <span className="muted">{usable.length} {mediaKind === 'video' ? '条' : '张'}可用</span>
+          <span className="muted">{mediaKind === 'video' ? '直接在这里播放' : '点图片放大'}，Esc 逐步退出</span>
           <button type="button" className="link preview-close" title="关闭（Esc）" onClick={onClose}>✕</button>
         </header>
 
@@ -103,14 +110,17 @@ export function CompareView({ nodeLabel, takes, currentTakeId, onUse, onClose }:
                 <div className="compare-frame">
                   {failed
                     ? <span className="cell-failed">{take.error ?? '失败'}</span>
-                    : (
-                      <img
-                        src={`/api/assets/${take.assetId}`}
-                        alt={`第 ${String(index + 1)} 版`}
-                        title="点击放大"
-                        onClick={() => { setZoom(take.id) }}
-                      />
-                    )}
+                    : mediaKind === 'video'
+                      // 视频格用播放器：对比两段片子的运镜和声音，靠一张静帧是看不出来的。
+                      ? <video src={`/api/assets/${take.assetId}`} controls playsInline preload="metadata" />
+                      : (
+                        <img
+                          src={`/api/assets/${take.assetId}`}
+                          alt={`第 ${String(index + 1)} 版`}
+                          title="点击放大"
+                          onClick={() => { setZoom(take.id) }}
+                        />
+                      )}
                   {take.mark === 'selected' ? <span className="compare-badge" title="当前选用">✓ 选用</span> : null}
                 </div>
                 <figcaption>
@@ -159,7 +169,9 @@ export function CompareView({ nodeLabel, takes, currentTakeId, onUse, onClose }:
                 disabled={zoomIndex <= 0}
                 onClick={() => { const previous = usable[zoomIndex - 1]; if (previous !== undefined) setZoom(previous.id) }}
               >‹</button>
-              <img src={`/api/assets/${zoomed.assetId}`} alt="放大查看" />
+              {mediaKind === 'video'
+                ? <video src={`/api/assets/${zoomed.assetId}`} controls autoPlay playsInline />
+                : <img src={`/api/assets/${zoomed.assetId}`} alt="放大查看" />}
               <button
                 type="button"
                 className="preview-step next"

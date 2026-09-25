@@ -148,6 +148,12 @@ export interface GenerationStats {
   p90Ms: number
   /** Durations of the most recent successful runs, newest first. */
   recentMs: number[]
+  /**
+   * The same numbers per produced asset kind, so a node can ask about its own
+   * medium: a video takes minutes where a picture takes seconds, and a single
+   * median covering both is wrong for both.
+   */
+  byKind: Record<string, { samples: number; medianMs: number; p90Ms: number }>
 }
 
 /** Domain surface used by the HTTP layer. */
@@ -719,19 +725,35 @@ export function openStore(dataDir: string): StudioStore {
     generationStats(limit = 20) {
       // Only successful runs count: a failure's duration says nothing about how
       // long the next good image will take.
+      //
+      // 素材类型来自 asset 表（join），不新加列：视频 take 的资产本来就是 video，
+      // 这个事实数据库里已经有了。
       const rows = db.prepare(
-        "SELECT latency_ms FROM take WHERE status = 'succeeded' AND latency_ms IS NOT NULL AND latency_ms > 0 ORDER BY created_at DESC LIMIT ?",
+        `SELECT t.latency_ms AS latency_ms, a.kind AS asset_kind
+         FROM take t LEFT JOIN asset a ON a.id = t.asset_id
+         WHERE t.status = 'succeeded' AND t.latency_ms IS NOT NULL AND t.latency_ms > 0
+         ORDER BY t.created_at DESC LIMIT ?`,
       ).all(limit) as Row[]
-      const durations = rows.map((row) => integer(row, 'latency_ms')).filter((value) => value > 0)
-      if (durations.length === 0) return { samples: 0, medianMs: 0, p90Ms: 0, recentMs: [] }
-      const sorted = [...durations].sort((a, b) => a - b)
-      const at = (fraction: number): number => sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))] ?? 0
-      return {
-        samples: durations.length,
-        medianMs: at(0.5),
-        p90Ms: at(0.9),
-        recentMs: durations.slice(0, 5),
+      const durationsOf = (subset: Row[]): number[] =>
+        subset.map((row) => integer(row, 'latency_ms')).filter((value) => value > 0)
+      const shape = (durations: number[]): { samples: number; medianMs: number; p90Ms: number; recentMs: number[] } => {
+        if (durations.length === 0) return { samples: 0, medianMs: 0, p90Ms: 0, recentMs: [] }
+        const sorted = [...durations].sort((a, b) => a - b)
+        const at = (fraction: number): number => sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))] ?? 0
+        return { samples: durations.length, medianMs: at(0.5), p90Ms: at(0.9), recentMs: durations.slice(0, 5) }
       }
+
+      // 按类型分开统计，因为**混在一起的答案是错的**：视频一条十几分钟、图片几秒，
+      // 合起来算中位数会对两者都给出一个自信而错误的预计时间
+      // （「预计 7 秒」然后跑 13 分钟——比不显示预计时间更糟）。
+      const byKind: Record<string, { samples: number; medianMs: number; p90Ms: number }> = {}
+      for (const kind of ['image', 'video', 'audio']) {
+        const subset = rows.filter((row) => text(row, 'asset_kind') === kind)
+        const shaped = shape(durationsOf(subset))
+        if (shaped.samples > 0) byKind[kind] = { samples: shaped.samples, medianMs: shaped.medianMs, p90Ms: shaped.p90Ms }
+      }
+
+      return { ...shape(durationsOf(rows)), byKind }
     },
     listAssets(limit = 200) {
       return (db.prepare('SELECT id, kind, mime, bytes, rel_path, created_at FROM asset ORDER BY created_at DESC LIMIT ?').all(limit) as Row[])

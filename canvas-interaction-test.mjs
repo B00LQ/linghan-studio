@@ -12,6 +12,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateSync } from 'node:zlib'
+import { CANVAS_NODES } from './apps/web/src/canvas/ports.ts'
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8080'
 const PASSWORD = process.argv[3] || process.env.STUDIO_PASSWORD || 'studio-demo-2026'
@@ -142,7 +143,11 @@ const run = async () => {
   const hint = await s.evaluate(`(document.querySelector('.studio-empty p')?.textContent || '').trim()`)
   check('显示「双击画布 添加节点」', hint === '双击画布 添加节点', hint)
   const chips = await s.evaluate(`[...document.querySelectorAll('.studio-empty-chips button')].map((b) => b.textContent)`)
-  check('快捷入口为 文本 / 图片 / 上传素材', chips.length === 3 && chips.includes('文本') && chips.includes('图片') && chips.includes('上传素材'), chips.join(' / '))
+  // 期望值从 CANVAS_NODES 推导：写死列表的话每加一种节点都得来改测试，
+  // 而「词表里有的种类都在快捷入口里」才是要守的那条。
+  const expectedKinds = [...CANVAS_NODES.map((spec) => spec.title), '上传素材']
+  check(`快捷入口为 ${expectedKinds.join(' / ')}`,
+    chips.length === expectedKinds.length && expectedKinds.every((label) => chips.includes(label)), chips.join(' / '))
 
   // 找一个真正空白的位置（避开节点、提示词窗口、底部浮动条、小地图）
   const emptyPoint = async (skip = 0) => s.evaluate(`(() => {
@@ -175,14 +180,15 @@ const run = async () => {
   check('重做也不可用', items.find((i) => i.text.startsWith('重做'))?.disabled === true)
   await s.shot('canvas-io-context-menu.png')
 
-  log('④ 菜单里「添加节点」展开为 文本 / 图片')
+  log('④ 菜单里「添加节点」展开为词表里的全部种类')
   check('点击「添加节点」', await s.evaluate(`(() => {
     const hit = [...document.querySelectorAll('.studio-menu button')].find((b) => (b.textContent || '').trim().startsWith('添加节点'));
     if (!hit) return false; hit.click(); return true;
   })()`))
   await sleep(500)
   const submenu = await s.evaluate(`[...document.querySelectorAll('.studio-menu button')].map((b) => (b.textContent || '').trim())`)
-  check('只列 文本 / 图片 / 上传素材', submenu.length === 3 && submenu.includes('文本') && submenu.includes('图片'), submenu.join(' | '))
+  check(`展开后就是 ${expectedKinds.join(' / ')}`,
+    submenu.length === expectedKinds.length && expectedKinds.every((label) => submenu.includes(label)), submenu.join(' | '))
   check('点击「文本」', await s.evaluate(`(() => {
     const hit = [...document.querySelectorAll('.studio-menu button')].find((b) => (b.textContent || '').trim() === '文本');
     if (!hit) return false; hit.click(); return true;

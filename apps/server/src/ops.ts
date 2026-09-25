@@ -138,6 +138,44 @@ export function makeNode(kind: 'text' | 'image' | 'config' | 'grid', options: {
 }
 
 /**
+ * Write a finished generation onto the node that asked for it.
+ *
+ * Shared by the two server-side callers — the Agent tool face and the render job
+ * runner — because 「生成好了之后画布上应该发生什么」 must not be two different
+ * answers. (The browser applies the same three fields itself, from the same
+ * response, which is why they are exactly these three.)
+ * @param doc - document to mutate in place.
+ * @param input - which node, what was asked, and what came back.
+ * @returns whether the node was found.
+ */
+export function applyGeneration(doc: CanvasDocument, input: {
+  /** Node that asked for the render. */
+  nodeId: string
+  /** Shot the takes were recorded against; recorded on the node so the version strip has a source. */
+  shotId?: string
+  /** Prompt used, so a node with no text records what made it. */
+  prompt: string
+  /** Existing revision count, so the new one can be numbered. */
+  historyLength: number
+  /** Produced files, newest take first. */
+  files: { url: string; takeId?: string }[]
+}): boolean {
+  const anchor = doc.nodes.find((node) => node.id === input.nodeId)
+  if (anchor === undefined) return false
+  anchor.data.status = 'idle'
+  if (input.shotId !== undefined && input.shotId !== '') anchor.data.shotId = input.shotId
+  if (anchor.data.text === '') anchor.data.text = input.prompt
+  const first = input.files[0]
+  if (first === undefined) return true
+  // 画面落在节点自己身上，其余的张数成为它的其他版本。
+  anchor.data.url = first.url
+  anchor.data.takeNumber = input.historyLength + 1
+  if (first.takeId === undefined) delete anchor.data.takeId
+  else anchor.data.takeId = first.takeId
+  return true
+}
+
+/**
  * Apply operations to a document, in order, without writing it.
  *
  * Kept separate from persistence so a caller can apply a batch and decide

@@ -1,21 +1,22 @@
 /**
  * Canvas node catalogue and port model.
  *
- * Two node kinds, deliberately: 文本 and 图片. An earlier version also had a
- * separate "shot" node and a "version board" node, and the concept count — not
- * the code — is what made the canvas hard to read. The image node now owns its
- * own prompt, its own generation, and its own history, which is the model the
- * reference product uses.
+ * Three node kinds: 文本、图片、视频. 视频 was added only when a local model could
+ * actually produce one — a node kind that cannot run is a promise the canvas
+ * cannot keep. An earlier version also had a separate "shot" node and a
+ * "version board" node, and the concept count — not the code — is what made the
+ * canvas hard to read: a content node owns its prompt, its generation, and its
+ * own history.
  *
  * Ports still have types, because the 「引用该节点生成」menu has to answer "what
  * can consume what I just dragged out?".
  */
 
 /** What a port carries. */
-export type PortKind = 'text' | 'image'
+export type PortKind = 'text' | 'image' | 'video'
 
 /** Node kinds the canvas can draw. */
-export type CanvasNodeKind = 'text' | 'image' | 'group'
+export type CanvasNodeKind = 'text' | 'image' | 'video' | 'group'
 
 /** One port on a canvas node. */
 export interface PortDef {
@@ -74,6 +75,18 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
     placeholder: '可直接文字生图，或接入上游文本。例如：废车站的候车厅，斜射的晨光，尘埃',
     picture: true,
   },
+  {
+    kind: 'video',
+    title: '视频',
+    description: '文字生视频（带声音）；慢，一条要好几分钟',
+    // 「首帧」这一版**故意没有**：MiniMax H3 是图生视频模型，接首帧要把画布上的图
+    // 先传到 ComfyUI 的 input 目录再用 LoadImage 引用，这条链路还没做。
+    // 放一个拖进去却什么都不做的端口，比不放它更糟。
+    inputs: [{ id: 'prompt', kind: 'text', label: '提示词' }],
+    outputs: [{ id: 'video', kind: 'video', label: '视频' }],
+    placeholder: '描述镜头与声音。例如：雨夜霓虹街头，纸灯笼在雨中轻晃，镜头缓慢推近，环境雨声',
+    picture: true,
+  },
 ]
 
 /** Look up a spec by node kind. */
@@ -114,6 +127,8 @@ export function candidatesFor(
 /** Node data for a freshly created node of the given kind. */
 export function initialData(kind: CanvasNodeKind, extra: Record<string, unknown> = {}): Record<string, unknown> {
   if (kind === 'text') return { kind, text: '', ...extra }
+  // 视频没有「张数」：一次出一条，多出的只会是版本；它多一个「时长」。
+  if (kind === 'video') return { kind, text: '', url: '', size: '1344x768', duration: 5, ...extra }
   return { kind, text: '', url: '', size: '1024x1024', count: 1, ...extra }
 }
 

@@ -14,8 +14,51 @@ import { resolveGraph, suggestBindings, type StudioWorkflow } from './workflow-l
 /** Default directory holding API-format workflow templates. */
 const TEMPLATE_DIR = join(import.meta.dirname, 'comfyui')
 
-/** How long one generation may take before it is abandoned. */
+/** How long one image generation may take before it is abandoned. */
 const JOB_TIMEOUT_MS = 10 * 60 * 1000
+
+/**
+ * How long one *video* generation may take.
+ *
+ * A different number, not a bigger one for everyone: a 5 秒 720p clip on a
+ * 12 GB card measured 128 s of model staging before the first step, so the
+ * image limit would kill a run that is working perfectly.
+ */
+const VIDEO_JOB_TIMEOUT_MS = 45 * 60 * 1000
+
+/**
+ * MIME by file extension.
+ *
+ * The driver used to assume every returned file was a PNG, which was true while
+ * the only backend was an image model. A video workflow returns mp4 (and an
+ * audio track inside it), and a wrong mime is not cosmetic: the asset library
+ * picks the `<video>`/`<img>` element from it, and the stored file extension
+ * comes from it too.
+ */
+const MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+  mp4: 'video/mp4', webm: 'video/webm', mkv: 'video/x-matroska', mov: 'video/quicktime',
+  mp3: 'audio/mpeg', flac: 'audio/flac', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+}
+
+/** Guess a mime type from the filename ComfyUI gave back. */
+function mimeOfFile(filename: string): string {
+  const dot = filename.lastIndexOf('.')
+  const ext = dot === -1 ? '' : filename.slice(dot + 1).toLowerCase()
+  return MIME_BY_EXT[ext] ?? 'application/octet-stream'
+}
+
+/**
+ * The asset kind for a mime type — same vocabulary as the asset library.
+ * @param mime - the file's mime type.
+ * @returns `image`, `video`, `audio`, or `text`.
+ */
+function kindOfMime(mime: string): string {
+  if (mime.startsWith('image/')) return 'image'
+  if (mime.startsWith('video/')) return 'video'
+  if (mime.startsWith('audio/')) return 'audio'
+  return 'text'
+}
 
 /** How long to wait for the ComfyUI probe. */
 const PROBE_TIMEOUT_MS = 5_000
@@ -44,6 +87,15 @@ export interface ComfyUiRequest {
   count: number
   /** Override for sampler steps. */
   steps?: number
+  /**
+   * Clip length in seconds, for workflows that make video.
+   *
+   * Forwarded as a plain number and nothing more: how seconds become frames —
+   * MiniMax H3 only accepts lengths of `5 + 17n` — is the workflow's business,
+   * so the arithmetic lives in the graph (`ComfyMathExpression`) next to the
+   * model it constrains, not here.
+   */
+  duration?: number
   /** Which stored workflow to run; the driver's default when omitted. */
   workflowId?: string
 }
@@ -99,10 +151,20 @@ export interface ComfyUiOptions {
   resolveWorkflow?: (id: string) => StudioWorkflow | undefined
 }
 
-/** One produced image, with the seed that produced it. */
-export interface ComfyUiImage {
-  /** PNG bytes. */
+/**
+ * One file a workflow produced, with the seed that produced it.
+ *
+ * Called an artifact rather than an image because a video workflow returns an
+ * mp4 with an audio track — and naming that an image is how the mime type ended
+ * up hardcoded in the first place.
+ */
+export interface ComfyUiArtifact {
+  /** The bytes, exactly as ComfyUI served them. */
   bytes: Buffer
+  /** Detected from the output filename. */
+  mime: string
+  /** `image` / `video` / `audio` / `text`, for the asset library. */
+  kind: string
   /** Sampler seed, so the take can be reproduced later. */
   seed: number
 }
@@ -112,12 +174,27 @@ export interface ComfyUiDriver {
   /** Probe the server and validate the template's nodes and models. */
   selfCheck: () => Promise<ComfyUiCheck>
   /**
-   * Run one generation and return PNG bytes.
+   * Run one generation and return the files it produced.
    * @param request - normalized request.
    * @param onProgress - per-call progress sink, so two concurrent generations
    *   cannot mix their reports up.
+   * @param onQueued - called with ComfyUI's prompt id the moment it accepts the
+   *   work, so a caller can cancel *this* render later instead of interrupting
+   *   whatever happens to be running.
    */
-  generate: (request: ComfyUiRequest, onProgress?: (progress: GenerationProgress) => void) => Promise<ComfyUiImage[]>
+  generate: (
+    request: ComfyUiRequest,
+    onProgress?: (progress: GenerationProgress) => void,
+    onQueued?: (comfyPromptId: string) => void,
+  ) => Promise<ComfyUiArtifact[]>
+  /**
+   * Stop one submitted render.
+   *
+   * Queue deletion first, interrupt second: `POST /interrupt` has no prompt id
+   * and stops whatever is executing, so it is only correct once we know our own
+   * work is the thing running.
+   */
+  abort: (comfyPromptId: string) => Promise<void>
   /** What this driver can report while working. */
   capabilities: DriverCapabilities
   /**
@@ -276,11 +353,11 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
   }
 
   /**
-   * Submit one graph and wait for its produced images.
-   * @param workflow - template to run.
+   * Submit one graph and wait for the files it produced.
+   * @param libraryWorkflow - template to run.
    * @param request - normalized request.
-   * @param seed - sampler seed for this image.
-   * @param batch - 1-based index of this image inside the batch, when there is more than one.
+   * @param seed - sampler seed for this run.
+   * @param batch - 1-based index of this run inside the batch, when there is more than one.
    * @param report - progress sink for this call.
    */
   const runOnce = async (
@@ -289,7 +366,8 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     seed: number,
     batch: { index: number; total: number } | undefined,
     report: (progress: GenerationProgress) => void,
-  ): Promise<Buffer[]> => {
+    onQueued?: (comfyPromptId: string) => void,
+  ): Promise<{ bytes: Buffer; mime: string; kind: string }[]> => {
     // 一套机制运行所有工作流：上传的用显式绑定，内置的用 $占位符，
     // 两条路都收敛到 resolveGraph，驱动不需要分支。
     const graph = resolveGraph(libraryWorkflow, {
@@ -297,6 +375,7 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
       width: request.width,
       height: request.height,
       ...(request.steps === undefined ? {} : { steps: request.steps }),
+      ...(request.duration === undefined ? {} : { duration: request.duration }),
       prompt: request.prompt,
       seed,
       prefix: 'studio',
@@ -316,13 +395,22 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: graph, client_id: clientId }),
     }, 30_000)
-    const queued = (await submit.json()) as { prompt_id?: string; error?: unknown }
+    const queued = (await submit.json()) as { prompt_id?: string; error?: unknown; node_errors?: unknown }
     if (!submit.ok || queued.prompt_id === undefined) {
       watch.socket?.close()
-      throw new Error(`ComfyUI 拒绝了工作流：${JSON.stringify(queued.error ?? queued).slice(0, 400)}`)
+      // ComfyUI 把「哪个节点哪个输入不合格」放在 **node_errors** 里，
+      // 而 error 本身只有一句 "Prompt outputs failed validation"。
+      // 只报后者等于让人去猜——这正是我踩过的：一个字段名写错，
+      // 报错信息里完全看不出来是哪一个。
+      const nodeErrors = queued.node_errors === undefined || Object.keys(queued.node_errors as object).length === 0
+        ? ''
+        : ` 逐节点错误：${JSON.stringify(queued.node_errors).slice(0, 900)}`
+      throw new Error(`ComfyUI 拒绝了工作流：${JSON.stringify(queued.error ?? queued).slice(0, 400)}${nodeErrors}`)
     }
+    onQueued?.(queued.prompt_id)
 
-    const deadline = Date.now() + JOB_TIMEOUT_MS
+    const timeoutMs = libraryWorkflow.capability === 'video' ? VIDEO_JOB_TIMEOUT_MS : JOB_TIMEOUT_MS
+    const deadline = Date.now() + timeoutMs
     let entry: { outputs?: Record<string, { images?: { filename: string; subfolder?: string; type?: string }[] }>; status?: { status_str?: string; messages?: unknown[] } } | undefined
     try {
       while (Date.now() < deadline) {
@@ -335,27 +423,34 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     } finally {
       watch.socket?.close()
     }
-    if (entry === undefined) throw new Error('ComfyUI 生成超时（10 分钟）')
+    if (entry === undefined) {
+      throw new Error(`ComfyUI 生成超时（${String(Math.round(timeoutMs / 60_000))} 分钟）`)
+    }
     if ((entry.status?.status_str ?? '') !== 'success') {
       const failure = (entry.status?.messages ?? []).find((message) => Array.isArray(message) && message[0] === 'execution_error')
       throw new Error(`ComfyUI 执行失败：${JSON.stringify(failure ?? entry.status).slice(0, 400)}`)
     }
 
-    const images = Object.values(entry.outputs ?? {}).flatMap((node) => node.images ?? [])
-    if (images.length === 0) throw new Error('ComfyUI 没有返回图片')
+    // Every output node files its result under `images`, whatever it is: the
+    // native video nodes (`SaveVideo` / `SaveWEBM`) put an mp4 there too, with an
+    // `animated` flag beside it. So the mime has to come from the filename — the
+    // key name is not evidence of the type.
+    const produced = Object.values(entry.outputs ?? {}).flatMap((node) => node.images ?? [])
+    if (produced.length === 0) throw new Error('ComfyUI 没有返回任何文件')
     report({ stage: 'saving', ...(batch === undefined ? {} : { image: batch.index, images: batch.total }) })
-    const buffers: Buffer[] = []
-    for (const image of images) {
+    const files: { bytes: Buffer; mime: string; kind: string }[] = []
+    for (const file of produced) {
       const query = new URLSearchParams({
-        filename: image.filename,
-        subfolder: image.subfolder ?? '',
-        type: image.type ?? 'output',
+        filename: file.filename,
+        subfolder: file.subfolder ?? '',
+        type: file.type ?? 'output',
       })
-      const response = await fetchWithTimeout(`${base}/view?${query.toString()}`, {}, 60_000)
-      if (!response.ok) throw new Error(`取回图片失败：${image.filename}`)
-      buffers.push(Buffer.from(await response.arrayBuffer()))
+      const response = await fetchWithTimeout(`${base}/view?${query.toString()}`, {}, 120_000)
+      if (!response.ok) throw new Error(`取回文件失败：${file.filename}`)
+      const mime = mimeOfFile(file.filename)
+      files.push({ bytes: Buffer.from(await response.arrayBuffer()), mime, kind: kindOfMime(mime) })
     }
-    return buffers
+    return files
   }
 
   /** Node catalogue, cached briefly: the upload form may ask several times in a row. */
@@ -377,20 +472,56 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     selfCheck,
     capabilities: { progress: 'steps' },
     objectInfo,
-    async generate(request, onProgress) {
+    async generate(request, onProgress, onQueued) {
       const workflow = await template(request.workflowId ?? '')
       const started = Date.now()
-      const images: ComfyUiImage[] = []
+      const artifacts: ComfyUiArtifact[] = []
       const report = onProgress ?? options.onProgress ?? ((): void => { /* nobody is listening */ })
       // Count > 1 runs sequentially: a 12 GB card cannot hold two concurrent
       // diffusion models, and ComfyUI's own queue would serialise them anyway.
       for (let index = 0; index < request.count; index += 1) {
         const seed = Math.floor(Math.random() * 1_000_000_000)
         const batch = request.count > 1 ? { index: index + 1, total: request.count } : undefined
-        for (const bytes of await runOnce(workflow, request, seed, batch, report)) images.push({ bytes, seed })
+        for (const file of await runOnce(workflow, request, seed, batch, report, onQueued)) {
+          artifacts.push({ ...file, seed })
+        }
       }
-      options.log(`comfyui: ${String(images.length)} 张 in ${String(Math.round((Date.now() - started) / 1000))}s`)
-      return images
+      options.log(`comfyui: ${String(artifacts.length)} 个产物 in ${String(Math.round((Date.now() - started) / 1000))}s`)
+      return artifacts
+    },
+    async abort(comfyPromptId) {
+      // 已经跑完的不要去动它：下面那步 interrupt 会打到**下一个**任务身上。
+      try {
+        const history = await fetchWithTimeout(`${base}/history/${comfyPromptId}`, {}, 10_000)
+        if (history.ok) {
+          const body = (await history.json()) as Record<string, unknown>
+          if (body[comfyPromptId] !== undefined) {
+            options.log(`comfyui: ${comfyPromptId.slice(0, 8)} 已经跑完，无需中止`)
+            return
+          }
+        }
+      } catch {
+        // 查不到就当它还在跑，继续往下走。
+      }
+      try {
+        const removed = await fetchWithTimeout(`${base}/queue`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ delete: [comfyPromptId] }),
+        }, 10_000)
+        if (removed.ok) {
+          const body = (await removed.json()) as { delete?: number }
+          if ((body.delete ?? 0) > 0) {
+            options.log(`comfyui: 已从队列删除 ${comfyPromptId.slice(0, 8)}`)
+            return
+          }
+        }
+      } catch (error) {
+        options.log(`comfyui: 队列删除失败 ${String(error)}`)
+      }
+      // 还在队列里没轮到 / 已经删不掉 → 它就是在跑的那个。
+      const stopped = await fetchWithTimeout(`${base}/interrupt`, { method: 'POST' }, 10_000)
+      options.log(`comfyui: interrupt ${comfyPromptId.slice(0, 8)} → HTTP ${String(stopped.status)}`)
     },
   }
 }

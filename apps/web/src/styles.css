@@ -850,6 +850,9 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 /* 画面与宫格需要比文字节点宽，否则图被压成一条。 */
 .studio-node[data-kind='image'] { width: 300px; max-width: 300px; }
 .studio-node[data-kind='grid'] { width: 560px; min-width: 560px; max-width: 560px; }
+/* 视频按 16:9 排：比图片卡宽、比它矮。 */
+.studio-node[data-kind='video'] { width: 360px; max-width: 360px; }
+.studio-node .node-video { display: block; width: 100%; background: #000; }
 
 /* 版本宫格：一个镜头的所有版本平铺对比，点格子即选用。 */
 .take-grid { display: grid; gap: 6px; padding: 8px; }
@@ -1009,6 +1012,8 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   line-height: 0;
 }
 .prompt-window .history-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 视频版本格的缩略图：<img src="x.mp4"> 什么都不显示，必须是 video 元素。 */
+.prompt-window .history-cell video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .prompt-window .history-cell.is-shown { border-color: var(--accent); }
 .prompt-window .history-cell.is-chosen::after {
   content: '✓';
