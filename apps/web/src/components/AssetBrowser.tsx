@@ -89,6 +89,8 @@ export interface AssetBrowserProps {
   onPlaceMany?: (ids: string[]) => void
   /** Batch: download as one archive. */
   onDownload?: (ids: string[]) => void
+  /** Batch: 发布到主页（上传给云端、等审核，本地原件不动）。 */
+  onPublish?: ((ids: string[]) => void) | undefined
   /** Batch: delete. The server refuses assets a canvas still shows. */
   onDelete?: (ids: string[]) => void
   /** A message to show after a batch action (success or refusal). */
@@ -101,7 +103,7 @@ export interface AssetBrowserProps {
  * @returns the browser.
  */
 export function AssetBrowser(props: AssetBrowserProps) {
-  const { assets, title, note, actions, folders = [], onChanged, onNotice, onPlaceMany, onDownload, onDelete, notice } = props
+  const { assets, title, note, actions, folders = [], onChanged, onNotice, onPlaceMany, onDownload, onPublish, onDelete, notice } = props
   const [tab, setTab] = useState<'library' | 'manage'>('library')
   const [kind, setKind] = useState('all')
   /** `all`, 未分组, or a folder id. */
@@ -451,6 +453,9 @@ export function AssetBrowser(props: AssetBrowserProps) {
           <span className="count">已选 {picked.length} 个</span>
           {onPlaceMany === undefined ? null : (
             <button type="button" onClick={() => { onPlaceMany(picked); setPicked([]) }}>添加到画布</button>
+          )}
+          {onPublish === undefined ? null : (
+            <button type="button" data-testid="asset-publish" onClick={() => { onPublish(picked) }}>发布到主页</button>
           )}
           {onDownload === undefined ? null : (
             <button type="button" onClick={() => { onDownload(picked) }}>下载</button>

@@ -512,6 +512,27 @@ export const startCloudLogin = (): Promise<{ url: string }> => request('/api/clo
 /** 解绑（云端那边的会话仍然可以在「登录过的设备」里单独撤销）。 */
 export const unbindCloud = (): Promise<{ ok: boolean }> => request('/api/cloud/logout', { method: 'POST' })
 
+/**
+ * 把一件成品发布到服务器（主页）。
+ *
+ * 服务端会**先压缩再上传**（PNG 缩到长边 1600 重新编码；JPEG/视频原样），
+ * 附带画布时把画布引用到的素材也压缩上传。发布后是**待审**：必须管理员点过才上主页。
+ */
+export const publishWork = (input: {
+  assetId: string
+  title: string
+  summary?: string
+  tags?: string
+  /** 附带哪张画布（空 = 不带画布）。 */
+  canvasId?: string
+  withCanvas: boolean
+}): Promise<{ ok: boolean; workId: string; status: string; notes: string[]; note: string }> =>
+  request('/api/cloud/publish', { method: 'POST', body: JSON.stringify(input) })
+
+/** 我在服务器上的作品（含待审与已拒绝，作者自己看得到）。 */
+export const fetchMyWorks = (): Promise<{ works: { id: string; title: string; status: string; kind: string; reviewNote: string; createdAt: string; views: number }[] }> =>
+  request('/api/cloud/works')
+
 /** 装最新版。装完要重启才生效 —— 正在跑的进程替换不了自己。 */
 export const applyUpdate = (): Promise<{ ok: boolean; version: string; files: number; bytes: number; note: string }> =>
   request('/api/update/apply', { method: 'POST' })

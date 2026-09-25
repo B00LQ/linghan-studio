@@ -17,7 +17,7 @@ import { createBridge } from './bridge.ts'
 import { createStudioRegistry } from './workflow/nodes.ts'
 import { createWorkflowRoutes } from './workflow/routes.ts'
 import { loadConfig, SETTINGS, settingsView } from './config.ts'
-import { thumbnail } from './png.ts'
+import { decodePng, downscale, encodePng, thumbnail } from './png.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
@@ -25,6 +25,7 @@ import { createTextBackend } from './text.ts'
 import { createAudioBackend } from './audio.ts'
 import { createAccounts, createConsoleMailer, createWebhookMailer } from './accounts.ts'
 import { applyPendingRestore, createBackups } from './backup.ts'
+import { adminPage, galleryPage, readSnapshot, workPage } from './cloud-pages.ts'
 import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, resetWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
@@ -435,6 +436,24 @@ function parseModels(value: unknown): Record<string, string> {
 function json(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
+}
+
+/**
+ * 公开页面上显示的作者名。
+ *
+ * 只显示昵称或邮箱前缀 —— **不把完整邮箱挂到公开页面上**（那是泄露）。
+ */
+function authorName(userId: string): string {
+  const user = store.getUserById(userId)
+  if (user === undefined) return '（已注销）'
+  if (user.displayName !== '') return user.displayName
+  return user.email.split('@')[0] ?? '匿名'
+}
+
+/** 从 `Authorization: Bearer xxx` 里取令牌（桌面端走这种）。 */
+function bearer(req: IncomingMessage): string | undefined {
+  const header = req.headers.authorization ?? ''
+  return header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : undefined
 }
 
 /** 把用户可控的文本塞进 HTML 之前转义（这两页会回显服务端的错误信息）。 */
@@ -1086,7 +1105,8 @@ const server = createServer((req, res) => {
        * （见 docs/19）。所以这里明确回 404 并说清原因，
        * 而不是「能访问但永远是空的」：后者会让人以为是 bug。
        */
-      if (config.mode === 'cloud' && (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) && pathname !== '/api/health') {
+      if (config.mode === 'cloud' && (pathname.startsWith('/api/') || pathname.startsWith('/v1/'))
+        && pathname !== '/api/health' && !pathname.startsWith('/api/v1/')) {
         json(res, 404, { error: '这是服务器端（cloud 模式）：画布、素材与算力都在你自己的桌面端里，不在这台服务器上' })
         return
       }
@@ -1097,9 +1117,132 @@ const server = createServer((req, res) => {
         return
       }
 
-      if (config.mode === 'cloud' && method === 'GET' && (pathname === '/' || pathname === '/account')) {
+      if (config.mode === 'cloud' && method === 'GET' && pathname === '/account') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
         res.end(accountPage(config.mailWebhookUrl === ''))
+        return
+      }
+
+      /**
+       * 主页 = 作品广场（cloud 模式）。
+       *
+       * 只列 **approved**：提出者定死了「必须他在后台点过才上主页」。
+       * 未登录也能看（这是给人看的展示面），登录入口在页面上。
+       */
+      if (config.mode === 'cloud' && method === 'GET' && pathname === '/') {
+        const viewer = accounts.me(readUserToken(req, config.cookieSecret) ?? bearer(req) ?? '')
+        const works = store.listWorks({ status: 'approved' })
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(galleryPage(works.map((work) => ({
+          id: work.id,
+          title: work.title,
+          summary: work.summary,
+          tags: work.tags,
+          kind: work.kind,
+          author: authorName(work.userId),
+          coverUrl: `/w/${work.id}/asset`,
+          status: work.status,
+          createdAt: work.createdAt,
+        })), viewer?.email ?? '', viewer?.role === 'admin'))
+        return
+      }
+
+      // 管理后台（只有管理员看得到内容；数据本身还要过 /api/v1/admin/* 的角色校验）。
+      if (config.mode === 'cloud' && method === 'GET' && pathname === '/admin') {
+        const viewer = accounts.me(readUserToken(req, config.cookieSecret) ?? bearer(req) ?? '')
+        if (viewer?.role !== 'admin') {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(htmlPage('需要管理员', '<p class="bad">这个页面只有管理员能进。</p><p class="muted"><a href="/account">去账号页登录</a></p>'))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(adminPage())
+        return
+      }
+
+      // 作品页：approved 公开；pending/rejected/hidden 只有作者与管理员能预览。
+      const workPageMatch = /^\/w\/([^/]+)$/u.exec(pathname)
+      if (config.mode === 'cloud' && method === 'GET' && workPageMatch !== null) {
+        const work = store.getWork(decodeURIComponent(workPageMatch[1] as string))
+        const viewer = accounts.me(readUserToken(req, config.cookieSecret) ?? bearer(req) ?? '')
+        if (work === undefined) {
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(htmlPage('作品不存在', '<p class="muted">这个链接可能已经失效。</p>'))
+          return
+        }
+        const mineOrAdmin = viewer !== undefined && (viewer.id === work.userId || viewer.role === 'admin')
+        if (work.status !== 'approved' && !mineOrAdmin) {
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(htmlPage('作品不存在', '<p class="muted">这件作品还没通过审核，或者已经下架了。</p>'))
+          return
+        }
+        store.countWorkView(work.id)
+        const snapshot = readSnapshot(work.snapshotJson)
+        // 快照里的图片地址是发布时写的 `/blob/<素材 id>`：**在这里**才拼上作品 id，
+        // 因为发布时还不知道作品 id（见本地发布那一段）。
+        const scoped = snapshot === null ? null : {
+          nodes: snapshot.nodes.map((node) => ({
+            ...node,
+            url: node.url.startsWith('/blob/') ? `/w/${work.id}/blob/${node.url.slice('/blob/'.length)}` : node.url,
+          })),
+          edges: snapshot.edges,
+        }
+        const notice = work.status === 'approved' ? ''
+          : work.status === 'pending' ? '这件作品还在待审：只有你和管理员看得到。'
+            : work.status === 'rejected' ? `没有通过审核${work.reviewNote === '' ? '' : `：${work.reviewNote}`}`
+              : `已下架${work.reviewNote === '' ? '' : `：${work.reviewNote}`}`
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(workPage({
+          id: work.id,
+          title: work.title,
+          summary: work.summary,
+          tags: work.tags,
+          kind: work.kind,
+          author: authorName(work.userId),
+          coverUrl: `/w/${work.id}/asset`,
+          status: work.status,
+          createdAt: work.createdAt,
+        }, `/w/${work.id}/asset`, scoped, { notice, reportable: work.status === 'approved' }))
+        return
+      }
+
+      /**
+       * 作品的文件。
+       *
+       * **只认「这件作品用到的素材」**：主成品/封面，或者快照里出现过的那些。
+       * 没有「按 id 取任意素材」的公开接口 —— 否则别人就能顺着 id 翻你的库。
+       */
+      const workAssetMatch = /^\/w\/([^/]+)\/(asset|blob\/([^/]+))$/u.exec(pathname)
+      if (config.mode === 'cloud' && method === 'GET' && workAssetMatch !== null) {
+        const work = store.getWork(decodeURIComponent(workAssetMatch[1] as string))
+        const viewer = accounts.me(readUserToken(req, config.cookieSecret) ?? bearer(req) ?? '')
+        const allowed = work !== undefined && (work.status === 'approved' || (viewer !== undefined && (viewer.id === work.userId || viewer.role === 'admin')))
+        if (!allowed || work === undefined) {
+          json(res, 404, { error: '取不到' })
+          return
+        }
+        const assetId = workAssetMatch[2] === 'asset'
+          ? (work.coverAssetId !== '' ? work.coverAssetId : work.assetId)
+          : decodeURIComponent(workAssetMatch[3] as string)
+        // 快照里的素材必须真的出现在这件作品的快照里（防止拿作品 id 当万能钥匙）。
+        if (workAssetMatch[2] !== 'asset' && !work.snapshotJson.includes(assetId)) {
+          json(res, 404, { error: '取不到' })
+          return
+        }
+        const asset = store.getAsset(assetId)
+        const bytes = asset === undefined ? undefined : store.readAsset(assetId)
+        if (asset === undefined || bytes === undefined) {
+          json(res, 404, { error: '取不到' })
+          return
+        }
+        const isCover = workAssetMatch[2] === 'asset' && work.coverAssetId !== '' && assetId === work.coverAssetId
+        res.writeHead(200, {
+          'content-type': asset.mime,
+          'content-length': String(bytes.length),
+          // 封面会被反复取（列表页），让它可缓存；成品本身也跟着内容寻址。
+          'cache-control': isCover ? 'public, max-age=3600' : 'public, max-age=86400',
+        })
+        res.end(bytes)
         return
       }
 
@@ -1145,6 +1288,183 @@ const server = createServer((req, res) => {
               else { out.className = 'bad'; out.textContent = body.error || ('失败：HTTP ' + response.status); }
             });
           </script>`))
+        return
+      }
+
+      /**
+       * 作品（cloud 模式）：作者上传压缩成品与（可选的）只读画布快照，管理员审核后主页可见。
+       *
+       * 三条边界写在这里，免得以后被"顺手"改坏：
+       * ① **只有 approved 才公开**：主页、作品页、素材地址都按这个判；
+       *    pending/rejected/hidden 只有作者本人与管理员看得到。
+       * ② **素材只能通过作品取**（`/w/<id>/blob/<assetId>`）：
+       *    没有"公开素材库"这种接口，别人拿不到你库里别的东西。
+       * ③ 上传的是**压缩后的成品**：原片永远留在用户机器上（这是"只存本地"那条决定的另一半）。
+       */
+      if (config.mode === 'cloud' && pathname.startsWith('/api/v1/')) {
+        const rest = pathname.slice('/api/v1/'.length)
+        const me = (): ReturnType<typeof accounts.me> => accounts.me(readUserToken(req, config.cookieSecret) ?? bearer(req) ?? '')
+        const isAdmin = (): boolean => me()?.role === 'admin'
+
+        // 上传一件成品的字节（正文即文件，和本地那套一致）。
+        if (rest === 'works/assets' && method === 'POST') {
+          const user = me()
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          const mime = (req.headers['content-type'] ?? '').split(';')[0]?.trim() ?? ''
+          if (!/^(image|video)\//u.test(mime)) {
+            json(res, 400, { error: '只能发布图片或视频' })
+            return
+          }
+          try {
+            const bytes = await readBytes(req, 200 * 1024 * 1024)
+            if (bytes.length === 0) {
+              json(res, 400, { error: '文件是空的' })
+              return
+            }
+            const asset = store.saveAsset(bytes, mime, kindOfMime(mime))
+            json(res, 200, { asset: { id: asset.id, kind: asset.kind, mime: asset.mime, bytes: asset.bytes } })
+          } catch (error) {
+            json(res, 413, { error: error instanceof Error ? error.message : '上传失败' })
+          }
+          return
+        }
+
+        // 发布：落一件 pending 的作品。
+        if (rest === 'works' && method === 'POST') {
+          const user = me()
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          const body = parseJson(await readText(req))
+          const title = typeof body.title === 'string' ? body.title.trim() : ''
+          const assetId = typeof body.assetId === 'string' ? body.assetId : ''
+          const asset = store.getAsset(assetId)
+          if (title === '' || asset === undefined) {
+            json(res, 400, { error: '缺标题或缺成品文件' })
+            return
+          }
+          const snapshot = typeof body.snapshot === 'string' ? body.snapshot : ''
+          const work = store.createWork({
+            userId: user.id,
+            title,
+            summary: typeof body.summary === 'string' ? body.summary.trim() : '',
+            tags: typeof body.tags === 'string' ? body.tags.trim() : '',
+            kind: asset.kind === 'video' ? 'video' : 'image',
+            assetId,
+            ...(typeof body.coverAssetId === 'string' && store.getAsset(body.coverAssetId) !== undefined ? { coverAssetId: body.coverAssetId } : {}),
+            ...(snapshot === '' ? {} : { snapshotJson: snapshot }),
+          })
+          console.log(`[studio] 作品已提交待审：${work.title}（${user.email}）`)
+          json(res, 200, { work: { id: work.id, status: work.status } })
+          return
+        }
+
+        // 我的作品（所有状态）。
+        if (rest === 'works' && method === 'GET') {
+          const user = me()
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          json(res, 200, {
+            works: store.listWorks({ userId: user.id }).map((work) => ({
+              id: work.id, title: work.title, status: work.status, kind: work.kind,
+              reviewNote: work.reviewNote, createdAt: work.createdAt, views: work.views,
+            })),
+          })
+          return
+        }
+
+        const workDelete = /^works\/([^/]+)$/u.exec(rest)
+        if (workDelete !== null && method === 'DELETE') {
+          const user = me()
+          const work = store.getWork(decodeURIComponent(workDelete[1] as string))
+          if (user === undefined || work === undefined || (work.userId !== user.id && user.role !== 'admin')) {
+            json(res, 404, { error: '没有这件作品' })
+            return
+          }
+          store.deleteWork(work.id)
+          json(res, 200, { ok: true })
+          return
+        }
+
+        // 举报（不需要登录：举报越容易，问题越早被发现；但只记理由与作品）。
+        const workReport = /^works\/([^/]+)\/report$/u.exec(rest)
+        if (workReport !== null && method === 'POST') {
+          const work = store.getWork(decodeURIComponent(workReport[1] as string))
+          if (work === undefined) {
+            json(res, 404, { error: '没有这件作品' })
+            return
+          }
+          const body = parseJson(await readText(req))
+          const reason = typeof body.reason === 'string' ? body.reason.trim().slice(0, 500) : ''
+          if (reason === '') {
+            json(res, 400, { error: '写一句理由' })
+            return
+          }
+          store.addReport({ workId: work.id, reason, reporter: me()?.email ?? '' })
+          console.log(`[studio] 收到举报：${work.title}`)
+          json(res, 200, { ok: true, note: '已经记录，管理员会看' })
+          return
+        }
+
+        // 管理后台：待审队列与审核动作。
+        if (rest.startsWith('admin/')) {
+          if (!isAdmin()) {
+            json(res, 403, { error: '需要管理员' })
+            return
+          }
+          if (rest === 'admin/works' && method === 'GET') {
+            const status = url.searchParams.get('status')
+            const works = store.listWorks({ ...(status === null || status === '' ? {} : { status }) })
+            json(res, 200, {
+              works: works.map((work) => ({
+                id: work.id, title: work.title, status: work.status, kind: work.kind,
+                author: store.getUserById(work.userId)?.email ?? '（未知作者）',
+                createdAt: work.createdAt, reviewNote: work.reviewNote,
+                hasSnapshot: work.snapshotJson !== '',
+              })),
+            })
+            return
+          }
+          const reviewMatch = /^admin\/works\/([^/]+)\/review$/u.exec(rest)
+          if (reviewMatch !== null && method === 'POST') {
+            const body = parseJson(await readText(req))
+            const status = typeof body.status === 'string' ? body.status : ''
+            if (!['pending', 'approved', 'rejected', 'hidden'].includes(status)) {
+              json(res, 400, { error: '状态只能是 pending / approved / rejected / hidden' })
+              return
+            }
+            const note = typeof body.note === 'string' ? body.note.trim() : ''
+            const ok = store.reviewWork(decodeURIComponent(reviewMatch[1] as string), status as 'pending' | 'approved' | 'rejected' | 'hidden', note)
+            console.log(`[studio] 作品审核：${status}${note === '' ? '' : `（${note}）`}`)
+            json(res, ok ? 200 : 404, ok ? { ok: true } : { error: '没有这件作品' })
+            return
+          }
+          if (rest === 'admin/reports' && method === 'GET') {
+            json(res, 200, { reports: store.listReports() })
+            return
+          }
+          const handleMatch = /^admin\/reports\/([^/]+)\/handle$/u.exec(rest)
+          if (handleMatch !== null && method === 'POST') {
+            const ok = store.handleReport(decodeURIComponent(handleMatch[1] as string))
+            json(res, ok ? 200 : 404, ok ? { ok: true } : { error: '没有这条举报' })
+            return
+          }
+        }
+
+        /**
+         * `/api/v1/*` 上没匹配到的，**一律 404**。
+         *
+         * 不加这一条的话，未知的 `/api/v1/...` 会掉到最后那个「静态文件 + SPA 兜底」里，
+         * 于是**一个不存在的接口返回 200 和一段 HTML** —— 调用方（桌面端）会把 HTML 当数据，
+         * 而「这个接口存不存在」这件事就再也测不出来了。这一条是被 works-test 抓出来的。
+         */
+        json(res, 404, { error: `未知接口 ${method} ${pathname}` })
         return
       }
 
@@ -1953,6 +2273,29 @@ const server = createServer((req, res) => {
         })
         return
       }
+      // 我在服务器上的作品（含待审与已拒绝）——本地服务代问一次，界面不用直接连服务器。
+      if (pathname === '/api/cloud/works' && method === 'GET') {
+        const token = settings.STUDIO_CLOUD_TOKEN ?? ''
+        if (token === '' || config.cloudUrl === '') {
+          json(res, 400, { error: '还没绑定账号' })
+          return
+        }
+        try {
+          const response = await fetch(`${config.cloudUrl.replace(/\/+$/u, '')}/api/v1/works`, {
+            headers: { authorization: `Bearer ${token}` },
+          })
+          const body = await response.json() as { works?: unknown; error?: string }
+          if (!response.ok) {
+            json(res, response.status, { error: body.error ?? '服务器拒绝了这次请求' })
+            return
+          }
+          json(res, 200, { works: body.works ?? [] })
+        } catch (error) {
+          json(res, 502, { error: `连不上服务器：${error instanceof Error ? error.message : String(error)}` })
+        }
+        return
+      }
+
       if (pathname === '/api/cloud/login' && method === 'POST') {
         if (config.cloudUrl === '') {
           json(res, 400, { error: '还没填云服务地址：先去设置页的「账号」一节填上服务器地址' })
@@ -2014,6 +2357,151 @@ const server = createServer((req, res) => {
         store.setSetting('STUDIO_CLOUD_REFRESH', '')
         applySettings()
         json(res, 200, { ok: true })
+        return
+      }
+
+      /**
+       * 发布作品到服务器（本地模式）。
+       *
+       * 这一步把「只存本地」与「主页展示」接起来，规矩是：
+       * **只上传压缩后的成品与压缩后的快照素材**，原始文件一个字节都不出去。
+       *
+       * 具体做法：
+       * 1. 成品：PNG 会**解码 → 缩到长边 1600 → 重新编码**（服务端零依赖的 PNG 编解码器）；
+       *    JPEG/视频没法在零依赖下重编码，所以**原样上传**，并如实把「没压缩」写进结果里。
+       * 2. 快照：把画布引用到的素材逐个压缩上传，并把快照里的 url 换成服务器上的地址
+       *    （`/blob/<素材 id>`，作品页渲染时才拼上作品 id）。
+       * 3. 落一件 pending 的作品 —— **必须管理员在后台点过才会上主页**。
+       */
+      if (pathname === '/api/cloud/publish' && method === 'POST') {
+        const token = settings.STUDIO_CLOUD_TOKEN ?? ''
+        if (token === '' || config.cloudUrl === '') {
+          json(res, 400, { error: '还没绑定账号：先去设置页的「账号」一节绑定' })
+          return
+        }
+        const body = parseJson(await readText(req))
+        const canvasId = typeof body.canvasId === 'string' ? body.canvasId : ''
+        const title = typeof body.title === 'string' ? body.title.trim() : ''
+        const sourceAssetId = typeof body.assetId === 'string' ? body.assetId : ''
+        const withCanvas = body.withCanvas !== false
+        const source = store.getAsset(sourceAssetId)
+        if (title === '' || source === undefined) {
+          json(res, 400, { error: '缺标题或缺成品（先选一张图或一段视频）' })
+          return
+        }
+        const cloud = config.cloudUrl.replace(/\/+$/u, '')
+        const notes: string[] = []
+
+        /** 上传一个字节串，返回服务器上的素材 id。 */
+        const upload = async (bytes: Buffer, mime: string): Promise<string | undefined> => {
+          try {
+            const response = await fetch(`${cloud}/api/v1/works/assets`, {
+              method: 'POST',
+              headers: { 'content-type': mime, authorization: `Bearer ${token}` },
+              body: new Uint8Array(bytes),
+            })
+            if (!response.ok) {
+              notes.push(`上传失败：HTTP ${String(response.status)}`)
+              return undefined
+            }
+            const payload = await response.json() as { asset?: { id?: string } }
+            return payload.asset?.id
+          } catch (error) {
+            notes.push(`上传失败：${error instanceof Error ? error.message : String(error)}`)
+            return undefined
+          }
+        }
+
+        /** 能压缩就压缩（只认 PNG），返回上传用的字节与类型。 */
+        const prepared = (assetId: string): { bytes: Buffer; mime: string; compressed: boolean } | undefined => {
+          const asset = store.getAsset(assetId)
+          const bytes = store.readAsset(assetId)
+          if (asset === undefined || bytes === undefined) return undefined
+          if (asset.mime === 'image/png') {
+            const raster = decodePng(bytes)
+            if (raster !== undefined) {
+              // 长边 1600：够看细节，又比原图小得多（原图常常 1024~2048 且体积更大）。
+              const smaller = downscale(raster, 1600)
+              return { bytes: encodePng(smaller), mime: 'image/png', compressed: smaller !== raster || bytes.length > 200_000 }
+            }
+          }
+          return { bytes, mime: asset.mime, compressed: false }
+        }
+
+        const main = prepared(sourceAssetId)
+        if (main === undefined) {
+          json(res, 400, { error: '这个成品读不到了' })
+          return
+        }
+        const mainId = await upload(main.bytes, main.mime)
+        if (mainId === undefined) {
+          json(res, 400, { error: notes[notes.length - 1] ?? '上传失败' })
+          return
+        }
+        if (!main.compressed) notes.push('这件成品没有压缩（JPEG/视频在零依赖下重编码不了）')
+
+        // 快照：节点结构 + 提示词 + 参数照搬，图片换成服务器上的压缩版。
+        let snapshot = ''
+        if (withCanvas && canvasId !== '') {
+          const doc = readDocument(store, canvasId)
+          const mapping = new Map<string, string>()
+          for (const node of doc.nodes) {
+            const nodeUrl = (node.data as { url?: unknown } | undefined)?.url
+            if (typeof nodeUrl !== 'string') continue
+            const match = /\/api\/assets\/([^/]+)/u.exec(nodeUrl)
+            const assetId = match?.[1]
+            if (assetId === undefined || mapping.has(assetId)) continue
+            const shot = prepared(assetId)
+            if (shot === undefined) continue
+            const uploaded = await upload(shot.bytes, shot.mime)
+            if (uploaded !== undefined) mapping.set(assetId, uploaded)
+          }
+          const rewritten = JSON.parse(JSON.stringify(doc)) as {
+            nodes?: { data?: Record<string, unknown> }[]
+          }
+          for (const node of rewritten.nodes ?? []) {
+            const data = node.data
+            if (data === undefined) continue
+            const nodeUrl = data.url
+            if (typeof nodeUrl !== 'string') continue
+            const assetId = /\/api\/assets\/([^/]+)/u.exec(nodeUrl)?.[1]
+            const mapped = assetId === undefined ? undefined : mapping.get(assetId)
+            // 没上传成功的（比如没绑定、或者是个读不到的素材）就把 url 去掉：
+            // 快照里留一个本机地址，别人打开就是裂图。
+            data.url = mapped === undefined ? '' : `/blob/${mapped}`
+          }
+          snapshot = JSON.stringify(rewritten)
+          notes.push(`快照带了 ${String(mapping.size)} 张压缩图`)
+        }
+
+        try {
+          const response = await fetch(`${cloud}/api/v1/works`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              title,
+              ...(typeof body.summary === 'string' ? { summary: body.summary } : {}),
+              ...(typeof body.tags === 'string' ? { tags: body.tags } : {}),
+              assetId: mainId,
+              ...(snapshot === '' ? {} : { snapshot }),
+            }),
+          })
+          const payload = await response.json() as { work?: { id?: string; status?: string }; error?: string }
+          if (!response.ok) {
+            json(res, response.status === 401 ? 401 : 400, { error: payload.error ?? `提交失败：HTTP ${String(response.status)}` })
+            return
+          }
+          console.log(`[studio] 已提交作品待审：${title}（${String(payload.work?.id ?? '')}）`)
+          json(res, 200, {
+            ok: true,
+            workId: payload.work?.id ?? '',
+            status: payload.work?.status ?? 'pending',
+            notes,
+            note: '已经提交，等管理员在后台点「通过」之后就会出现在主页',
+          })
+        } catch (error) {
+          json(res, 502, { error: `连不上服务器：${error instanceof Error ? error.message : String(error)}` })
+        }
         return
       }
 

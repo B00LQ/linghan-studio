@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
-  deleteAsset, downloadAssets, listAssetFolders, listAssets, listCanvases, placeAssets,
+  deleteAsset, downloadAssets, listAssetFolders, listAssets, listCanvases, placeAssets, publishWork,
   type AssetFolderInfo, type CanvasInfo,
 } from '../api.ts'
 import { AssetBrowser, type BrowserAsset } from '../components/AssetBrowser.tsx'
@@ -48,6 +48,39 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
     void reload().catch(() => { setAssets([]) })
   }, [reload, refreshToken])
 
+  /** 要发布的那一件（打开对话框用的状态）。 */
+  const [publish, setPublish] = useState<{ assetId: string; title: string; tags: string; summary: string; canvasId: string; withCanvas: boolean } | null>(null)
+  const [publishBusy, setPublishBusy] = useState(false)
+
+  /**
+   * 发布到主页。
+   *
+   * 服务端做三件事：**压缩**（PNG 缩到长边 1600 重编码；JPEG/视频原样）、
+   * 上传成品与（可选的）画布快照素材、落一件**待审**作品。
+   * 所以这里要如实告诉用户「提交了、等审核」，而不是「已经发布了」。
+   */
+  const submitPublish = useCallback(async (): Promise<void> => {
+    if (publish === null) return
+    setPublishBusy(true)
+    setNotice('正在压缩并上传（大文件要一会儿）…')
+    try {
+      const result = await publishWork({
+        assetId: publish.assetId,
+        title: publish.title.trim() === '' ? '未命名作品' : publish.title.trim(),
+        ...(publish.summary.trim() === '' ? {} : { summary: publish.summary.trim() }),
+        ...(publish.tags.trim() === '' ? {} : { tags: publish.tags.trim() }),
+        ...(publish.canvasId === '' ? {} : { canvasId: publish.canvasId }),
+        withCanvas: publish.withCanvas && publish.canvasId !== '',
+      })
+      setPublish(null)
+      setNotice(`${result.note}${result.notes.length === 0 ? '' : `（${result.notes.join('；')}）`}`)
+    } catch (problem) {
+      setNotice(problem instanceof Error ? problem.message : '发布失败')
+    } finally {
+      setPublishBusy(false)
+    }
+  }, [publish])
+
   /** Delete what can be deleted, and say plainly what could not. */
   const remove = useCallback(async (ids: string[]): Promise<void> => {
     let removed = 0
@@ -79,7 +112,22 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
         onDownload={(ids) => { void downloadAssets(ids).catch((problem: unknown) => { setNotice(problem instanceof Error ? problem.message : '打包失败') }) }}
         onDelete={(ids) => { void remove(ids) }}
         onPlaceMany={(ids) => { setPending(ids); setNotice('') }}
-        actions={pending.length === 0 ? undefined : (          <Menu className="place-picker" title="选择要放到的画布" label={<>放到哪张画布？<span className="caret">▾</span></>}>
+        onPublish={(ids) => {
+          const first = assets.find((asset) => asset.id === ids[0])
+          if (first === undefined) return
+          setPublish({
+            assetId: first.id,
+            // 默认标题给一个能改的起点，省得人对着空框发呆。
+            title: (first.kind === 'video' ? '一段视频' : '一张作品'),
+            tags: '', summary: '',
+            // 默认带上第一张画布：多数人发布的就是刚做的那张画布。
+            canvasId: projects[0]?.id ?? '',
+            withCanvas: true,
+          })
+          setNotice('')
+        }}
+        actions={pending.length === 0 ? undefined : (
+          <Menu className="place-picker" title="选择要放到的画布" label={<>放到哪张画布？<span className="caret">▾</span></>}>
             {(close) => (
               <>
                 <div className="menu-title">已选 {pending.length} 个素材</div>
@@ -105,6 +153,64 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
           </Menu>
         )}
       />
+
+      {/* 发布到主页：成品 + 可选附带画布。**提交后是待审**（管理员点过才上主页），
+          所以文案说的是「提交」，不说「已发布」。 */}
+      {publish === null ? null : (
+        <>
+          <div className="studio-menu-scrim" onClick={() => { if (!publishBusy) setPublish(null) }} />
+          <div className="publish-panel" role="dialog" aria-label="发布到主页" data-testid="publish-panel">
+            <header>
+              <strong>发布到主页</strong>
+              <button type="button" className="link" disabled={publishBusy} onClick={() => { setPublish(null) }}>取消</button>
+            </header>
+            <label className="field">
+              <span>标题</span>
+              <input
+                value={publish.title} data-testid="publish-title"
+                onChange={(event) => { setPublish({ ...publish, title: event.target.value }) }}
+              />
+            </label>
+            <label className="field">
+              <span>标签<em className="muted">逗号分隔，例如：赛博,夜景</em></span>
+              <input
+                value={publish.tags} data-testid="publish-tags"
+                onChange={(event) => { setPublish({ ...publish, tags: event.target.value }) }}
+              />
+            </label>
+            <label className="field">
+              <span>一句话简介<em className="muted">可留空</em></span>
+              <input
+                value={publish.summary}
+                onChange={(event) => { setPublish({ ...publish, summary: event.target.value }) }}
+              />
+            </label>
+            <label className="field">
+              <span>附带画布<em className="muted">别人能点「查看画布」看到提示词与结构（推荐）</em></span>
+              <select
+                value={publish.withCanvas ? publish.canvasId : ''}
+                data-testid="publish-canvas"
+                onChange={(event) => {
+                  const value = event.target.value
+                  setPublish({ ...publish, canvasId: value, withCanvas: value !== '' })
+                }}
+              >
+                <option value="">不带画布</option>
+                {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+            </label>
+            <p className="muted">
+              只上传压缩后的成品与快照图片，原始素材留在你机器上。
+              提交后需要管理员在后台点「通过」才会出现在主页。
+            </p>
+            <footer>
+              <button type="button" className="primary" data-testid="publish-submit" disabled={publishBusy} onClick={() => { void submitPublish() }}>
+                {publishBusy ? '正在上传…' : '提交待审'}
+              </button>
+            </footer>
+          </div>
+        </>
+      )}
     </div>
   )
 }

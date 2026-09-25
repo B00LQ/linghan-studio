@@ -716,6 +716,33 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .preview-stage { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 12px; }
 .preview-stage img, .preview-stage video { max-width: 100%; max-height: calc(92vh - 96px); object-fit: contain; display: block; }
 .preview-stage audio { width: min(560px, 80%); }
+
+/* 发布到主页：一个居中表单。
+   它是**提交待审**不是「已发布」，所以按钮写「提交待审」，文案也照实说。 */
+.publish-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 61;
+  width: min(92vw, 460px);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+.publish-panel header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.publish-panel .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.publish-panel .field > span { display: flex; gap: 8px; align-items: baseline; }
+.publish-panel .field em { font-style: normal; font-size: 11px; }
+.publish-panel .field input, .publish-panel .field select { padding: 7px 9px; font-size: 13px; }
+.publish-panel footer { display: flex; justify-content: flex-end; gap: 8px; }
+.publish-panel .muted { font-size: 12px; line-height: 1.6; margin: 0; }
+
 .preview-step {
   position: absolute;
   top: 50%;

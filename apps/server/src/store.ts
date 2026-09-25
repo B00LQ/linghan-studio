@@ -203,6 +203,63 @@ export interface StudioSession {
   lastSeenAt: string
 }
 
+/**
+ * 一件作品：用户在桌面端发布的成品（**压缩后**）+ 可选的只读画布快照。
+ *
+ * 状态机：pending（待审，只有作者与管理员看得到）→ approved（主页可见）| rejected（作者能看到理由）
+ * → hidden（下架，记录留痕）。**主页只展示 approved** —— 这是提出者定死的：必须他在后台点过。
+ */
+export interface StudioWork {
+  /** Stable work id. */
+  id: string
+  /** 作者。 */
+  userId: string
+  /** 标题。 */
+  title: string
+  /** 一句话简介。 */
+  summary: string
+  /** 标签（逗号分隔，先不做标签表）。 */
+  tags: string
+  /** image 或 ideo。 */
+  kind: string
+  /** 成品素材（压缩后）。 */
+  assetId: string
+  /** 封面；空 = 用成品本身。 */
+  coverAssetId: string
+  /** 只读画布快照（JSON 文本）；空 = 这件作品不带画布。 */
+  snapshotJson: string
+  /** 审核状态。 */
+  status: 'pending' | 'approved' | 'rejected' | 'hidden'
+  /** 拒绝理由/下架原因（给作者看）。 */
+  reviewNote: string
+  /** AI 生成标识（合规要求）。 */
+  aiLabel: boolean
+  /** 看过多少次。 */
+  views: number
+  /** Creation timestamp. */
+  createdAt: string
+  /** Last update timestamp. */
+  updatedAt: string
+}
+
+/** 一条举报。 */
+export interface StudioReport {
+  /** Stable report id. */
+  id: string
+  /** 被举报的作品。 */
+  workId: string
+  /** 举报理由（用户填的原文）。 */
+  reason: string
+  /** 举报人（登录邮箱；匿名举报留空）。 */
+  reporter: string
+  /** open 或 handled。 */
+  status: string
+  /** Creation timestamp. */
+  createdAt: string
+  /** 处理时间；空 = 还没处理。 */
+  handledAt: string
+}
+
 /** How long generation has actually been taking, for the ETA display. */
 export interface GenerationStats {
   /** Duration samples behind the numbers. */
@@ -426,6 +483,33 @@ export interface StudioStore {
   revokeUserSessions: (userId: string, at: string) => void
   /** 列出某人的会话（管理自己的设备）。 */
   listSessions: (userId: string) => StudioSession[]
+
+  // ── 作品（cloud 模式）────────────────────────────────────────────────────
+  /** 建一件作品（默认 pending：**必须管理员点过才上主页**）。 */
+  createWork: (input: {
+    userId: string; title: string; summary?: string; tags?: string; kind: string
+    assetId: string; coverAssetId?: string; snapshotJson?: string
+  }) => StudioWork
+  /** 读一件。 */
+  getWork: (id: string) => StudioWork | undefined
+  /** 列表：按状态、按作者，新的在前。 */
+  listWorks: (options?: { status?: string; userId?: string; limit?: number }) => StudioWork[]
+  /**
+   * 改审核状态。
+   * @returns 有没有这件作品。
+   */
+  reviewWork: (id: string, status: 'pending' | 'approved' | 'rejected' | 'hidden', note?: string) => boolean
+  /** 记一次浏览。 */
+  countWorkView: (id: string) => void
+  /** 作者（或管理员）删掉一件作品。 */
+  deleteWork: (id: string) => boolean
+
+  /** 举报一件作品。 */
+  addReport: (input: { workId: string; reason: string; reporter?: string }) => StudioReport
+  /** 举报列表（管理后台用），没处理的在前。 */
+  listReports: (options?: { open?: boolean; limit?: number }) => StudioReport[]
+  /** 标记举报已处理。 */
+  handleReport: (id: string) => boolean
 }
 
 const SCHEMA = `
@@ -497,6 +581,38 @@ CREATE TABLE IF NOT EXISTS asset_folder (
   created_at TEXT NOT NULL
 );
 -- 账号（只在 cloud 模式用得上；local 模式一个访问密码就够，表空着）。
+-- 作品（服务器端展示用）。**只存压缩后的成品与只读画布快照** ——
+-- 原始素材永远留在用户机器上（见 docs/19 的定稿方案）。
+CREATE TABLE IF NOT EXISTS work (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL,
+  asset_id TEXT NOT NULL,
+  cover_asset_id TEXT NOT NULL DEFAULT '',
+  snapshot_json TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  review_note TEXT NOT NULL DEFAULT '',
+  ai_label INTEGER NOT NULL DEFAULT 1,
+  views INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS work_by_status ON work(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS work_by_user ON work(user_id, created_at DESC);
+-- 举报（M4）：谁在什么时候举报了哪件作品、为什么、处理结果。
+CREATE TABLE IF NOT EXISTS report (
+  id TEXT PRIMARY KEY,
+  work_id TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT '',
+  reporter TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL,
+  handled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS report_by_status ON report(status, created_at DESC);
 CREATE TABLE IF NOT EXISTS user (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
@@ -700,6 +816,31 @@ export function openStore(dataDir: string): StudioStore {
   const USER_COLUMNS = 'id, email, display_name, role, status, email_verified_at, created_at, last_login_at'
   /** The columns a session row is read from. */
   const SESSION_COLUMNS = 'id, user_id, label, access_expires_at, refresh_expires_at, revoked_at, created_at, last_seen_at'
+
+  /** 一行 work → 领域对象。 */
+  const readWork = (row: Row): StudioWork => {
+    const status = text(row, 'status')
+    return {
+      id: text(row, 'id'),
+      userId: text(row, 'user_id'),
+      title: text(row, 'title'),
+      summary: text(row, 'summary'),
+      tags: text(row, 'tags'),
+      kind: text(row, 'kind'),
+      assetId: text(row, 'asset_id'),
+      coverAssetId: text(row, 'cover_asset_id'),
+      snapshotJson: text(row, 'snapshot_json'),
+      status: status === 'approved' || status === 'rejected' || status === 'hidden' ? status : 'pending',
+      reviewNote: text(row, 'review_note'),
+      aiLabel: integer(row, 'ai_label') !== 0,
+      views: integer(row, 'views'),
+      createdAt: text(row, 'created_at'),
+      updatedAt: text(row, 'updated_at'),
+    }
+  }
+
+  /** The columns a work row is read from. */
+  const WORK_COLUMNS = 'id, user_id, title, summary, tags, kind, asset_id, cover_asset_id, snapshot_json, status, review_note, ai_label, views, created_at, updated_at'
 
   /** The columns a canvas row is read from, in one place. */
   const CANVAS_COLUMNS = 'id, name, folder_id, cover_asset_id, deleted_at, created_at, updated_at'
@@ -1328,6 +1469,74 @@ export function openStore(dataDir: string): StudioStore {
     },
     listSessions(userId) {
       return (db.prepare(`SELECT ${SESSION_COLUMNS} FROM session WHERE user_id = ? ORDER BY created_at DESC`).all(userId) as Row[]).map(readSession)
+    },
+
+    // ── 作品（cloud 模式）──────────────────────────────────────────────────
+    createWork(input) {
+      const id = randomUUID()
+      const stamp = now()
+      db.prepare(`INSERT INTO work (id, user_id, title, summary, tags, kind, asset_id, cover_asset_id, snapshot_json, status, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+        .run(id, input.userId, input.title, input.summary ?? '', input.tags ?? '', input.kind,
+          input.assetId, input.coverAssetId ?? '', input.snapshotJson ?? '', stamp, stamp)
+      const created = this.getWork(id)
+      if (created === undefined) throw new Error('作品写入失败')
+      return created
+    },
+    getWork(id) {
+      const row = db.prepare(`SELECT ${WORK_COLUMNS} FROM work WHERE id = ?`).get(id) as Row | undefined
+      return row === undefined ? undefined : readWork(row)
+    },
+    listWorks(options = {}) {
+      const where: string[] = []
+      const params: (string | number)[] = []
+      if (options.status !== undefined && options.status !== '') {
+        where.push('status = ?')
+        params.push(options.status)
+      }
+      if (options.userId !== undefined && options.userId !== '') {
+        where.push('user_id = ?')
+        params.push(options.userId)
+      }
+      const clause = where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`
+      params.push(options.limit ?? 200)
+      return (db.prepare(`SELECT ${WORK_COLUMNS} FROM work ${clause} ORDER BY created_at DESC LIMIT ?`).all(...params) as Row[]).map(readWork)
+    },
+    reviewWork(id, status, note) {
+      const result = db.prepare('UPDATE work SET status = ?, review_note = ?, updated_at = ? WHERE id = ?')
+        .run(status, note ?? '', now(), id)
+      return Number(result.changes) > 0
+    },
+    countWorkView(id) {
+      db.prepare('UPDATE work SET views = views + 1 WHERE id = ?').run(id)
+    },
+    deleteWork(id) {
+      const result = db.prepare('DELETE FROM work WHERE id = ?').run(id)
+      return Number(result.changes) > 0
+    },
+    addReport(input) {
+      const id = randomUUID()
+      const stamp = now()
+      db.prepare('INSERT INTO report (id, work_id, reason, reporter, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, input.workId, input.reason, input.reporter ?? '', 'open', stamp)
+      return { id, workId: input.workId, reason: input.reason, reporter: input.reporter ?? '', status: 'open', createdAt: stamp, handledAt: '' }
+    },
+    listReports(options = {}) {
+      const clause = options.open === true ? "WHERE status = 'open'" : ''
+      return (db.prepare(`SELECT id, work_id, reason, reporter, status, created_at, handled_at FROM report ${clause} ORDER BY created_at DESC LIMIT ?`)
+        .all(options.limit ?? 200) as Row[]).map((row) => ({
+        id: text(row, 'id'),
+        workId: text(row, 'work_id'),
+        reason: text(row, 'reason'),
+        reporter: text(row, 'reporter'),
+        status: text(row, 'status'),
+        createdAt: text(row, 'created_at'),
+        handledAt: text(row, 'handled_at'),
+      }))
+    },
+    handleReport(id) {
+      const result = db.prepare("UPDATE report SET status = 'handled', handled_at = ? WHERE id = ?").run(now(), id)
+      return Number(result.changes) > 0
     },
   }
 }
