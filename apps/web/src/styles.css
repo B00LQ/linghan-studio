@@ -1198,6 +1198,20 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   font-size: 9px;
   line-height: 1.5;
 }
+/* 「8步」：版本之间的实在差别之一就是几步出的（快多少、细节差多少都从这儿来）。
+   放在左下角，右下角留给「✓ 选用」。 */
+.prompt-window .history-cell .cell-steps {
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #cfe0ff;
+  font-size: 9px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
 .prompt-window .history-cell .cell-failed {
   display: grid;
   place-items: center;

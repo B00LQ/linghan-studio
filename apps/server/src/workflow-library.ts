@@ -361,6 +361,15 @@ export interface WorkflowSummary {
    * 等于「连了却没用」），以及生成前拦一道、给人话而不是让它跑出一张无关的图。
    */
   requires: string[]
+  /**
+   * 采样步数（如果这套工作流在 defaults 里写了 `steps`）。
+   *
+   * 界面需要它，因为**同一套模型的不同配方在标题上看不出来**：默认那条标题里
+   * 没有步数，4 步那条有。而「这一版是几步出的」恰恰是版本之间最实在的差别之一
+   * （快多少、细节差多少都从这儿来）。取 defaults 而不是去图里数节点：
+   * defaults 就是跑的时候真正用的那个值。
+   */
+  steps?: number
 }
 
 /** Where uploaded workflows live. */
@@ -442,6 +451,10 @@ export function summarize(workflow: StudioWorkflow): WorkflowSummary {
     ready: promptReady,
     needsPrompt,
     requires: workflow.requires ?? [],
+    // `steps` 在内置 JSON 里既有数字也有字符串（PDD 那条写的是 "4"），两种都认。
+    ...(Number.isFinite(Number(workflow.defaults?.steps)) && workflow.defaults?.steps !== undefined
+      ? { steps: Number(workflow.defaults.steps) }
+      : {}),
   }
 }
 

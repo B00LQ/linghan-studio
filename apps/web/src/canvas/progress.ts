@@ -63,6 +63,8 @@ function duration(ms: number): string {
   return rest === 0 ? `${String(minutes)} 分` : `${String(minutes)} 分 ${String(rest)} 秒`
 }
 
+export { duration as formatDuration }
+
 /**
  * Describe what is happening with one node's generation.
  * @param input - see {@link ProgressInput}.

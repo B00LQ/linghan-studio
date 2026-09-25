@@ -43,7 +43,7 @@ import { NodeTools } from './NodeTools.tsx'
 import { transformImage, type EditOps } from './imageEdit.ts'
 import type { BrowserAsset } from '../components/AssetBrowser.tsx'
 import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, producesAudio, producesVideo, specOf, type CanvasNodeKind, type CanvasNodeSpec, type PortKind } from './ports.ts'
-import { describeProgress, type NodeProgress } from './progress.ts'
+import { describeProgress, formatDuration, type NodeProgress } from './progress.ts'
 
 /** Data carried by every Studio node. */
 export interface StudioNodeData extends Record<string, unknown> {
@@ -130,6 +130,23 @@ const CanvasContext = createContext<{
    */
   runnable: WorkflowInfo[]
   /**
+   * 下拉里那一行工作流怎么写。
+   *
+   * 光有标题看不出**速度差别**：默认那条是 8 步、加速那条是 4 步，而「快多少」这件事
+   * 只有本机自己跑过才知道 —— 所以有样本就把它接上去（「本机约 8 分」），没有就只说步数。
+   * 数字来自 take 的统计，不写死：写死的数字换台机器就是假话。
+   */
+  workflowLabel: (workflow: WorkflowInfo, kind: string) => string
+  /** 标题之外的取舍说明（悬停看）：步数、要不要额外装东西、本机实测。 */
+  workflowHint: (workflow: WorkflowInfo, kind: string) => string
+  /**
+   * 版本格上那句说明：这一版是哪套工作流、几步、多久出的。
+   *
+   * 债务清单第 19 条：版本能记录、能比较、能选用，却看不出「这一版是几步出的」——
+   * 而数据一直在 take 的 `params.workflow` 里，缺的只是把它说出来。
+   */
+  takeDetail: (take: TakeInfo) => string
+  /**
    * Which workflow this node will actually run.
    *
    * Shared with the dropdown so what is shown and what is submitted cannot drift
@@ -157,6 +174,9 @@ const CanvasContext = createContext<{
   blockedOf: () => undefined,
   nodeBackend: () => ({ model: '', note: '' }),
   runnable: [],
+  workflowLabel: (workflow) => workflow.title,
+  workflowHint: () => '',
+  takeDetail: () => '',
   workflowFor: () => '',
   sizeFor: () => '1024x1024',
 })
@@ -177,6 +197,20 @@ function ordinal(takes: TakeInfo[], takeId: string): number {
 /** Put the takes in the order they were produced. */
 function oldestFirst(takes: TakeInfo[]): TakeInfo[] {
   return [...takes].reverse()
+}
+
+/**
+ * 一个节点产出什么**资产**（不是它是什么节点）。
+ *
+ * 裁切/拼接是视频节点但产出 video、音频节点产出 audio —— 预估时间与「本机跑过多快」
+ * 的统计都是按资产类型分桶的，所以这个映射只有一个地方写，免得两处口径不一。
+ * @param kind - node kind.
+ * @returns the asset kind, or empty when the node produces nothing.
+ */
+function assetKindOf(kind: string): string {
+  if (producesVideo(kind)) return 'video'
+  if (producesAudio(kind)) return 'audio'
+  return kind === 'image' ? 'image' : ''
 }
 
 /**
@@ -235,8 +269,18 @@ function PromptInput({ value, placeholder, onInput, onBegin }: {
 
 /** One canvas node's rendering. */
 function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
-  const { takes, activeNodeId, showTake, rerunTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor, blockedOf, nodeBackend } = useContext(CanvasContext)
+  const { takes, activeNodeId, showTake, rerunTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, workflowLabel, workflowHint, takeDetail, sizeFor, blockedOf, nodeBackend } = useContext(CanvasContext)
   const spec = specOf(data.kind)
+  /**
+   * 这一版是几步出的。
+   *
+   * 只认 take 里记下的工作流（`params.workflow`）：旧版本没记工作流，就**不说** ——
+   * 拿节点现在选的那套去猜一个旧版本，是把猜测当记录。
+   */
+  const stepsOf = (take: TakeInfo): number | undefined => {
+    const id = typeof take.params?.workflow === 'string' ? take.params.workflow : ''
+    return runnable.find((item) => item.id === id)?.steps
+  }
   const history = typeof data.shotId === 'string' && data.shotId !== '' ? (takes[data.shotId] ?? []) : []
   // 卡片上现在**显示**的是哪一版。版本条按「最早的在前」排，所以索引也从那边数。
   // 「复现这一版」要作用在显示中的那一版上——那才是人正看着的东西。
@@ -326,7 +370,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                     // 失败的格子点一下就是**重试它**：`showTakeIn` 对没有素材的版本会
                     // 直接返回（没什么可显示的），所以那个点击原本什么都不做，正好拿来用。
                     ? `${take.error ?? '生成失败'}｜点一下用同样的参数重试`
-                    : `第 ${String(index + 1)} 版 · ${String(Math.round((take.latencyMs ?? 0) / 1000))}s｜点一下显示这一版`}
+                    : `第 ${String(index + 1)} 版 · ${takeDetail(take)}｜点一下显示这一版`}
                   onClick={() => {
                     if (take.status === 'failed') void rerunTake(id, take)
                     else showTake(id, take.id)
@@ -339,6 +383,9 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                       : <SmallImage assetId={take.assetId} size={160} alt={`第 ${String(index + 1)} 版`} />)
                     : <span className="cell-failed">失败</span>}
                   <span className="cell-no">{index + 1}</span>
+                  {/* 步数直接印在格子上：**快多少、细节差多少**都是从这儿来的，
+                      藏进悬停里等于只有愿意把鼠标停上去的人才看得到。 */}
+                  {stepsOf(take) === undefined ? null : <span className="cell-steps" data-testid="cell-steps">{stepsOf(take)}步</span>}
                 </button>
               ))}
             </div>
@@ -408,8 +455,15 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                   value={workflowFor(id, data)}
                   onChange={(event) => { setParam(id, { workflow: event.target.value }) }}
                 >
+                  {/* 标题后面接上「几步」与**本机实测**多久：三套视频工作流的速度差别
+                      以前只写在 README 里，而人是在这个下拉里做选择的。
+                      数字来自这台机器自己的历史（take 统计），没跑过就不说。 */}
                   {runnable.filter((item) => item.capability === spec.capability).map((item) => (
-                    <option key={item.id} value={item.id}>{item.title}</option>
+                    <option
+                      key={item.id}
+                      value={item.id}
+                      title={workflowHint(item, String(data.kind))}
+                    >{workflowLabel(item, String(data.kind))}</option>
                   ))}
                 </select>
                 {/* 画幅只对「生成」类工作流有意义：剪辑/拼接沿用源片子的画幅。 */}
@@ -1948,6 +2002,37 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     progressOf: (nodeId: string) => progress[nodeId] ?? null,
     blockedOf,
     nodeBackend,
+    workflowLabel: (workflow: WorkflowInfo, kind: string) => {
+      const measured = stats.byWorkflow[`${assetKindOf(kind)}/${workflow.id}`]
+      const bits = [workflow.title]
+      if (workflow.steps !== undefined) bits.push(`${String(workflow.steps)} 步`)
+      if (measured !== undefined) bits.push(`本机约 ${formatDuration(measured.medianMs)}`)
+      return bits.join(' · ')
+    },
+    workflowHint: (workflow: WorkflowInfo, kind: string) => {
+      const measured = stats.byWorkflow[`${assetKindOf(kind)}/${workflow.id}`]
+      const lines: string[] = []
+      if (workflow.steps !== undefined) {
+        lines.push(workflow.steps >= 8
+          ? `${String(workflow.steps)} 步：原版配方，细节最足，也最慢。`
+          : `${String(workflow.steps)} 步：蒸馏加速配方，更快，细节略差；片子越长省得越多。`)
+      }
+      if (workflow.requires.length > 0) lines.push(`必须接上：${workflow.requires.join('、')}（没接会被拦下）`)
+      if (measured !== undefined) {
+        lines.push(`本机实测：约 ${formatDuration(measured.medianMs)}（${String(measured.samples)} 次；慢的时候约 ${formatDuration(measured.p90Ms)}）`)
+      } else {
+        lines.push('本机还没跑过这套，所以暂时说不出它要多久。')
+      }
+      return lines.join('\n')
+    },
+    takeDetail: (take: TakeInfo) => {
+      const id = typeof take.params?.workflow === 'string' ? take.params.workflow : ''
+      const workflow = runnable.find((item) => item.id === id)
+      const bits = [workflow?.title ?? (id === '' ? '默认工作流' : id)]
+      if (workflow?.steps !== undefined) bits.push(`${String(workflow.steps)} 步`)
+      bits.push(formatDuration(take.latencyMs ?? 0))
+      return bits.join(' · ')
+    },
     statusOf: (nodeId: string) => {
       const report = progress[nodeId] ?? null
       const node = nodes.find((item) => item.id === nodeId)
@@ -1961,7 +2046,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
        */
       const kind = String(node?.data.kind ?? '')
       // 产出什么**资产**：视频类（含裁切/拼接）都产出 video，音频节点产出 audio。
-      const assetKind = producesVideo(kind) ? 'video' : producesAudio(kind) ? 'audio' : kind === 'image' ? 'image' : ''
+      const assetKind = assetKindOf(kind)
       // 只有「生成类」节点才允许退到「同类中位数」：裁切/拼接产出的也是 video，
       // 但它们是秒级的 —— 拿生成那条 8 分钟的中位数去预估剪辑，等于把刚修过的
       // 那个谎（拿图片的中位数去预计视频）又说一遍。

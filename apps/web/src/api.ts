@@ -297,6 +297,8 @@ export interface WorkflowInfo {
    * 画布据此决定「提示词为空」算不算错误。
    */
   needsPrompt: boolean
+  /** 采样步数（工作流 defaults 里写了才有）。版本条与下拉都要用它说「这一版几步出的」。 */
+  steps?: number
 }
 
 /** Where one logical value goes in a workflow's graph. */

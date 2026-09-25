@@ -142,7 +142,20 @@ const run = async () => {
   const afterReload = await runRow(s)
   check('现在空闲文案给出「约 N 秒」', afterReload !== null && /^约 \d+ 秒$/u.test(afterReload.text), afterReload?.text ?? '没有进度行')
   const stats2 = (await api.call('/api/generation/stats')).json
-  check('历史里已经攒下了样本', (stats2.estimate?.samples ?? 0) > samples0, `${String(samples0)} -> ${String(stats2.estimate?.samples ?? 0)}`)
+  /**
+   * 「ETA 是学来的」这条判据不能写成「样本数变多了」。
+   *
+   * 统计只读**最近 20 条** take（这是有意的：预计时间该跟着最近的机器状态走，
+   * 而不是被三个月前的数据拖住），所以样本数到 20 就到顶了 —— 库里攒够之后，
+   * `samples` 会一直是 20，那条断言就永远红着（它并不是「刚修好的功能坏了」）。
+   * 真正要证的是「刚跑出来的那一次**进了**统计」，所以判据落在最近样本的第一条上。
+   */
+  const newestTake = ((await api.call(`/api/shots/${shotId}/takes`)).json.takes ?? [])
+    .find((take) => take.status === 'succeeded' && typeof take.latencyMs === 'number')
+  const recent = stats2.estimate?.recentMs ?? []
+  check('刚跑出来的那一次真的进了统计（不是读的旧数据）',
+    newestTake !== undefined && recent[0] === newestTake.latencyMs,
+    `最近样本 ${JSON.stringify(recent.slice(0, 3))} vs 本次 ${String(newestTake?.latencyMs)}`)
   check('中位数落在刚才那次耗时的量级上', (stats2.estimate?.medianMs ?? 0) > 500, `${String(stats2.estimate?.medianMs ?? 0)} ms`)
 
   log('⑥ 有历史之后再生成一次：运行中就要报预计剩余')
@@ -193,6 +206,39 @@ const run = async () => {
       fresh?.params?.workflow === shown?.params?.workflow,
       `${String(shown?.params?.workflow)} -> ${String(fresh?.params?.workflow)}`)
   }
+
+  log('⑨ 版本格上要看得出「这一版是几步、哪套工作流、多久出的」（债务第 19 条）')
+  // 数据一直在 take 的 `params.workflow` 里，缺的只是把它说出来。这一节查的就是那几句话：
+  // 悬停说明 + 格子上那个步数角标（步数是版本之间最实在的差别之一）。
+  const cell = await s.evaluate(`(() => {
+    const cells = [...document.querySelectorAll('.prompt-window .history-cell')];
+    const last = cells[cells.length - 1];
+    return last === undefined ? null : {
+      count: cells.length,
+      title: last.title || '',
+      steps: [...last.querySelectorAll('[data-testid="cell-steps"]')].map((el) => (el.textContent || '').trim()),
+    };
+  })()`)
+  check('版本条上有格子', (cell?.count ?? 0) > 0, JSON.stringify(cell))
+  check('悬停说明里有工作流与耗时', /版 · .+ · /u.test(cell?.title ?? ''), cell?.title ?? '')
+  check('悬停说明里说了这套是几步', /步/u.test(cell?.title ?? ''), cell?.title ?? '')
+  check('格子上直接印着步数角标', (cell?.steps ?? []).some((text) => /^\d+步$/u.test(text)), JSON.stringify(cell?.steps))
+  // 下拉也要说得出速度差别：标题后面接「几步」与「本机约 N 分」（有样本时）。
+  const option = await s.evaluate(`(() => {
+    const select = document.querySelector('.prompt-window select.workflow-select');
+    if (select === null) return null;
+    const chosen = select.options[select.selectedIndex];
+    return { count: select.options.length, label: chosen?.textContent || '', hint: chosen?.title || '' };
+  })()`)
+  check('工作流下拉里带着步数', /步/u.test(option?.label ?? ''), option?.label ?? '')
+  // 「本机约 N」只有在**这台机器跑过这套工作流**时才该出现 —— 没有样本时宁可不说。
+  // 所以这条判据跟着服务端的统计走，而不是硬要求它一定在。
+  const estimate = (await api.call('/api/generation/stats')).json?.estimate ?? {}
+  const buckets = Object.keys(estimate.byWorkflow ?? {})
+  check(buckets.length > 0 ? '有样本时下拉里会说「本机约多久」' : '没有样本时下拉里不编时间',
+    buckets.length > 0 ? /本机约/u.test(option?.label ?? '') : !/本机约/u.test(option?.label ?? ''),
+    `${buckets.join(',') || '（还没有样本）'} → ${option?.label ?? ''}`)
+  check('悬停说明里讲了步数的取舍', (option?.hint ?? '').length > 0, (option?.hint ?? '').split('\n')[0] ?? '')
 
   check('全程没有 JS 报错', s.consoleErrors.length === 0, s.consoleErrors.slice(0, 2).join(' | '))
   await s.shot('generation-progress.png')
