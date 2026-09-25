@@ -6,6 +6,12 @@ export interface SessionInfo {
   driver: string
   models: { id: string; capability: string }[]
   requiresPassword: boolean
+  /** 首启向导要不要出现（还没设密码、也没点过「以后再说」）。 */
+  setupNeeded?: boolean
+  /** 运行中的版本。 */
+  version?: string
+  /** 数据目录；只在首启向导里给（那时还没登录，也没什么可藏的）。 */
+  dataDir?: string
 }
 
 /**
@@ -386,6 +392,49 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const fetchSession = (): Promise<SessionInfo> => request<SessionInfo>('/api/session')
 
 /**
+ * 首启向导：一次把这台部署配起来。
+ *
+ * 这是**唯一一个不用登录就能写的接口** —— 设密码这件事本身需要一个还没上锁的入口。
+ * 配过一次（设了密码、或点过「以后再说」）之后它就永久 403，免得变成后门。
+ * @param input - 密码（空 = 先不设，仍然开放）与设置页那些键的初值。
+ */
+export const submitSetup = (input: { password: string; values?: Record<string, string> }): Promise<{ ok: boolean; passwordSet: boolean; driver: string }> =>
+  request('/api/setup', { method: 'POST', body: JSON.stringify(input) })
+
+/** 更新源里那一版。 */
+export interface UpdateManifestInfo {
+  version: string
+  url: string
+  sha256: string
+  notes?: string
+}
+
+/** 「有没有新版、能不能自助装」的答案。 */
+export interface UpdateState {
+  current: string
+  latest: string
+  available: boolean
+  url: string
+  notes: string
+  configured: boolean
+  error: string
+  /** 绿色包（有 `current.txt` 指针）才能自助更新；Docker / 源码运行不能。 */
+  selfUpdate: boolean
+  /** 绿色包根目录；不是绿色包时是空串。 */
+  home: string
+  /** 已经装了哪些版本。 */
+  installed: string[]
+  manifest?: UpdateManifestInfo
+}
+
+/** 问更新源有没有新版（只读，不改磁盘）。 */
+export const fetchUpdate = (): Promise<UpdateState> => request('/api/update')
+
+/** 装最新版。装完要重启才生效 —— 正在跑的进程替换不了自己。 */
+export const applyUpdate = (): Promise<{ ok: boolean; version: string; files: number; bytes: number; note: string }> =>
+  request('/api/update/apply', { method: 'POST' })
+
+/**
  * 一张素材的小图地址。
  *
  * 服务端现做缩略图（只认 PNG；其它格式回 404），所以**调用方要在 onError 里退回原图** ——
@@ -402,7 +451,7 @@ export interface SettingField {
   /** 环境变量名，也是提交时的键。 */
   key: string
   label: string
-  group: 'image' | 'text' | 'audio'
+  group: 'image' | 'text' | 'audio' | 'update'
   secret?: boolean
   hint?: string
   placeholder?: string

@@ -26,6 +26,7 @@ import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, wr
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
 import { makeZip, type ZipEntry } from './zip.ts'
+import { applyUpdate, checkForUpdate, installedVersions, isPortableHome, runningVersion } from './update.ts'
 
 /** Web bundle directory, resolved relative to this file. */
 const WEB_DIST = fileURLToPath(new URL('../../web/dist', import.meta.url))
@@ -59,6 +60,16 @@ const config = loadConfig(settings, baseConfig)
 // 回收站保留 30 天：不设期限的话它会变成第二个「全部项目」。
 const expired = store.purgeTrash(30)
 if (expired > 0) console.log(`[studio] 回收站清理：${String(expired)} 个超过 30 天的画布已彻底删除`)
+
+/**
+ * 首启向导要不要出现。
+ *
+ * 判据是「这台部署还没被人配置过」：没设密码，而且没人点过「以后再说」。
+ * 一个已经设了密码的部署不该再被向导拦住 —— 那会把线上环境当成新装的。
+ */
+const setupNeeded = (): boolean => config.password === '' && (settings.STUDIO_SETUP_DONE ?? '') !== '1'
+/** 绿色包的根目录（启动器会设 `STUDIO_HOME`）；Docker/源码运行没有它。 */
+const studioHome = process.env.STUDIO_HOME ?? ''
 const bridge = createBridge((message) => { console.log(`[studio] ${message}`) })
 const gateway = createGateway({
   config,
@@ -422,6 +433,9 @@ async function serveStatic(res: ServerResponse, pathname: string): Promise<void>
 /** Whether a path requires an authenticated session. */
 function requiresSession(pathname: string): boolean {
   if (pathname === '/api/health' || pathname === '/api/session' || pathname === '/api/login' || pathname === '/api/logout') return false
+  // 首启向导要能在**还没有密码的时候**走完 —— 自举是它唯一存在的理由。
+  // 它自己会把门关死（配过之后就 403），所以这不是一个常开的洞。
+  if (pathname === '/api/setup') return false
   return pathname.startsWith('/api/') || pathname.startsWith('/v1/') || pathname.startsWith('/proxy/')
 }
 
@@ -452,10 +466,20 @@ const server = createServer((req, res) => {
 
       if (pathname === '/api/session') {
         json(res, 200, {
-          authenticated: hasSession(req, config.cookieSecret),
+          // 没设密码时「登录门已关闭」= 已认证。**这一条以前是错的**：那时 authenticated
+          // 仍然只看 cookie，于是未设密码的部署会掉进「登录 → 还是没登录 → 再登录」的循环，
+          // 每个 /api/ 请求都 401。首启向导正是从「还没设密码」开始的，所以这个洞
+          // 在新的绿色包上会立刻暴露（也说明它一直在那儿，只是没人从零跑过一遍）。
+          authenticated: config.password === '' || hasSession(req, config.cookieSecret),
           driver: config.imageDriver,
           models: gateway.models(),
           requiresPassword: config.password !== '',
+          // 首启向导：没设密码、也没说过「以后再说」时，把这个人请到向导里。
+          // 判据放在服务端而不是前端，因为「该不该引导」是部署状态，不是界面状态。
+          setupNeeded: setupNeeded(),
+          version: runningVersion(),
+          // 数据目录只在向导里给：那时还没登录，而向导要告诉人「东西存在哪」。
+          ...(setupNeeded() ? { dataDir: config.dataDir } : {}),
         })
         return
       }
@@ -488,7 +512,9 @@ const server = createServer((req, res) => {
         return
       }
 
-      if (requiresSession(pathname) && !hasSession(req, config.cookieSecret)) {
+      // 没设密码 = **登录门已关闭**（本机自用）。这一条必须与 /api/session 的
+      // `authenticated` 口径一致，否则界面说「已登录」而接口全回 401。
+      if (config.password !== '' && requiresSession(pathname) && !hasSession(req, config.cookieSecret)) {
         json(res, 401, { error: '需要登录' })
         return
       }
@@ -545,6 +571,89 @@ const server = createServer((req, res) => {
       // 音频后端（音频节点靠它出人声）。同一套形状：configured + note 给画布用。
       if (pathname === '/api/audio-backend' && method === 'GET') {
         json(res, 200, audioBackend.status())
+        return
+      }
+
+      // 首启向导：**唯一一个不用登录就能写的接口**，而且只在「还没配置过」时能用。
+      // 允许它存在的理由是自举：设密码这件事本身需要一个还没上锁的入口。
+      // 一旦设过密码或点过「以后再说」，它就永久关门（403），免得变成后门。
+      if (pathname === '/api/setup' && method === 'POST') {
+        if (!setupNeeded()) {
+          json(res, 403, { error: '这台部署已经配置过了，请到设置页修改' })
+          return
+        }
+        const body = parseJson(await readText(req))
+        const password = typeof body.password === 'string' ? body.password : ''
+        if (password !== '' && password.length < 6) {
+          json(res, 400, { error: '密码至少 6 位（这台机器上的人能改你的画布）' })
+          return
+        }
+        // 只有字段表里的键能被写进来（和 /api/settings 同一条规矩）。
+        const allowed = new Set(SETTINGS.map((item) => item.key))
+        const values = typeof body.values === 'object' && body.values !== null ? body.values as Record<string, unknown> : {}
+        for (const [key, raw] of Object.entries(values)) {
+          if (!allowed.has(key)) continue
+          store.setSetting(key, typeof raw === 'string' ? raw.trim() : '')
+        }
+        if (password !== '') store.setSetting('STUDIO_PASSWORD', password)
+        store.setSetting('STUDIO_SETUP_DONE', '1')
+        applySettings()
+        // 当场就把这个人登进去：向导刚让他设的密码，转头再让他输一遍是没道理的。
+        if (config.password !== '') issueSession(res, config.cookieSecret, secureCookies)
+        json(res, 200, {
+          ok: true,
+          passwordSet: config.password !== '',
+          driver: config.imageDriver,
+        })
+        return
+      }
+
+      // 更新：检查（只读）与安装（改磁盘）。两者都要登录。
+      if (pathname === '/api/update' && method === 'GET') {
+        const info = await checkForUpdate({ manifestUrl: config.updateUrl })
+        json(res, 200, {
+          ...info,
+          // 能不能自助更新由**部署方式**决定：绿色包（STUDIO_HOME 下有自带那份程序）能，
+          // Docker / 源码运行不能。
+          selfUpdate: isPortableHome(studioHome),
+          home: studioHome === '' ? '' : studioHome,
+          installed: studioHome === '' ? [] : installedVersions(studioHome),
+        })
+        return
+      }
+      if (pathname === '/api/update/apply' && method === 'POST') {
+        if (studioHome === '') {
+          json(res, 400, { error: '这个部署方式不能自助更新（Docker 请拉新镜像，源码运行请 git pull）' })
+          return
+        }
+        // 装哪一版以**更新源**为准，不接受请求体指定地址：否则这个接口就成了
+        // 「让服务器下载并运行任意 zip」的洞。
+        const info = await checkForUpdate({ manifestUrl: config.updateUrl })
+        if (info.error !== '') {
+          json(res, 400, { error: info.error })
+          return
+        }
+        if (!info.available) {
+          json(res, 400, { error: '已经是最新版了' })
+          return
+        }
+        const manifest = info.manifest
+        if (manifest === undefined) {
+          json(res, 400, { error: '更新源的内容看不懂（缺 version/url/sha256）' })
+          return
+        }
+        const applied = await applyUpdate({ home: studioHome, version: manifest.version, url: manifest.url, sha256: manifest.sha256 })
+        if (typeof applied === 'string') {
+          json(res, 400, { error: applied })
+          return
+        }
+        json(res, 200, {
+          ok: true,
+          version: manifest.version,
+          files: applied.files,
+          bytes: applied.bytes,
+          note: '已经装好了，重启 Studio 之后生效（正在跑的进程替换不了自己）',
+        })
         return
       }
 

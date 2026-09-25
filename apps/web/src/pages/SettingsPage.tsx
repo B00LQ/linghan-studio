@@ -11,14 +11,18 @@
  * 改完**立刻生效**，不用重启 —— 配置是就地覆盖的，驱动与后端每次调用都重新读。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { fetchSettings, listWorkflows, saveSettings, testBackend, type BackendTest, type SettingField, type SettingsState, type WorkflowInfo } from '../api.ts'
+import { applyUpdate, fetchSettings, fetchUpdate, listWorkflows, saveSettings, testBackend, type BackendTest, type SettingField, type SettingsState, type UpdateState, type WorkflowInfo } from '../api.ts'
 
 /** 每组字段的标题。 */
 const GROUP_TITLE: Record<SettingField['group'], string> = {
   image: '出图 · 本地 ComfyUI 或火山方舟',
   text: '文本 · 文本节点用它写',
   audio: '语音 · 音频节点用它念',
+  update: '更新源 · 绿色包自助更新用',
 }
+
+/** 有「测一下」的分组（更新源不是后端，没什么可探的）。 */
+const PROBE_GROUPS: SettingField['group'][] = ['image', 'text', 'audio']
 
 /** 取值来源怎么念。 */
 const SOURCE_LABEL: Record<SettingField['source'], string> = {
@@ -46,6 +50,9 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
+  /** 更新状态：问过之后才有值（不问就不发网络请求）。 */
+  const [update, setUpdate] = useState<UpdateState | null>(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -93,6 +100,32 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
   const pdd = workflows.find((item) => item.id === 'minimax-h3-video-pdd')
   const pddMissing = [...(pdd?.missingNodes ?? []), ...(pdd?.missingModels ?? [])]
 
+  /** 问更新源。**只在人点了之后才发请求**：打开设置页不该顺带联网。 */
+  const checkUpdate = async (): Promise<void> => {
+    setUpdateBusy(true)
+    try {
+      setUpdate(await fetchUpdate())
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '检查更新失败')
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
+
+  /** 装最新版。装完要重启才生效 —— 正在跑的进程替换不了自己，这一点界面上说清楚。 */
+  const installUpdate = async (): Promise<void> => {
+    setUpdateBusy(true)
+    try {
+      const result = await applyUpdate()
+      setMessage(`已装好 ${result.version}（${String(result.files)} 个文件）：重启 Studio 之后生效`)
+      setUpdate(await fetchUpdate())
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '安装失败')
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
+
   return (
     <div className="page settings-page">
       <header className="page-head">
@@ -112,15 +145,17 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
               <section className="settings-group" key={group} data-testid={`settings-${group}`}>
                 <header>
                   <h2>{GROUP_TITLE[group]}</h2>
-                  <button
-                    type="button"
-                    className="link"
-                    data-testid={`test-${group}`}
-                    disabled={busy !== ''}
-                    onClick={() => { void probe(group) }}
-                  >
-                    {busy === group ? '测试中…' : '测一下'}
-                  </button>
+                  {PROBE_GROUPS.includes(group) ? (
+                    <button
+                      type="button"
+                      className="link"
+                      data-testid={`test-${group}`}
+                      disabled={busy !== ''}
+                      onClick={() => { void probe(group as 'image' | 'text' | 'audio') }}
+                    >
+                      {busy === group ? '测试中…' : '测一下'}
+                    </button>
+                  ) : null}
                 </header>
                 {fields.map((field) => (
                   <div className="setting-row" key={field.key} data-testid={`setting-${field.key}`}>
@@ -167,6 +202,48 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
             </button>
             {message === '' ? null : <span className="setting-message" data-testid="settings-message">{message}</span>}
           </div>
+
+          <section className="settings-group" data-testid="settings-update">
+            <header>
+              <h2>软件更新</h2>
+              <button type="button" className="link" data-testid="check-update" disabled={updateBusy} onClick={() => { void checkUpdate() }}>
+                {updateBusy ? '检查中…' : '检查更新'}
+              </button>
+            </header>
+            {update === null ? (
+              <p className="muted">
+                绿色包可以在这一页自助更新（下载 → 校验 → 换目录 → 重启生效）。
+                Docker 部署请拉新镜像，源码运行请 <code>git pull</code>：那两种方式不该由页面自己替换文件。
+              </p>
+            ) : (
+              <>
+                <p className="muted">
+                  当前版本 <code>{update.current}</code>
+                  {update.configured ? ` · 更新源里的最新版 ${update.latest === '' ? '读不到' : update.latest}` : ' · 没有配置更新源'}
+                  {update.selfUpdate ? '' : ' · 这个部署方式不能自助更新'}
+                </p>
+                {update.error === '' ? null : <p className="setting-test is-bad">✗ {update.error}</p>}
+                {update.available ? (
+                  <>
+                    <p className="setting-test is-ok">✓ 有新版本 {update.latest}{update.notes === '' ? '' : `：${update.notes}`}</p>
+                    {update.selfUpdate ? (
+                      <div className="settings-actions">
+                        <button type="button" className="primary" data-testid="install-update" disabled={updateBusy} onClick={() => { void installUpdate() }}>
+                          装这一版
+                        </button>
+                        <span className="muted">装完要重启 Studio 才生效。</span>
+                      </div>
+                    ) : (
+                      <p className="muted">这个部署方式（Docker / 源码）请按部署说明升级，页面不会自己替换文件。</p>
+                    )}
+                  </>
+                ) : update.configured && update.error === '' ? <p className="setting-test is-ok">✓ 已经是最新版</p> : null}
+                {update.installed.length === 0 ? null : (
+                  <p className="muted">本地已有的版本：{update.installed.join('、')}（换 <code>{`${update.home}\\current.txt`}</code> 就能回退）</p>
+                )}
+              </>
+            )}
+          </section>
 
           <section className="settings-group settings-guide">
             <header><h2>接上自己的后端</h2></header>

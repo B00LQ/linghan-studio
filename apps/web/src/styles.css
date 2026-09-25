@@ -64,6 +64,46 @@ textarea { min-height: 96px; resize: vertical; }
 .gate p { margin: 0; color: var(--muted); font-size: 13px; }
 .gate .error { color: #ff8080; font-size: 13px; }
 
+/* 首启向导：也是「门」，但它有步骤、有取舍说明，所以比登录卡宽。 */
+.setup-gate { align-items: flex-start; padding: 40px 16px; overflow: auto; }
+.setup-card {
+  width: min(680px, 100%);
+  padding: 24px 26px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.setup-card h1 { margin: 0; font-size: 20px; }
+.setup-card h2 { margin: 0 0 8px; font-size: 15px; }
+.setup-card p { margin: 0 0 8px; font-size: 13px; line-height: 1.6; }
+.setup-card code { font-size: 12px; }
+.setup-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.setup-steps span { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.setup-steps span.active { color: #0b0d12; background: var(--accent); border-color: var(--accent); }
+.setup-steps span.done { color: var(--text); border-color: var(--accent); }
+.setup-card label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.setup-card label input { font-size: 13px; padding: 7px 9px; }
+.setup-drivers { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.setup-driver {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+}
+.setup-driver.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.setup-driver .muted { font-size: 11px; line-height: 1.5; }
+.setup-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.setup-actions .primary { margin-right: auto; }
+
 /* Shell ------------------------------------------------------------------- */
 /* 网格行高必须被视口钉死。原先只写了 height:100vh，行高仍由内容决定：
    侧栏项目一多就把整行撑高，主区（画布）跟着被撑到屏幕外——画布底部看不见，

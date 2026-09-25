@@ -9,3 +9,6 @@ data
 .env
 .env.local
 e2e-*.mjs
+# 绿色包 / 安装程序的产物（自带一个 Node 与几十 MB 的 zip）与镜像无关：
+# 它们在**外面**发，进构建上下文只会把镜像撑大。
+dist-desktop

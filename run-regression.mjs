@@ -62,6 +62,10 @@ const SUITES = [
   { name: 'canvas-ux', script: 'canvas-ux-test.mjs', args: [BASE, PASSWORD], slow: true },
   { name: 'generation-progress', script: 'generation-progress-test.mjs', args: [BASE, PASSWORD], slow: true },
   { name: 'agent-live-sync', script: 'agent-live-sync-test.mjs', args: [BASE, PASSWORD] },
+  // 打包与自助更新：**自己打一个绿色包**（会构建前端）、用包里自带的 Node 跑起来、
+  // 在界面上走一遍首启向导、再起一个本地更新源让它更新并重启验证。
+  // 不依赖 Studio 容器，但比别的用例慢（一次前端构建 + 两次启动）。
+  { name: 'desktop', script: 'desktop-test.mjs', args: [], slow: true },
   { name: 'e2e-studio', script: 'e2e-studio.mjs', args: [BASE, PASSWORD], slow: true },
 ]
 

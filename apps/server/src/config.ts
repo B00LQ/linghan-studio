@@ -25,6 +25,8 @@ export interface StudioConfig {
   arkModel: string
   /** Secret signing the session cookie. */
   cookieSecret: string
+  /** 更新源清单地址（绿色包自助更新用）；空串 = 没有更新源。 */
+  updateUrl: string
 }
 
 /**
@@ -39,7 +41,7 @@ export interface SettingSpec {
   /** 界面上那一行写什么。 */
   label: string
   /** 归在哪个分组下。 */
-  group: 'image' | 'text' | 'audio'
+  group: 'image' | 'text' | 'audio' | 'update'
   /** 机密：读回来时打码，界面上也不回显。 */
   secret?: boolean
   /** 一句说明/取值提示。 */
@@ -80,6 +82,13 @@ export const SETTINGS: SettingSpec[] = [
   { key: 'STUDIO_AUDIO_BASE_URL', label: '语音接口地址', group: 'audio', placeholder: 'https://api.openai.com/v1' },
   { key: 'STUDIO_AUDIO_MODEL', label: '语音模型名', group: 'audio', placeholder: 'gpt-4o-mini-tts' },
   { key: 'STUDIO_AUDIO_VOICE', label: '音色', group: 'audio', placeholder: 'alloy' },
+  {
+    key: 'STUDIO_UPDATE_URL',
+    label: '更新源',
+    group: 'update',
+    hint: '一个 JSON 清单的地址（version / url / sha256），绿色包才能自助更新；留空表示不检查更新',
+    placeholder: 'https://…/studio-latest.json',
+  },
 ]
 
 /** 每个键的取值来源，界面据此说「它来自哪」。 */
@@ -141,6 +150,7 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
     // deployments must pin STUDIO_SECRET so sessions survive a restart.
     // **重解析时要沿用旧的那个**：否则改一次设置就把所有人踢下线。
     cookieSecret: pick('STUDIO_SECRET') || previous?.cookieSecret || randomBytes(32).toString('base64url'),
+    updateUrl: pick('STUDIO_UPDATE_URL'),
   }
 }
 

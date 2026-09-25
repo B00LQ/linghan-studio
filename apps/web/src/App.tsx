@@ -12,6 +12,7 @@ import { AssetsPage } from './pages/AssetsPage.tsx'
 import { CanvasPage } from './pages/CanvasPage.tsx'
 import { HomePage } from './pages/HomePage.tsx'
 import { ProjectsPage } from './pages/ProjectsPage.tsx'
+import { SetupPage } from './pages/SetupPage.tsx'
 import { WorkflowsPage } from './pages/WorkflowsPage.tsx'
 import { SettingsPage } from './pages/SettingsPage.tsx'
 import { navigate, useRoute } from './router.ts'
@@ -63,6 +64,19 @@ export function App() {
 
   if (session === null) {
     return <div className="gate"><p>{error === '' ? '正在连接…' : error}</p></div>
+  }
+
+  // 首启向导挡在最前面（比登录还前）：它要做的第一件事就是设一个密码。
+  // 做成「门」而不是一个路由 —— 一个能被 URL 绕过去的新手引导等于没有。
+  if (session.setupNeeded === true) {
+    return (
+      <SetupPage
+        session={session}
+        onDone={() => {
+          void fetchSession().then((info) => { setSession(info); refresh() }).catch(() => { setSession(null) })
+        }}
+      />
+    )
   }
 
   if (!session.authenticated) {
