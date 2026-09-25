@@ -79,7 +79,10 @@ export const DEFAULT_SITE: SiteContent = {
   },
   capabilities: [
     { id: 'local-image', title: '本地出图', description: '接你自己的 ComfyUI，热态约 6 秒一张', status: 'ready' },
-    { id: 'text', title: '文本', description: '写故事、场景与角色设定', status: 'ready' },
+    // 文本这条按「能配什么」写：任何 OpenAI 兼容的 LLM 都能接（ChatGPT / DeepSeek /
+    // Moonshot / 火山方舟…），没配 key 时是占位文本 —— 那句话得说出来，否则人以为
+    // 是模型写得差。
+    { id: 'text', title: '文本', description: '写故事、场景与角色设定；接任意 OpenAI 兼容的 LLM（未配置时返回占位文本）', status: 'ready' },
     // 视频这条按实测写：MiniMax H3 在 12 GB 卡上 768p 一条 5 秒片约十几分钟，
     // 「热态 6 秒一张」那种速度的话不能套用，说了反而误导。
     // 4 步蒸馏那条**先不写倍数**：采样步数确实减半，但端到端还压着模型装载与解码

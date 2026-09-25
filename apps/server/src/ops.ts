@@ -192,6 +192,23 @@ export function applyGeneration(doc: CanvasDocument, input: {
 }
 
 /**
+ * Write a finished text generation onto the node that asked for it.
+ *
+ * 文本没有「素材」也没有「版本」：它就是那个节点的内容。所以这里只干两件事——
+ * 把文本放进去、把状态收回来。**不覆盖人正在写的字**：只有拿到非空结果才写。
+ * @param doc - document to mutate in place.
+ * @param input - which node and what came back.
+ * @returns whether the node was found.
+ */
+export function applyText(doc: CanvasDocument, input: { nodeId: string; text: string }): boolean {
+  const node = doc.nodes.find((item) => item.id === input.nodeId)
+  if (node === undefined) return false
+  node.data.status = 'idle'
+  if (input.text.trim() !== '') node.data.text = input.text
+  return true
+}
+
+/**
  * Apply operations to a document, in order, without writing it.
  *
  * Kept separate from persistence so a caller can apply a batch and decide

@@ -33,7 +33,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import { listWorkflows, type WorkflowInfo } from '../api.ts'
-import { createShot, deleteAsset, downloadAssets, fetchGenerationStats, listAssets, listTakes, loadCanvas, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo } from '../api.ts'
+import { createShot, deleteAsset, downloadAssets, fetchGenerationStats, fetchTextBackend, listAssets, listTakes, loadCanvas, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
 import { arrangeLayout, arrangeSubset, findFreeSlot, findOverlaps, nodeRect } from './layout.ts'
 import { NodePanel, AssetPanel } from './CanvasPanels.tsx'
 import { ImageEditor } from './ImageEditor.tsx'
@@ -41,7 +41,7 @@ import { CompareView } from './CompareView.tsx'
 import { NodeTools } from './NodeTools.tsx'
 import { transformImage, type EditOps } from './imageEdit.ts'
 import type { BrowserAsset } from '../components/AssetBrowser.tsx'
-import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, producesVideo, specOf, type CanvasNodeKind, type PortKind } from './ports.ts'
+import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, producesVideo, specOf, type CanvasNodeKind, type CanvasNodeSpec, type PortKind } from './ports.ts'
 import { describeProgress, type NodeProgress } from './progress.ts'
 
 /** Data carried by every Studio node. */
@@ -113,8 +113,13 @@ const CanvasContext = createContext<{
   progressOf: (nodeId: string) => NodeProgress | null
   /** Progress display, already formatted for the node's own window. */
   statusOf: (nodeId: string) => { text: string; fraction: number | null }
-  /**
-   * Workflows this node can pick from — **only the ones this machine can run**.
+  /** 这类节点现在能不能生成；不能的话，理由是什么（文本节点取决于服务端探测）。 */
+  blockedOf: (spec: CanvasNodeSpec) => string | undefined
+  /** 文本模型的显示名（文本节点那一行）；还没探测出来时是一句说明。 */
+  textModel: string
+  /** 文本后端的说明，做 tooltip：配没配、配的是哪个地址。 */
+  textNote: string
+  /** Workflows this node can pick from — **only the ones this machine can run**.
    *
    * 缺节点的（比如官方 PDD 那条要有 ComfyUI-MiniMax-H3-PDD-Acc 插件）、缺模型的、
    * 以及没绑提示词的，都在这里就已经滤掉了，所以下拉里不会出现注定报错的条目。
@@ -144,6 +149,9 @@ const CanvasContext = createContext<{
   labelOf: () => '',
   progressOf: () => null,
   statusOf: () => ({ text: '', fraction: null }),
+  blockedOf: () => undefined,
+  textModel: '文本',
+  textNote: '',
   runnable: [],
   workflowFor: () => '',
   sizeFor: () => '1024x1024',
@@ -223,7 +231,7 @@ function PromptInput({ value, placeholder, onInput, onBegin }: {
 
 /** One canvas node's rendering. */
 function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
-  const { takes, activeNodeId, showTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor } = useContext(CanvasContext)
+  const { takes, activeNodeId, showTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, sizeFor, blockedOf, textModel, textNote } = useContext(CanvasContext)
   const spec = specOf(data.kind)
   const history = typeof data.shotId === 'string' && data.shotId !== '' ? (takes[data.shotId] ?? []) : []
   const running = runningNodeId === id || data.status === 'running'
@@ -343,8 +351,8 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
             </div>
           ) : null}
           <div className="bar">
-            <span className="model">
-              {spec.picture ? '本地 ComfyUI' : '未配置文本模型'}
+            <span className="model" title={spec.picture ? '' : textNote}>
+              {spec.picture ? '本地 ComfyUI' : textModel}
             </span>
             {spec.picture ? (
               <>
@@ -442,8 +450,8 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
             <button
               type="button"
               className="send nodrag"
-              disabled={running || spec.generateBlocked !== undefined}
-              title={spec.generateBlocked ?? '生成'}
+              disabled={running || blockedOf(spec) !== undefined}
+              title={blockedOf(spec) ?? '生成'}
               onClick={() => { generate(id) }}
             >
               {running ? '…' : '↑'}
@@ -660,9 +668,15 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         })
       })
       .catch(() => { /* 没有估计也是一种正常状态：标签少说一句话而已 */ })
+    // 文本后端也一起探：文本节点的 ↑ 能不能按，取决于这台机器配没配模型。
+    void fetchTextBackend()
+      .then((info) => { setTextBackend(info) })
+      .catch(() => { setTextBackend(null) })
   }, [])
   /** Workflows this canvas can choose from; loaded once per mount. */
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
+  /** 文本后端（LLM）是什么；null = 还在探测。文本节点的可用性由它决定。 */
+  const [textBackend, setTextBackend] = useState<TextBackendInfo | null>(null)
   /** Re-render tick while something is running, so the ETA counts down. */
   const [tick, setTick] = useState(0)
   /**
@@ -1191,6 +1205,20 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   }, [connectedPorts, workflows])
 
   /**
+   * 这个节点现在能不能生成；不能的话，理由是什么。
+   *
+   * 文本节点的理由来自**服务端探测**（配了 key 就能用），不是写死在目录里的那句话——
+   * 写死的话，配好的机器上会一直显示「未配置文本模型」，而那是假话。
+   * @param spec - the node's catalogue entry.
+   * @returns the reason, or undefined when it can run.
+   */
+  const blockedOf = useCallback((spec: CanvasNodeSpec): string | undefined => {
+    if (spec.kind !== 'text') return spec.generateBlocked
+    if (textBackend === null) return '正在探测文本模型…'
+    return textBackend.configured ? undefined : textBackend.note
+  }, [textBackend])
+
+  /**
    * The size this node will actually ask for — same rule as {@link workflowFor}:
    * 下拉显示什么就提交什么。`initialData` 会给每种节点写好默认尺寸，所以这条只在
    * 手写文档/旧文档缺字段时才起作用；但「显示一个值、发另一个值」这个坑刚在
@@ -1293,6 +1321,17 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       return
     }
 
+    // 文本作业：结果是一段字，不是文件。服务端已经写进文档一次了，这里再写一次是给
+    // 「没有 SSE 连接」或「刚接上」的场合——两边写下的必须是同一段字。
+    if (job.text !== undefined) {
+      const text = job.text
+      setNodes((current) => current.map((node) => node.id === nodeId
+        ? { ...node, data: { ...node.data, status: 'idle' as const, text } }
+        : node))
+      setStatus('文本已生成')
+      return
+    }
+
     const first = job.files?.[0]
     const listed = first === undefined
       ? {}
@@ -1355,8 +1394,9 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     if (target === undefined) return
     const spec = specOf(target.data.kind)
     if (spec === undefined) return
-    if (spec.generateBlocked !== undefined) {
-      setStatus(spec.generateBlocked)
+    const blocked = blockedOf(spec)
+    if (blocked !== undefined) {
+      setStatus(blocked)
       return
     }
     // 同一个节点同时只跑一件：第二次点击只会让 ComfyUI 排两个一样的队。
@@ -1364,10 +1404,17 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       setStatus('这个节点已经在跑了')
       return
     }
-    const prompt = (target.data.text ?? '').trim() || inboundText(nodeId, nodesRef.current, edgesRef.current)
+    // 文本节点走的是 LLM，**不跑 ComfyUI 工作流**，所以下面那条「必须解析出工作流」
+    // 对它不成立。它的指令就是节点里那段字；上游文本节点接上来的字是「接着写」的素材。
+    const isText = spec.kind === 'text'
+    const own = (target.data.text ?? '').trim()
+    const upstream = inboundText(nodeId, nodesRef.current, edgesRef.current)
+    const prompt = own !== '' ? own : upstream
     // 剪辑/拼接不生成画面，提示词为空是对的（那套工作流里根本没有 `$prompt`）。
     if (prompt === '' && spec.capability !== 'video-edit') {
-      setStatus('提示词为空：在节点下方写，或从文本节点拉线接入')
+      setStatus(isText
+        ? '先写下你想让它写什么（例如：雨夜霓虹街头，三段式场景，带环境声）'
+        : '提示词为空：在节点下方写，或从文本节点拉线接入')
       return
     }
     /**
@@ -1377,25 +1424,28 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
      * 来说那是出图的工作流，结果是「3 秒完成，画框里一张放不出来的图」。
      * 拿不到就明说，别让服务端替我挑一套错的。
      */
-    const workflowId = workflowFor(nodeId, target.data)
-    if (workflowId === '') {
-      // 两种「没有」要分清：真的没导入过，还是导入了但这台机器跑不了（缺节点、
-      // 缺模型）。下拉里后者是不显示的，所以这里必须说出来，否则人只会觉得
-      // 「明明有工作流却说没有」。
-      const sameKind = workflows.filter((item) => item.capability === spec.capability)
-      setStatus(sameKind.length === 0
-        ? `没有可用于「${spec.title}」节点的工作流：去「工作流」页导入一套`
-        : `「${spec.title}」的工作流这台机器现在跑不了（缺节点或缺模型）：去「工作流」页看缺什么`)
-      return
-    }
-    // 这套工作流要的输入没接上（图生图没接参考图）：**现在就说**，别让它跑出一张
-    // 和参考图毫无关系的图——那种结果比一句拒绝难查得多。缺的是端口 id，
-    // 人看到的是标签，所以翻一道。
-    const missing = missingInputs(nodeId, workflowId)
-    if (missing.length > 0) {
-      const labels = missing.map((name) => spec.inputs.find((input) => input.id === name)?.label ?? name)
-      setStatus(`这套工作流需要接上「${labels.join('、')}」：把上游节点的输出连到这个节点的对应入口`)
-      return
+    let workflowId = ''
+    if (!isText) {
+      workflowId = workflowFor(nodeId, target.data)
+      if (workflowId === '') {
+        // 两种「没有」要分清：真的没导入过，还是导入了但这台机器跑不了（缺节点、
+        // 缺模型）。下拉里后者是不显示的，所以这里必须说出来，否则人只会觉得
+        // 「明明有工作流却说没有」。
+        const sameKind = workflows.filter((item) => item.capability === spec.capability)
+        setStatus(sameKind.length === 0
+          ? `没有可用于「${spec.title}」节点的工作流：去「工作流」页导入一套`
+          : `「${spec.title}」的工作流这台机器现在跑不了（缺节点或缺模型）：去「工作流」页看缺什么`)
+        return
+      }
+      // 这套工作流要的输入没接上（图生图没接参考图）：**现在就说**，别让它跑出一张
+      // 和参考图毫无关系的图——那种结果比一句拒绝难查得多。缺的是端口 id，
+      // 人看到的是标签，所以翻一道。
+      const missing = missingInputs(nodeId, workflowId)
+      if (missing.length > 0) {
+        const labels = missing.map((name) => spec.inputs.find((input) => input.id === name)?.label ?? name)
+        setStatus(`这套工作流需要接上「${labels.join('、')}」：把上游节点的输出连到这个节点的对应入口`)
+        return
+      }
     }
 
     setRunningNodeId(nodeId)
@@ -1409,8 +1459,9 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     try {
       // The history id is the node's own; the operator never sees a "shot".
       // 先建好：第一帧进度可能在节点自己知道 shotId 之前就到了。
+      // **文本不建镜头**：它不是文件，没有「版本」这套，建了只会留一个空镜头。
       let shotId = typeof target.data.shotId === 'string' ? target.data.shotId : ''
-      if (shotId === '') {
+      if (!isText && shotId === '') {
         const created = await createShot(projectId, prompt.slice(0, 40), prompt)
         shotId = created.shot.id
         shotToNode.current.set(shotId, nodeId)
@@ -1419,20 +1470,26 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         projectId,
         nodeId,
         prompt,
-        shotId,
+        ...(shotId === '' ? {} : { shotId }),
+        ...(isText ? { kind: 'text' as const } : {}),
         size: sizeFor(target.data),
         count: typeof target.data.count === 'number' ? target.data.count : 1,
-        workflowId,
+        ...(workflowId === '' ? {} : { workflowId }),
         // 片长只对视频类工作流有意义；别的图里没有 $duration，多传一个数字它也不认。
         ...(typeof target.data.duration === 'number' ? { duration: target.data.duration } : {}),
         // 剪辑参数（从第几秒开始）走 params：工作流用不到的键它自己忽略，
         // 所以这里不需要「哪种节点传哪些参数」的对照表。
         ...(typeof target.data.start === 'number' ? { params: { start: target.data.start } } : {}),
+        // 文本：节点里那段字是**指令**，上游那段字是「接着写」的素材。
+        // 两段都在时才给上下文——只给一段的话，模型会把同一句话读两遍。
+        ...(isText && own !== '' && upstream !== '' ? { params: { context: upstream } } : {}),
       })
       jobsByNode.current.set(nodeId, job.id)
-      setStatus(spec.kind === 'video'
-        ? '已提交：视频要十几分钟，可以先去干别的'
-        : spec.capability === 'video-edit' ? '已提交：剪辑不用显卡，几秒就完' : '已提交…')
+      setStatus(isText
+        ? '已提交：等文本模型写…'
+        : spec.kind === 'video'
+          ? '已提交：视频要十几分钟，可以先去干别的'
+          : spec.capability === 'video-edit' ? '已提交：剪辑不用显卡，几秒就完' : '已提交…')
       void settleJob(job)
     } catch (error) {
       // 提交本身失败是**同步**失败（画布不存在、缺字段、服务端拒绝），
@@ -1443,7 +1500,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       setRunningNodeId(null)
       runStartedAt.current.delete(nodeId)
     }
-  }, [markDirty, missingInputs, projectId, setNodes, settleJob, workflowFor])
+  }, [blockedOf, markDirty, missingInputs, projectId, setNodes, settleJob, workflowFor])
 
   /** Show a specific version in the card, and remember it as the chosen one.
    *
@@ -1727,6 +1784,9 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     runningNodeId,
     labelOf: (nodeId: string) => nodeLabel(nodes, nodeId),
     progressOf: (nodeId: string) => progress[nodeId] ?? null,
+    blockedOf,
+    textModel: textBackend === null ? '探测文本模型…' : textBackend.model,
+    textNote: textBackend?.note ?? '',
     statusOf: (nodeId: string) => {
       const report = progress[nodeId] ?? null
       const node = nodes.find((item) => item.id === nodeId)
@@ -1764,7 +1824,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     workflowFor,
     sizeFor,
     // `tick` is not read: it exists so the ETA above is recomputed every 500 ms.
-  }), [beginEdit, cancelRun, compare, editImage, generate, nodes, progress, quickEdit, runningNodeId, runnable, selection, setParam, showTake, sizeFor, stats, takes, tick, workflowFor])
+  }), [beginEdit, blockedOf, cancelRun, compare, editImage, generate, nodes, progress, quickEdit, runningNodeId, runnable, selection, setParam, showTake, sizeFor, stats, takes, textBackend, tick, workflowFor])
 
   // 左键双击空白处 → 添加节点面板。
   //

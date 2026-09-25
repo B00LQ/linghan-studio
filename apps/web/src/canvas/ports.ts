@@ -74,7 +74,7 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
     description: '写下故事、场景或角色设定',
     inputs: [],
     outputs: [{ id: 'text', kind: 'text', label: '文本' }],
-    placeholder: '写下你想讲的故事、场景或角色设定。例如：一个来自未来的机器人，在城市屋顶看星星。',
+    placeholder: '写下你想让它写什么，按 ↑ 让它写。生成结果会替换这里（原话可用 Ctrl+Z 找回）。例如：一个来自未来的机器人，在城市屋顶看星星。',
     picture: false,
     generateBlocked: '未配置文本模型（LLM）供应商',
   },

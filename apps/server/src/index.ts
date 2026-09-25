@@ -19,7 +19,8 @@ import { loadConfig } from './config.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
-import { applyGeneration, applyOps, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
+import { createTextBackend } from './text.ts'
+import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
 import { makeZip, type ZipEntry } from './zip.ts'
@@ -99,6 +100,12 @@ const workflowRoutes = createWorkflowRoutes({
 })
 const secureCookies = process.env.STUDIO_SECURE_COOKIES === '1'
 
+/** 文本后端：文本节点要能生成，就得有个模型；没配时是占位驱动。 */
+const textBackend = createTextBackend({
+  store,
+  log: (message) => { console.log(`[studio] ${message}`) },
+})
+
 /**
  * 渲染作业：一次生成不再等于一个 HTTP 请求。
  *
@@ -118,6 +125,26 @@ const jobs = createJobRegistry({
   abort: async (comfyPromptId) => { await gateway.abortRender(comfyPromptId) },
   async run(job, hooks) {
     const request = job.request
+    // 文本作业走的是同一条「提交 → 状态 → 结果」的路，只是干活的换成了 LLM，
+    // 结果也不是文件而是文本。放在同一个注册表里，画布与 Agent 都不必学第二套。
+    if (request.kind === 'text') {
+      // 「接着写」的素材由**调用方显式给**（画布给的是上游文本节点的内容）。
+      // 不能拿节点自己那段字当上下文：那段字已经是指令了，再当一次上下文，
+      // 模型会把同一句话读两遍 —— 占位驱动的输出里一眼就能看见这件事。
+      const context = typeof request.params?.context === 'string' ? request.params.context : ''
+      const text = await textBackend.generate({
+        prompt: request.prompt,
+        ...(context.trim() === '' ? {} : { context }),
+      })
+      const current = readDocument(store, request.projectId)
+      const applied = applyText(current, { nodeId: request.nodeId, text })
+      if (applied) {
+        writeDocument(store, request.projectId, current)
+        // reason 用 'render'：这是「我自己这次生成完事了」，不该把人正在编辑的选中清掉。
+        bridge.broadcastDocument(request.projectId, 'render')
+      }
+      return { files: [], takes: 0, shotId: '', text }
+    }
     // 镜头：没有就现建一个，和画布点击、Agent 调用走的是同一条路。
     let shotId = request.shotId ?? ''
     if (shotId === '' || store.getShot(shotId) === undefined) {
@@ -422,6 +449,13 @@ const server = createServer((req, res) => {
         return
       }
 
+      // 文本后端（文本节点靠它出字）。和 /api/image-backend 对称：画布据此决定
+      // ↑ 按钮能不能按、以及按不下去时该说什么。
+      if (pathname === '/api/text-backend' && method === 'GET') {
+        json(res, 200, textBackend.status())
+        return
+      }
+
       // 渲染作业：提交立刻返回，之后靠查/推。长任务（视频十几分钟）不能挂在
       // 一个 HTTP 请求上——见 createJobRegistry 上面的说明。
       if (pathname === '/api/jobs' && method === 'POST') {
@@ -443,6 +477,8 @@ const server = createServer((req, res) => {
           return
         }
         const job = jobs.submit({
+          // 文本节点提交的是「文本作业」：同样的注册表，干活的换成 LLM。
+          ...(body.kind === 'text' ? { kind: 'text' as const } : {}),
           projectId,
           nodeId,
           prompt,

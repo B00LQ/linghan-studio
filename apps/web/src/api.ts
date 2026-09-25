@@ -140,6 +140,24 @@ export interface GenerationStats {
 /** Read progress capability and the historical duration estimate. */
 export const fetchGenerationStats = (): Promise<GenerationStats> => request<GenerationStats>('/api/generation/stats')
 
+/** What the text backend is. */
+export interface TextBackendInfo {
+  driver: string
+  model: string
+  /** false = 没配模型，文本节点会给出理由而不是假装能写。 */
+  configured: boolean
+  /** 给操作者看的一句话。 */
+  note: string
+}
+
+/**
+ * 文本后端是什么。
+ *
+ * 和 `/api/image-backend` 对称：画布据此决定文本节点的 ↑ 能不能按、以及按不下去时
+ * 该说什么。**不能写死**「未配置」—— 配了 key 的机器上那句话就成了假话。
+ */
+export const fetchTextBackend = (): Promise<TextBackendInfo> => request<TextBackendInfo>('/api/text-backend')
+
 /** What a stored workflow produces. */
 export type WorkflowCapability = 'image' | 'video' | 'video-edit'
 
@@ -150,6 +168,8 @@ export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancell
 export interface StudioJob {
   id: string
   request: {
+    /** `text` = 交给文本后端（LLM），别的都是 ComfyUI 渲染。 */
+    kind?: 'render' | 'text'
     projectId: string
     nodeId: string
     prompt: string
@@ -174,6 +194,12 @@ export interface StudioJob {
   error?: string
   /** 需要额外告诉人的事（例如「取消晚了一步，结果留下了」）。 */
   note?: string
+  /**
+   * 产出的文本（`kind: 'text'` 的作业才有）。
+   *
+   * 文本没有「素材」「版本」那套 —— 它不是文件，所以结果直接带在作业里。
+   */
+  text?: string
 }
 
 /**
@@ -194,6 +220,8 @@ export const submitJob = (input: {
   shotId?: string
   /** 非提示词、非尺寸的取值（裁切的 start…），直接当工作流占位符的值用。 */
   params?: Record<string, number | string>
+  /** `text` = 交给文本后端（LLM）；省略就是 ComfyUI 渲染。 */
+  kind?: 'text'
 }): Promise<{ job: StudioJob }> =>
   request('/api/jobs', {
     method: 'POST',
@@ -201,6 +229,7 @@ export const submitJob = (input: {
       projectId: input.projectId,
       nodeId: input.nodeId,
       prompt: input.prompt,
+      ...(input.kind === undefined ? {} : { kind: input.kind }),
       ...(input.size === undefined ? {} : { size: input.size }),
       ...(input.count === undefined ? {} : { count: input.count }),
       ...(input.workflowId === undefined ? {} : { workflow: input.workflowId }),

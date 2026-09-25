@@ -25,6 +25,14 @@ export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancell
 
 /** What to render. Mirrors the gateway's render request, plus where it belongs. */
 export interface JobRequest {
+  /**
+   * 这是什么活。
+   *
+   * `render`（默认）走 ComfyUI 出图/出片；`text` 是把一段提示词交给 LLM、把结果写回
+   * **文本节点**。两者共用同一个注册表与同一套「提交立刻返回、状态靠查/推」的形状 ——
+   * 一次 LLM 调用也可能几十秒，它同样不该挂在一个 HTTP 请求上。
+   */
+  kind?: 'render' | 'text'
   /** Canvas the result should be written into. */
   projectId: string
   /** Node that asked for it. */
@@ -77,6 +85,13 @@ export interface StudioJob {
   takes?: number
   /** Shot the takes were recorded against. */
   shotId?: string
+  /**
+   * 产出的文本，`kind: 'text'` 时才有。
+   *
+   * 文本没有「素材」「版本」这套（它不是文件），所以结果直接带在作业里，
+   * 由画布写进那个文本节点。
+   */
+  text?: string
   /** Why it failed, or that it was cancelled. */
   error?: string
   /**
@@ -113,6 +128,8 @@ export interface JobOutcome {
    * without a second round trip.
    */
   shotId: string
+  /** 产出的文本；只有 `kind: 'text'` 的作业会带。 */
+  text?: string
 }
 
 /** What the registry needs from its owner. */
@@ -211,6 +228,8 @@ export function createJobRegistry(deps: JobRegistryDeps): JobRegistry {
       job.files = outcome.files
       job.takes = outcome.takes
       job.shotId = outcome.shotId
+      // 文本作业没有文件，结果就是这个字段；画布据此写进文本节点。
+      if (outcome.text !== undefined) job.text = outcome.text
       job.finishedAt = Date.now()
       deps.log(`jobs: ${job.id.slice(0, 8)} 成功（${String(outcome.files.length)} 个产物）`)
       publish(job)
