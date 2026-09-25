@@ -33,7 +33,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import { listWorkflows, type WorkflowInfo } from '../api.ts'
-import { createShot, deleteAsset, downloadAssets, fetchAudioBackend, fetchGenerationStats, fetchTextBackend, listAssets, listTakes, loadCanvas, replaceTakeAsset, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
+import { createShot, deleteAsset, downloadAssets, fetchAudioBackend, fetchGenerationStats, fetchTextBackend, listAssetFolders, listAssets, listTakes, loadCanvas, replaceTakeAsset, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type AssetFolderInfo, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
 import { arrangeLayout, arrangeSubset, findFreeSlot, findOverlaps, nodeRect } from './layout.ts'
 import { NodePanel, AssetPanel } from './CanvasPanels.tsx'
 import { ImageEditor } from './ImageEditor.tsx'
@@ -672,6 +672,8 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   /** Node whose versions are open in the side-by-side comparison. */
   const [comparing, setComparing] = useState<string | null>(null)
   const [assets, setAssets] = useState<BrowserAsset[]>([])
+  /** 素材文件夹（与资产页面共用服务端那一份）。 */
+  const [assetFolders, setAssetFolders] = useState<AssetFolderInfo[]>([])
   /** Feedback line under the asset browser's toolbar. */
   const [assetNotice, setAssetNotice] = useState('')
   /** Node ids handed to the Agent; persisted with the document. */
@@ -2042,8 +2044,11 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   /** Reload the shared media library, which the sidebar's 资产 tab lists. */
   const refreshAssets = useCallback(async (): Promise<void> => {
     try {
-      const result = await listAssets()
+      // 素材与「素材文件夹」一起拉：归类动作改的是两边（计数变了），
+      // 只刷一边会让文件夹上的数字和墙上的图对不上。
+      const [result, filed] = await Promise.all([listAssets(), listAssetFolders()])
       setAssets(result.assets)
+      setAssetFolders(filed.folders)
     } catch {
       // The library is a convenience; a failed listing must not break the canvas.
     }
@@ -2361,7 +2366,10 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         {panel === 'assets' ? (
           <AssetPanel
             assets={assets}
+            folders={assetFolders}
             notice={assetNotice}
+            onChanged={() => { void refreshAssets() }}
+            onNotice={setAssetNotice}
             onPlaceMany={(ids) => {
               // 多张一次放下：按网格排开，不叠在一起。
               for (const [index, id] of ids.entries()) {

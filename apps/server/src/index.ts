@@ -1012,17 +1012,87 @@ const server = createServer((req, res) => {
         return
       }
 
+      // 素材文件夹：**标签，不是容器**。所以只有 建 / 改名 / 删 三个动作，
+      // 删掉文件夹时里面的素材一个都不会少（退回未分组）——这件事在界面上也写着，
+      // 因为「删除文件夹」在别处的语义常常是连内容一起删。
+      if (pathname === '/api/asset-folders' && method === 'GET') {
+        json(res, 200, { folders: store.listAssetFolders() })
+        return
+      }
+      if (pathname === '/api/asset-folders' && method === 'POST') {
+        const body = parseJson(await readText(req))
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        if (name === '') {
+          json(res, 400, { error: '文件夹要有名字' })
+          return
+        }
+        // 同名不让建两个：一列「参考图 / 参考图」谁也分不清哪个是哪个。
+        if (store.findAssetFolderByName(name) !== undefined) {
+          json(res, 409, { error: `已经有一个叫「${name}」的文件夹了` })
+          return
+        }
+        json(res, 200, { folder: store.createAssetFolder(name) })
+        return
+      }
+      const assetFolderMatch = /^\/api\/asset-folders\/([^/]+)$/u.exec(pathname)
+      if (assetFolderMatch !== null && (method === 'PATCH' || method === 'DELETE')) {
+        const folderId = decodeURIComponent(assetFolderMatch[1] as string)
+        if (store.getAssetFolder(folderId) === undefined) {
+          json(res, 404, { error: '文件夹不存在' })
+          return
+        }
+        if (method === 'DELETE') {
+          json(res, 200, { ok: true, unfiled: store.deleteAssetFolder(folderId) })
+          return
+        }
+        const body = parseJson(await readText(req))
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        if (name === '') {
+          json(res, 400, { error: '文件夹要有名字' })
+          return
+        }
+        const clash = store.findAssetFolderByName(name)
+        if (clash !== undefined && clash.id !== folderId) {
+          json(res, 409, { error: `已经有一个叫「${name}」的文件夹了` })
+          return
+        }
+        store.renameAssetFolder(folderId, name)
+        json(res, 200, { folder: store.getAssetFolder(folderId) })
+        return
+      }
+
       // 素材列表：画布的资产浮窗与项目页共用。
       // **必须带上 url**：客户端拿它当 <img src>，少一个字段界面上就是一排空框，
       // 而类型里写着 `url: string`，编译器根本不会提醒。
       if (pathname === '/api/assets' && method === 'GET') {
         const kind = url.searchParams.get('kind')
+        const folder = url.searchParams.get('folder')
         const limit = Number(url.searchParams.get('limit') ?? '500')
         json(res, 200, {
           assets: store.listAssets(Number.isFinite(limit) ? Math.min(2000, Math.max(1, limit)) : 500)
             .map((asset) => ({ ...asset, url: `/api/assets/${asset.id}` }))
-            .filter((asset) => kind === null || kind === '' || kind === 'all' || asset.mime.startsWith(`${kind}/`)),
+            .filter((asset) => kind === null || kind === '' || kind === 'all' || asset.mime.startsWith(`${kind}/`))
+            // `folder=none` 是「未分组」这个筛选值本身，不是某个文件夹的 id（id 是 uuid）。
+            .filter((asset) => folder === null || folder === '' || folder === 'all'
+              || (folder === 'none' ? asset.folderId === '' : asset.folderId === folder)),
         })
+        return
+      }
+
+      // 把素材移进/移出文件夹（`folderId` 给空串就是退回未分组）。
+      if (pathname === '/api/assets/move' && method === 'POST') {
+        const body = parseJson(await readText(req))
+        const ids = (Array.isArray(body.ids) ? body.ids : []).filter((id): id is string => typeof id === 'string')
+        const folderId = typeof body.folderId === 'string' ? body.folderId : ''
+        if (ids.length === 0) {
+          json(res, 400, { error: '没有选中任何素材' })
+          return
+        }
+        if (folderId !== '' && store.getAssetFolder(folderId) === undefined) {
+          json(res, 404, { error: '文件夹不存在' })
+          return
+        }
+        json(res, 200, { ok: true, moved: store.moveAssets(ids, folderId) })
         return
       }
 

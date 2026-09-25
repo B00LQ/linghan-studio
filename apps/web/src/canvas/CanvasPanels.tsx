@@ -11,6 +11,7 @@
  * list and the canvas are two views of one selection, not two states.
  */
 import { useEffect, useMemo, useState } from 'react'
+import type { AssetFolderInfo } from '../api.ts'
 import { AssetBrowser, type BrowserAsset } from '../components/AssetBrowser.tsx'
 import { Menu, MenuItem } from '../components/Menu.tsx'
 import { nodeLabel, specOf, type NamedLike } from './ports.ts'
@@ -58,6 +59,12 @@ export interface AssetPanelProps extends PanelChromeProps {
   onDelete: (ids: string[]) => void
   /** Feedback line shown above the grid. */
   notice?: string
+  /** 素材文件夹（和资产页面是同一份，两处看到的东西要能对上）。 */
+  folders?: AssetFolderInfo[] | undefined
+  /** 归类变过之后重新拉素材与文件夹。 */
+  onChanged?: (() => void) | undefined
+  /** 说一句要说给用户听的话。 */
+  onNotice?: ((message: string) => void) | undefined
 }
 
 /** How the node list is laid out. */
@@ -210,15 +217,19 @@ export function NodePanel(props: NodePanelProps) {
  * @returns the floating panel.
  */
 export function AssetPanel(props: AssetPanelProps) {
-  const { assets, onPlaceMany, onDownload, onDelete, notice, onClose } = props
+  const { assets, folders, onPlaceMany, onDownload, onDelete, notice, onChanged, onNotice, onClose } = props
   return (
     <section className="float-panel assets-panel" aria-label="我的资产">
-      {/* 和「资产」页面用的是同一个浏览器组件：分类、排序、分页、预览、批量操作不会两边跑偏。 */}
+      {/* 和「资产」页面用的是同一个浏览器组件：分类、排序、分页、预览、文件夹、批量操作
+          不会两边跑偏。 */}
       <AssetBrowser
         assets={assets}
+        folders={folders}
         title="我的资产"
         note={`${String(assets.length)} 个素材 · 点图看大图，勾选后可批量操作`}
         notice={notice}
+        onChanged={onChanged}
+        onNotice={onNotice}
         actions={<button type="button" className="link float-close" title="关闭" onClick={onClose}>✕</button>}
         onPlaceMany={onPlaceMany}
         onDownload={onDownload}

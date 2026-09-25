@@ -11,7 +11,10 @@
  * Content-addressed: the same bytes uploaded twice appear once.
  */
 import { useCallback, useEffect, useState } from 'react'
-import { deleteAsset, downloadAssets, listAssets, listProjects, placeAssets, type ProjectInfo } from '../api.ts'
+import {
+  deleteAsset, downloadAssets, listAssetFolders, listAssets, listProjects, placeAssets,
+  type AssetFolderInfo, type ProjectInfo,
+} from '../api.ts'
 import { AssetBrowser, type BrowserAsset } from '../components/AssetBrowser.tsx'
 import { Menu, MenuItem } from '../components/Menu.tsx'
 
@@ -28,15 +31,17 @@ export interface AssetsPageProps {
  */
 export function AssetsPage({ refreshToken }: AssetsPageProps) {
   const [assets, setAssets] = useState<BrowserAsset[]>([])
+  const [folders, setFolders] = useState<AssetFolderInfo[]>([])
   const [projects, setProjects] = useState<ProjectInfo[]>([])
   const [notice, setNotice] = useState('')
   /** Ids waiting for the user to pick a canvas. */
   const [pending, setPending] = useState<string[]>([])
 
   const reload = useCallback(async (): Promise<void> => {
-    const [listed, canvases] = await Promise.all([listAssets(), listProjects()])
+    const [listed, canvases, filed] = await Promise.all([listAssets(), listProjects(), listAssetFolders()])
     setAssets(listed.assets)
     setProjects(canvases.projects)
+    setFolders(filed.folders)
   }, [])
 
   useEffect(() => {
@@ -65,9 +70,12 @@ export function AssetsPage({ refreshToken }: AssetsPageProps) {
     <div className="page assets-page">
       <AssetBrowser
         assets={assets}
+        folders={folders}
         title="资产"
         note={`${String(assets.length)} 个素材 · 点图看大图，勾选后可批量操作`}
         notice={notice}
+        onChanged={() => { void reload() }}
+        onNotice={setNotice}
         onDownload={(ids) => { void downloadAssets(ids).catch((problem: unknown) => { setNotice(problem instanceof Error ? problem.message : '打包失败') }) }}
         onDelete={(ids) => { void remove(ids) }}
         onPlaceMany={(ids) => { setPending(ids); setNotice('') }}

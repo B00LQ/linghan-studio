@@ -640,10 +640,45 @@ export interface AssetInfo {
   mime: string
   bytes: number
   url: string
+  /** Owning asset folder id; empty means 未分组. */
+  folderId?: string
+}
+
+/** One asset folder, with how many assets are in it. */
+export interface AssetFolderInfo {
+  id: string
+  name: string
+  createdAt: string
+  assetCount: number
 }
 
 /** List stored assets, newest first. */
 export const listAssets = (): Promise<{ assets: (AssetInfo & { createdAt: string })[] }> => request('/api/assets')
+
+/** List asset folders (labels, not containers — deleting one keeps its assets). */
+export const listAssetFolders = (): Promise<{ folders: AssetFolderInfo[] }> => request('/api/asset-folders')
+
+/** Create an asset folder. The server refuses a name that is already taken. */
+export const createAssetFolder = (name: string): Promise<{ folder: AssetFolderInfo }> =>
+  request('/api/asset-folders', { method: 'POST', body: JSON.stringify({ name }) })
+
+/** Rename an asset folder. */
+export const renameAssetFolder = (folderId: string, name: string): Promise<{ folder: AssetFolderInfo }> =>
+  request(`/api/asset-folders/${encodeURIComponent(folderId)}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+
+/**
+ * Delete an asset folder.
+ * @returns how many assets were sent back to 未分组 (they are **not** deleted).
+ */
+export const deleteAssetFolder = (folderId: string): Promise<{ ok: boolean; unfiled: number }> =>
+  request(`/api/asset-folders/${encodeURIComponent(folderId)}`, { method: 'DELETE' })
+
+/**
+ * Move assets into a folder.
+ * @param folderId - target folder, or empty string to send them back to 未分组.
+ */
+export const moveAssets = (ids: string[], folderId: string): Promise<{ ok: boolean; moved: number }> =>
+  request('/api/assets/move', { method: 'POST', body: JSON.stringify({ ids, folderId }) })
 
 /**
  * Upload bytes into the project's asset library.

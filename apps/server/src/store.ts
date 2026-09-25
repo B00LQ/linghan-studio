@@ -136,6 +136,26 @@ export interface StudioAsset {
   relPath: string
   /** Creation timestamp (ISO-8601). */
   createdAt: string
+  /** Owning asset folder id; empty means 未分组. */
+  folderId: string
+}
+
+/**
+ * 素材文件夹。
+ *
+ * 和画布的文件夹（`StudioFolder`）是**两回事**，所以两张表、两个接口：一个是「这张画布
+ * 归到哪一组」，一个是「这张图归到哪一组」。合成一张表会让人以为「把图移进文件夹」
+ * 会影响画布，而它不会。
+ */
+export interface StudioAssetFolder {
+  /** Stable folder id. */
+  id: string
+  /** Display name. */
+  name: string
+  /** Creation timestamp (ISO-8601). */
+  createdAt: string
+  /** How many assets it holds. */
+  assetCount: number
 }
 
 /** How long generation has actually been taking, for the ETA display. */
@@ -234,6 +254,29 @@ export interface StudioStore {
   generationStats: (limit?: number) => GenerationStats
   /** List assets, newest first. */
   listAssets: (limit?: number) => StudioAsset[]
+  /** 素材文件夹，旧的在前面。 */
+  listAssetFolders: () => StudioAssetFolder[]
+  /** 新建一个素材文件夹。 */
+  createAssetFolder: (name: string) => StudioAssetFolder
+  /** 读一个素材文件夹。 */
+  getAssetFolder: (id: string) => StudioAssetFolder | undefined
+  /** 改名。返回 false 表示没有这个文件夹。 */
+  renameAssetFolder: (id: string, name: string) => boolean
+  /**
+   * 删掉一个素材文件夹。
+   *
+   * **里面的素材不动**：文件夹是标签，不是容器。删标签不等于删内容 ——
+   * 这是必须的，因为「删除文件夹」在别处的语义常常是连内容一起删。
+   * @returns 有多少个素材被退回「未分组」；**-1 表示没有这个文件夹**。
+   */
+  deleteAssetFolder: (id: string) => number
+  /**
+   * 把若干素材移进一个文件夹（空串 = 退回未分组）。
+   * @returns 真正被移动的个数。
+   */
+  moveAssets: (ids: string[], folderId: string) => number
+  /** 按名字找素材文件夹（同名不让建两个）。 */
+  findAssetFolderByName: (name: string) => StudioAssetFolder | undefined
   /**
    * Whether any canvas document still shows this asset.
    *
@@ -338,6 +381,13 @@ CREATE TABLE IF NOT EXISTS asset (
   mime TEXT NOT NULL,
   bytes INTEGER NOT NULL,
   rel_path TEXT NOT NULL,
+  folder_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+-- 素材文件夹。**故意和画布文件夹分开**（见 StudioAssetFolder 的注释）。
+CREATE TABLE IF NOT EXISTS asset_folder (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 `
@@ -416,7 +466,9 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, 'take', 'latency_ms', 'INTEGER')
   ensureColumn(db, 'take', 'error', 'TEXT')
   ensureColumn(db, 'take', 'mark', "TEXT NOT NULL DEFAULT 'none'")
+  ensureColumn(db, 'asset', 'folder_id', "TEXT NOT NULL DEFAULT ''")
   db.exec('CREATE INDEX IF NOT EXISTS project_by_folder ON project(folder_id, updated_at DESC)')
+  db.exec('CREATE INDEX IF NOT EXISTS asset_by_folder ON asset(folder_id, created_at DESC)')
 }
 
 /**
@@ -747,9 +799,9 @@ export function openStore(dataDir: string): StudioStore {
     },
     saveAsset(bytes, mime, kind) {
       const id = createHash('sha256').update(bytes).digest('hex').slice(0, 32)
-      const existing = db.prepare('SELECT id, kind, mime, bytes, rel_path, created_at FROM asset WHERE id = ?').get(id) as Row | undefined
+      const existing = db.prepare('SELECT id, kind, mime, bytes, rel_path, folder_id, created_at FROM asset WHERE id = ?').get(id) as Row | undefined
       if (existing !== undefined) {
-        return { id, kind: text(existing, 'kind'), mime: text(existing, 'mime'), bytes: integer(existing, 'bytes'), relPath: text(existing, 'rel_path'), createdAt: text(existing, 'created_at') }
+        return { id, kind: text(existing, 'kind'), mime: text(existing, 'mime'), bytes: integer(existing, 'bytes'), relPath: text(existing, 'rel_path'), createdAt: text(existing, 'created_at'), folderId: text(existing, 'folder_id') }
       }
       const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : mime === 'video/mp4' ? 'mp4' : 'png'
       const relPath = join(id.slice(0, 2), `${id}.${ext}`)
@@ -759,12 +811,12 @@ export function openStore(dataDir: string): StudioStore {
       const stamp = now()
       db.prepare('INSERT INTO asset (id, kind, mime, bytes, rel_path, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(id, kind, mime, bytes.length, relPath, stamp)
-      return { id, kind, mime, bytes: bytes.length, relPath, createdAt: stamp }
+      return { id, kind, mime, bytes: bytes.length, relPath, createdAt: stamp, folderId: '' }
     },
     getAsset(id) {
-      const row = db.prepare('SELECT id, kind, mime, bytes, rel_path, created_at FROM asset WHERE id = ?').get(id) as Row | undefined
+      const row = db.prepare('SELECT id, kind, mime, bytes, rel_path, folder_id, created_at FROM asset WHERE id = ?').get(id) as Row | undefined
       if (row === undefined) return undefined
-      return { id, kind: text(row, 'kind'), mime: text(row, 'mime'), bytes: integer(row, 'bytes'), relPath: text(row, 'rel_path'), createdAt: text(row, 'created_at') }
+      return { id, kind: text(row, 'kind'), mime: text(row, 'mime'), bytes: integer(row, 'bytes'), relPath: text(row, 'rel_path'), createdAt: text(row, 'created_at'), folderId: text(row, 'folder_id') }
     },
     generationStats(limit = 20) {
       // Only successful runs count: a failure's duration says nothing about how
@@ -827,7 +879,7 @@ export function openStore(dataDir: string): StudioStore {
       return { ...shape(durationsOf(rows)), byKind, byWorkflow }
     },
     listAssets(limit = 200) {
-      return (db.prepare('SELECT id, kind, mime, bytes, rel_path, created_at FROM asset ORDER BY created_at DESC LIMIT ?').all(limit) as Row[])
+      return (db.prepare('SELECT id, kind, mime, bytes, rel_path, folder_id, created_at FROM asset ORDER BY created_at DESC LIMIT ?').all(limit) as Row[])
         .map((row) => ({
           id: text(row, 'id'),
           kind: text(row, 'kind'),
@@ -835,7 +887,66 @@ export function openStore(dataDir: string): StudioStore {
           bytes: integer(row, 'bytes'),
           relPath: text(row, 'rel_path'),
           createdAt: text(row, 'created_at'),
+          folderId: text(row, 'folder_id'),
         }))
+    },
+    listAssetFolders() {
+      return (db.prepare(`
+        SELECT f.id, f.name, f.created_at, COUNT(a.id) AS asset_count
+        FROM asset_folder f LEFT JOIN asset a ON a.folder_id = f.id
+        GROUP BY f.id ORDER BY f.created_at
+      `).all() as Row[]).map((row) => ({
+        id: text(row, 'id'),
+        name: text(row, 'name'),
+        createdAt: text(row, 'created_at'),
+        assetCount: integer(row, 'asset_count'),
+      }))
+    },
+    createAssetFolder(name) {
+      const stamp = now()
+      const id = randomUUID()
+      db.prepare('INSERT INTO asset_folder (id, name, created_at) VALUES (?, ?, ?)').run(id, name, stamp)
+      return { id, name, createdAt: stamp, assetCount: 0 }
+    },
+    getAssetFolder(id) {
+      const row = db.prepare('SELECT id, name, created_at FROM asset_folder WHERE id = ?').get(id) as Row | undefined
+      if (row === undefined) return undefined
+      const count = db.prepare('SELECT COUNT(*) AS n FROM asset WHERE folder_id = ?').get(id) as Row | undefined
+      return {
+        id: text(row, 'id'),
+        name: text(row, 'name'),
+        createdAt: text(row, 'created_at'),
+        assetCount: integer(count ?? {}, 'n'),
+      }
+    },
+    findAssetFolderByName(name) {
+      const row = db.prepare('SELECT id, name, created_at FROM asset_folder WHERE name = ?').get(name) as Row | undefined
+      if (row === undefined) return undefined
+      const count = db.prepare('SELECT COUNT(*) AS n FROM asset WHERE folder_id = ?').get(text(row, 'id')) as Row | undefined
+      return {
+        id: text(row, 'id'),
+        name: text(row, 'name'),
+        createdAt: text(row, 'created_at'),
+        assetCount: integer(count ?? {}, 'n'),
+      }
+    },
+    renameAssetFolder(id, name) {
+      const result = db.prepare('UPDATE asset_folder SET name = ? WHERE id = ?').run(name, id)
+      return Number(result.changes) > 0
+    },
+    deleteAssetFolder(id) {
+      if (db.prepare('SELECT id FROM asset_folder WHERE id = ?').get(id) === undefined) return -1
+      // 标签，不是容器：删掉文件夹，里面的素材一个都不能少（退回未分组）。
+      const moved = db.prepare("UPDATE asset SET folder_id = '' WHERE folder_id = ?").run(id)
+      db.prepare('DELETE FROM asset_folder WHERE id = ?').run(id)
+      return Number(moved.changes)
+    },
+    moveAssets(ids, folderId) {
+      if (ids.length === 0) return 0
+      const statement = db.prepare('UPDATE asset SET folder_id = ? WHERE id = ?')
+      let moved = 0
+      for (const id of ids) moved += Number(statement.run(folderId, id).changes)
+      return moved
     },
     assetPath(asset) {
       return join(assetRoot, asset.relPath)

@@ -308,6 +308,139 @@ const run = async () => {
     check('拒绝时说明原因', ((await refused.json()).error ?? '').includes('画布'), '')
   }
 
+  log('⑭ 素材文件夹：建 / 归类 / 筛选 / 改名（**标签，不是容器**）')
+  const folderName = `${STAMP} 参考图`
+  const madeFolder = await api.call('/api/asset-folders', { method: 'POST', body: JSON.stringify({ name: folderName }) })
+  const folderId = madeFolder.json.folder?.id ?? ''
+  check('能建素材文件夹', madeFolder.status === 200 && folderId !== '', `HTTP ${String(madeFolder.status)}`)
+  check('同名再建被拒（409），并说明原因',
+    (await api.call('/api/asset-folders', { method: 'POST', body: JSON.stringify({ name: folderName }) })).status === 409)
+  check('空名字被拒（400）',
+    (await api.call('/api/asset-folders', { method: 'POST', body: JSON.stringify({ name: '   ' }) })).status === 400)
+
+  const filed = fixtures.slice(0, 2)
+  const movedIn = await api.call('/api/assets/move', { method: 'POST', body: JSON.stringify({ ids: filed, folderId }) })
+  check('能把素材移进文件夹', movedIn.json.moved === 2, JSON.stringify(movedIn.json))
+  const onlyFolder = (await api.call(`/api/assets?folder=${folderId}`)).json.assets ?? []
+  check('按文件夹筛只回这两个', onlyFolder.length === 2 && onlyFolder.every((a) => filed.includes(a.id)),
+    `${String(onlyFolder.length)} 个`)
+  check('列表里带着 folderId', onlyFolder.every((a) => a.folderId === folderId), JSON.stringify(onlyFolder.map((a) => a.folderId)))
+  const unfiled = (await api.call('/api/assets?folder=none')).json.assets ?? []
+  check('「未分组」里没有它们', unfiled.every((a) => !filed.includes(a.id)), `${String(unfiled.length)} 个未分组`)
+  check('文件夹上带计数',
+    ((await api.call('/api/asset-folders')).json.folders ?? []).find((f) => f.id === folderId)?.assetCount === 2)
+  check('给不存在的文件夹归类回 404',
+    (await api.call('/api/assets/move', { method: 'POST', body: JSON.stringify({ ids: [filed[0]], folderId: '不存在' }) })).status === 404)
+  const renamedFolder = `${STAMP} 已改名`
+  check('能改名',
+    (await api.call(`/api/asset-folders/${folderId}`, { method: 'PATCH', body: JSON.stringify({ name: renamedFolder }) })).json.folder?.name === renamedFolder)
+
+  log('⑮ 界面上：文件夹那一排真的会筛、管理页签真的是一张表')
+  await s.goto(`${BASE}/assets`, 3500)
+  const folderChips = await s.evaluate(`[...document.querySelectorAll('.assets-page .folder-chip')].map((c) => (c.textContent || '').trim())`)
+  check('出现「全部 / 未分组 / 各文件夹」', folderChips.length >= 3, folderChips.join(' | '))
+  check('改名后的文件夹名显示出来了', folderChips.some((t) => t.includes(renamedFolder)), folderChips.join(' | '))
+  const wallAll = await s.evaluate(`document.querySelectorAll('.assets-page .asset-card').length`)
+  check('点那个文件夹', await s.evaluate(`(() => {
+    const chip = [...document.querySelectorAll('.assets-page .folder-chip')].find((c) => (c.textContent || '').includes(${JSON.stringify(renamedFolder)}));
+    if (!chip) return false; chip.click(); return true;
+  })()`))
+  await sleep(1000)
+  const wallFolder = await s.evaluate(`document.querySelectorAll('.assets-page .asset-card').length`)
+  check('筛选后只剩文件夹里的两个', wallFolder === 2 && wallAll > 2, `${String(wallAll)} -> ${String(wallFolder)}`)
+
+  // 管理页签：一张表，用来核对体积与归类。
+  check('点「管理」页签', await s.evaluate(`(() => {
+    const b = [...document.querySelectorAll('[data-testid="asset-tabs"] button')].find((x) => (x.textContent || '').trim() === '管理');
+    if (!b) return false; b.click(); return true;
+  })()`))
+  await sleep(700)
+  const manage = await s.evaluate(`(() => {
+    const table = document.querySelector('[data-testid="asset-manage"] table');
+    const rows = [...document.querySelectorAll('[data-testid="asset-manage"] tbody tr')];
+    const imgs = [...document.querySelectorAll('[data-testid="asset-manage"] img')];
+    return {
+      rows: rows.length,
+      cells: (rows[0]?.querySelectorAll('td').length) ?? 0,
+      selects: document.querySelectorAll('[data-testid="asset-manage"] .asset-row-folder').length,
+      hasSize: /(KB|MB)/u.test(rows[0]?.textContent ?? ''),
+      decoded: imgs.filter((i) => i.complete && i.naturalWidth > 0).length,
+      summary: (document.querySelector('.assets-page .asset-tabs-note')?.textContent ?? '').trim(),
+      cards: document.querySelectorAll('.assets-page .asset-card').length,
+    };
+  })()`)
+  check('管理页签是一张表', manage.rows === 2 && manage.cells >= 6, JSON.stringify(manage))
+  check('每行都有体积与「所在文件夹」下拉', manage.hasSize && manage.selects === manage.rows, JSON.stringify(manage))
+  check('管理页签里的小图真的画出来了', manage.decoded > 0, `${String(manage.decoded)} 张`)
+  check('汇总写着合计体积', /合计\s*[\d.]+ ?(KB|MB)/u.test(manage.summary), manage.summary)
+  check('管理页签不再渲染卡片墙', manage.cards === 0, String(manage.cards))
+
+  // 表里改「文件夹」= 归类：真的写到服务端，不只是界面上动一下。
+  check('把第一行的文件夹改回「未分组」', await s.evaluate(`(() => {
+    const rows = [...document.querySelectorAll('[data-testid="asset-manage"] tbody tr')];
+    const row = rows.find((r) => r.querySelector('select')?.value === ${JSON.stringify(folderId)});
+    if (!row) return false;
+    const select = row.querySelector('select');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+    setter.call(select, '');
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`))
+  await sleep(1200)
+  const afterRowMove = (await api.call('/api/assets?folder=none')).json.assets ?? []
+  const folderCountAfter = ((await api.call('/api/asset-folders')).json.folders ?? []).find((f) => f.id === folderId)?.assetCount
+  // 判据要按**净变化**来，不能假设「第一行就是 filed[0]」：两行同在一个文件夹里，
+  // 挑到哪一行是不确定的（这一条一开始就是这么写错的）。
+  check('表里的归类真的生效了（未分组多一个、文件夹里少一个）',
+    afterRowMove.some((a) => filed.includes(a.id)) && afterRowMove.length === unfiled.length + 1 && folderCountAfter === 1,
+    `未分组 ${String(unfiled.length)} -> ${String(afterRowMove.length)}，文件夹里 ${String(folderCountAfter)} 个`)
+
+  // 切页签不能把「已经选好的」清掉：先挑出来再换视图核对，是真实用法。
+  await s.evaluate(`(() => {
+    const b = [...document.querySelectorAll('[data-testid="asset-tabs"] button')].find((x) => (x.textContent || '').trim() === '素材');
+    if (b) b.click(); return true;
+  })()`)
+  await sleep(500)
+  check('勾选一个', await s.evaluate(`(() => { const p = document.querySelector('.assets-page .asset-card .pick'); if (!p) return false; p.click(); return true })()`))
+  await sleep(400)
+  await s.evaluate(`(() => {
+    const b = [...document.querySelectorAll('[data-testid="asset-tabs"] button')].find((x) => (x.textContent || '').trim() === '管理');
+    if (b) b.click(); return true;
+  })()`)
+  await sleep(500)
+  check('切到管理页签后已选还在（两处是同一份选择）',
+    ((await s.evaluate(`(document.querySelector('[data-testid="asset-batch"]')?.textContent || '')`))).includes('已选 1 个'),
+    await s.evaluate(`(document.querySelector('[data-testid="asset-batch"]')?.textContent || '')`))
+  check('批量条上有「移入文件夹」', (await s.evaluate(`document.querySelectorAll('[data-testid="asset-batch"] .asset-move').length`)) === 1)
+  await s.evaluate(`(() => { const c = document.querySelector('[data-testid="asset-batch"] .link'); if (c) c.click(); return true })()`)
+
+  log('⑯ 删文件夹绝不删素材（确认框里就说清楚）')
+  const doomed = await api.call('/api/asset-folders', { method: 'POST', body: JSON.stringify({ name: `${STAMP} 待删` }) })
+  const doomedId = doomed.json.folder?.id ?? ''
+  await api.call('/api/assets/move', { method: 'POST', body: JSON.stringify({ ids: [filed[1]], folderId: doomedId }) })
+  await s.goto(`${BASE}/assets`, 3000)
+  check('打开那个文件夹的 ⋯ 菜单', await s.evaluate(`(() => {
+    const wrap = [...document.querySelectorAll('.assets-page .folder-chip-wrap')].find((w) => (w.textContent || '').includes('待删'));
+    const trigger = wrap?.querySelector('.menu-trigger');
+    if (!trigger) return false; trigger.click(); return true;
+  })()`))
+  await sleep(400)
+  check('菜单里有「删除文件夹」', await s.evaluate(`(() => {
+    const item = [...document.querySelectorAll('.assets-page .menu-item')].find((x) => (x.textContent || '').includes('删除文件夹'));
+    if (!item) return false;
+    // 让确认框“点确定”，并把话记下来——那句话本身就是要求：删文件夹不删素材。
+    window.__confirmText = '';
+    window.confirm = (message) => { window.__confirmText = String(message); return true; };
+    item.click(); return true;
+  })()`))
+  await sleep(1200)
+  const confirmText = await s.evaluate(`window.__confirmText || ''`)
+  check('确认框说明「素材不会被删」', /不会|退回/u.test(confirmText), confirmText)
+  const foldersAfter = (await api.call('/api/asset-folders')).json.folders ?? []
+  check('文件夹真的没了', !foldersAfter.some((f) => f.id === doomedId), foldersAfter.map((f) => f.name).join(','))
+  const survivor = (await api.call('/api/assets?folder=none')).json.assets ?? []
+  check('里面的素材一个都没少（退回未分组）', survivor.some((a) => a.id === filed[1]), `${String(survivor.length)} 个未分组`)
+
   log('⑬ 清理：只删这个用例上传的 70 张测试素材')
   let cleaned = 0
   for (const id of fixtures) {
@@ -315,6 +448,13 @@ const run = async () => {
     if (response.ok) cleaned += 1
   }
   check('测试素材已全部删除', cleaned === 70, `${String(cleaned)} / 70`)
+  // 这个用例建过的文件夹也要收干净（删文件夹不删素材，所以素材计数不受影响）。
+  const leftoverFolders = ((await api.call('/api/asset-folders')).json.folders ?? []).filter((f) => f.name.startsWith(STAMP))
+  let foldersGone = 0
+  for (const item of leftoverFolders) {
+    if ((await api.call(`/api/asset-folders/${item.id}`, { method: 'DELETE' })).ok) foldersGone += 1
+  }
+  check('这个用例建的文件夹也删掉了', foldersGone === leftoverFolders.length, `${String(foldersGone)} / ${String(leftoverFolders.length)}`)
   const afterAll = (await api.call('/api/assets')).json.assets ?? []
   check('库里的其余素材一张没少', afterAll.length === listed.length,
     `${String(listed.length)} -> ${String(afterAll.length)}`)

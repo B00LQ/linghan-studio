@@ -725,6 +725,66 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .asset-browser .side-search { flex: 1; min-width: 140px; font-size: 12px; padding: 5px 8px; }
 .asset-browser .asset-sort { font-size: 12px; padding: 5px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
 .asset-browser .asset-select-all { font-size: 12px; padding: 5px 10px; }
+
+/* 两个页签：素材（卡片墙）与 管理（一张表）。 */
+.asset-browser .asset-tabs { display: flex; align-items: center; gap: 4px; padding: 6px 12px 0; border-bottom: 1px solid var(--line); }
+.asset-browser .asset-tabs button {
+  font-size: 12px;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted);
+}
+.asset-browser .asset-tabs button:hover { color: var(--text); }
+.asset-browser .asset-tabs button.active { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+.asset-browser .asset-tabs-note { margin-left: auto; padding-bottom: 5px; font-size: 11px; }
+
+/* 素材文件夹：一排标签 + 一个 ⋯（改名 / 删除）。
+   注意类名**不是** .chip —— .chip 是「全部/图片/视频…」那一排，
+   两排混在一起会让「按类型筛」和「按文件夹筛」看起来是同一件事。 */
+.asset-browser .asset-folders { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.asset-browser .asset-folders .folder-title { font-size: 11px; color: var(--muted); margin-right: 2px; }
+.asset-browser .folder-chip-wrap { display: inline-flex; align-items: center; }
+.asset-browser .folder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px dashed var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+.asset-browser .folder-chip:hover { color: var(--text); border-color: var(--accent); }
+.asset-browser .folder-chip.active { color: #0b0d12; background: var(--accent); border-style: solid; border-color: var(--accent); }
+.asset-browser .folder-chip .folder-glyph { font-size: 9px; opacity: 0.8; }
+.asset-browser .folder-chip-wrap .row-menu { margin-left: -4px; }
+.asset-browser .folder-chip-wrap .row-menu .menu-trigger { border-color: transparent; background: transparent; color: var(--muted); padding: 2px 4px; font-size: 12px; }
+.asset-browser .folder-new { font-size: 12px; padding: 3px 9px; border-radius: 999px; border-style: dashed; color: var(--muted); background: transparent; }
+.asset-browser .folder-new:hover { color: var(--text); border-color: var(--accent); }
+.asset-browser .folder-form { display: inline-flex; align-items: center; gap: 4px; }
+.asset-browser .folder-form input { font-size: 12px; padding: 3px 8px; width: 130px; }
+.asset-browser .folder-form button { font-size: 12px; padding: 3px 9px; }
+.asset-browser .asset-move { font-size: 12px; padding: 5px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
+
+/* 管理页签：一张表。卡片墙是拿来挑图的，核对体积与归类要用表。 */
+.asset-browser .asset-manage { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 16px; }
+.asset-browser .asset-manage table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.asset-browser .asset-manage th { position: sticky; top: 0; z-index: 1; text-align: left; font-weight: 600; color: var(--muted); padding: 8px 6px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.asset-browser .asset-manage td { padding: 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.asset-browser .asset-manage tr.is-picked td { background: rgba(122, 162, 255, 0.09); }
+.asset-browser .asset-manage .who { display: flex; align-items: center; gap: 6px; }
+.asset-browser .asset-manage .who img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; display: block; cursor: zoom-in; }
+.asset-browser .asset-manage .who .file { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 6px; background: var(--panel-2); color: var(--muted); }
+.asset-browser .asset-manage .who code { font-size: 11px; color: var(--muted); }
+.asset-browser .asset-manage .pick { width: 18px; height: 18px; padding: 0; border-radius: 5px; border: 1px solid var(--line); background: var(--panel-2); color: #0b0d12; font-size: 11px; line-height: 1; }
+.asset-browser .asset-manage tr.is-picked .pick { background: var(--accent); border-color: var(--accent); }
+.asset-browser .asset-manage .asset-row-folder { font-size: 12px; padding: 3px 4px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
+.asset-browser .asset-manage .danger { border-color: transparent; background: transparent; color: var(--muted); }
+.asset-browser .asset-manage .danger:hover { color: #ff8f8f; }
 .asset-notice {
   margin: 0;
   padding: 8px 12px;
