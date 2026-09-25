@@ -35,6 +35,9 @@ const SUITES = [
   // 账号（M1）：自己起一个 **cloud 模式**的临时实例（不需要浏览器、不需要邮箱服务），
   // 验注册/登录/会话轮换/邮箱验证/重置密码，以及「库里只存哈希」。
   { name: 'accounts', script: 'accounts-test.mjs', args: [] },
+  // 备份（M2）：自己起一个 local 实例，做备份 → 改数据 → 恢复 → 重启，验「真的退回去了」；
+  // 顺带验导出画布包与「只留 7 份」。
+  { name: 'backup', script: 'backup-test.mjs', args: [] },
   { name: 'workflow-api', script: 'workflow-api-test.mjs', args: [BASE, PASSWORD] },
   { name: 'take-pipeline', script: 'take-pipeline-test.mjs', args: [BASE, PASSWORD] },
   { name: 'agent-canvas', script: 'agent-canvas-test.mjs', args: [BASE, PASSWORD] },

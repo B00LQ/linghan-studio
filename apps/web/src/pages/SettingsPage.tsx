@@ -11,11 +11,15 @@
  * 改完**立刻生效**，不用重启 —— 配置是就地覆盖的，驱动与后端每次调用都重新读。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { applyUpdate, fetchSettings, fetchUpdate, listWorkflows, saveSettings, testBackend, type BackendTest, type SettingField, type SettingsState, type UpdateState, type WorkflowInfo } from '../api.ts'
+import {
+  applyUpdate, fetchBackup, fetchSettings, fetchUpdate, listWorkflows, restoreBackup, runBackup, saveSettings,
+  setBackupDir, testBackend,
+  type BackendTest, type BackupState, type SettingField, type SettingsState, type UpdateState, type WorkflowInfo,
+} from '../api.ts'
 
 /** 每组字段的标题。 */
 const GROUP_TITLE: Record<SettingField['group'], string> = {
-  image: '出图 · 本地 ComfyUI 或火山方舟',
+  image: '出图 · 本机 ComfyUI 或自己租的云实例',
   text: '文本 · 文本节点用它写',
   audio: '语音 · 音频节点用它念',
   update: '更新源 · 绿色包自助更新用',
@@ -23,6 +27,11 @@ const GROUP_TITLE: Record<SettingField['group'], string> = {
 
 /** 有「测一下」的分组（更新源不是后端，没什么可探的）。 */
 const PROBE_GROUPS: SettingField['group'][] = ['image', 'text', 'audio']
+
+/** 字节数说成人话。 */
+const sizeText = (bytes: number): string => bytes >= 1024 * 1024
+  ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  : `${String(Math.max(1, Math.round(bytes / 1024)))} KB`
 
 /** 取值来源怎么念。 */
 const SOURCE_LABEL: Record<SettingField['source'], string> = {
@@ -53,6 +62,11 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
   /** 更新状态：问过之后才有值（不问就不发网络请求）。 */
   const [update, setUpdate] = useState<UpdateState | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
+  /** 备份状态（「数据安全」一节用）。 */
+  const [backup, setBackup] = useState<BackupState | null>(null)
+  const [backupDirDraft, setBackupDirDraft] = useState('')
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [backupNote, setBackupNote] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -61,6 +75,10 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '读设置失败')
     }
+    // 备份状态：这一页要显示「上次什么时候备的、备到哪」，失败也要看得见。
+    void fetchBackup()
+      .then((result) => { setBackup(result); setBackupDirDraft(result.dir) })
+      .catch(() => { setBackup(null) })
     // 工作流列表顺带拿来：第 18 条那个「官方 PDD 要装插件与权重」的引导要用它说的缺什么。
     void listWorkflows()
       .then((result) => { setWorkflows(result.workflows) })
@@ -202,6 +220,108 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
             </button>
             {message === '' ? null : <span className="setting-message" data-testid="settings-message">{message}</span>}
           </div>
+
+          <section className="settings-group" data-testid="settings-backup">
+            <header>
+              <h2>数据安全 · 备份</h2>
+              <button
+                type="button" className="link" data-testid="backup-now" disabled={backupBusy}
+                onClick={() => {
+                  setBackupBusy(true)
+                  setBackupNote('正在备份…')
+                  void runBackup()
+                    .then((result) => { setBackup(result.status); setBackupNote(`已备份：${result.point.id}`) })
+                    .catch((problem: unknown) => { setBackupNote(problem instanceof Error ? problem.message : '备份失败') })
+                    .finally(() => { setBackupBusy(false) })
+                }}
+              >立即备份</button>
+            </header>
+            {/* 这一节存在的理由：**画布与素材只在这台机器上**（服务器不存）。
+                所以「硬盘坏 / 重装系统 / 换电脑」全靠备份与导出 —— 这一页必须把话说清楚，
+                并且让人一眼看到「上次备份是什么时候、备到哪、有没有失败」。 */}
+            <p className="muted">
+              画布与素材只存在这台机器上（服务器不存）。硬盘坏、重装系统、换电脑之前，
+              请确认这里有最近的备份，或者用画布卡片上的「导出画布包」带走。
+            </p>
+            {backup === null ? <p className="muted">正在读备份状态…</p> : (
+              <>
+                {backup.restoredFromBackup === true ? (
+                  <p className="setting-test is-ok">✓ 这次启动用的是备份里的数据（你之前点过「从备份恢复」）</p>
+                ) : null}
+                <p className="muted">
+                  备份目录：<code>{backup.dir}</code>
+                  {' · '}
+                  上次备份：{backup.lastAt === '' ? '还没有做过' : new Date(backup.lastAt.replace('T', ' ')).toLocaleString('zh-CN')}
+                  {' · '}
+                  素材镜像：{String(backup.mirrorFiles)} 个文件 / {sizeText(backup.mirrorBytes)}
+                  {' · '}
+                  保留 {String(backup.keep)} 份
+                </p>
+                {backup.lastError === '' ? null : <p className="setting-test is-bad">✗ 上次备份有问题：{backup.lastError}</p>}
+                {backup.pendingRestore === '' ? null : (
+                  <p className="setting-test is-ok">✓ 已经准备好从「{backup.pendingRestore}」恢复：重启 Studio 之后生效</p>
+                )}
+
+                <div className="setting-row">
+                  <div className="setting-head"><span className="setting-label">备份放到哪</span></div>
+                  <input
+                    value={backupDirDraft}
+                    onChange={(event) => { setBackupDirDraft(event.target.value) }}
+                    placeholder="例如 D:\\backup\\studio"
+                  />
+                  <button
+                    type="button" className="link" data-testid="backup-set-dir" disabled={backupBusy}
+                    onClick={() => {
+                      setBackupBusy(true)
+                      void setBackupDir(backupDirDraft)
+                        .then((result) => { setBackup(result.status); setBackupNote('备份目录已改') })
+                        .catch((problem: unknown) => { setBackupNote(problem instanceof Error ? problem.message : '改不了这个目录') })
+                        .finally(() => { setBackupBusy(false) })
+                    }}
+                  >用这个目录</button>
+                  <p className="setting-hint">
+                    建议指到另一块盘或网盘同步目录：同盘的备份挡不住硬盘坏。
+                    {backup.suggestions.length === 0 ? '（这台机器上没探测到常见的网盘目录，可以自己填。）' : ''}
+                  </p>
+                  {backup.suggestions.map((item) => (
+                    <button
+                      key={item.dir}
+                      type="button" className="link"
+                      data-testid={`backup-suggest-${item.label}`}
+                      onClick={() => { setBackupDirDraft(`${item.dir}\\LINGHAN-Studio-backup`) }}
+                    >用「{item.label}」：{item.dir}</button>
+                  ))}
+                </div>
+
+                {backup.points.length === 0 ? null : (
+                  <details className="workflow-params" open data-testid="backup-points">
+                    <summary>备份点（点「恢复」会先自动备份当前状态，重启后生效）</summary>
+                    {backup.points.map((point) => (
+                      <div className="row" key={point.id}>
+                        <span className="grow">
+                          {new Date(point.createdAt.replace('T', ' ')).toLocaleString('zh-CN')}
+                          <br />
+                          <span className="muted">{point.reason === '' ? '（没有备注）' : point.reason} · {sizeText(point.bytes)}</span>
+                        </span>
+                        <button
+                          type="button" className="danger" disabled={backupBusy}
+                          onClick={() => {
+                            if (!window.confirm(`从「${point.createdAt}」恢复？当前状态会先自动备份一份，恢复在重启 Studio 之后生效。`)) return
+                            setBackupBusy(true)
+                            void restoreBackup(point.id)
+                              .then((result) => { setBackup(result.status); setBackupNote(result.note) })
+                              .catch((problem: unknown) => { setBackupNote(problem instanceof Error ? problem.message : '恢复失败') })
+                              .finally(() => { setBackupBusy(false) })
+                          }}
+                        >恢复</button>
+                      </div>
+                    ))}
+                  </details>
+                )}
+                {backupNote === '' ? null : <p className="setting-test" data-testid="backup-note">{backupNote}</p>}
+              </>
+            )}
+          </section>
 
           <section className="settings-group" data-testid="settings-update">
             <header>

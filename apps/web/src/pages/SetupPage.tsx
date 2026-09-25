@@ -11,8 +11,8 @@
  * - **设完之后当场验一次**：保存完立刻探一次后端，通了说通了，不通就说去设置页改。
  *   这是「配完了到底能不能用」和「我配了但不知道对不对」的区别。
  */
-import { useState } from 'react'
-import { submitSetup, testBackend, type BackendTest, type SessionInfo } from '../api.ts'
+import { useEffect, useState } from 'react'
+import { fetchBackup, setBackupDir, submitSetup, testBackend, type BackendTest, type SessionInfo } from '../api.ts'
 
 /** 后端三选一的选项文案。 */
 const DRIVERS: { id: string; label: string; hint: string }[] = [
@@ -45,6 +45,25 @@ export function SetupPage({ session, onDone }: SetupPageProps) {
   const [busy, setBusy] = useState(false)
   /** 保存之后探一次后端的结论。 */
   const [probe, setProbe] = useState<BackendTest | null>(null)
+  /** 备份位置：探测到的网盘目录 + 用户当前的选择。 */
+  const [backupDirs, setBackupDirs] = useState<{ label: string; dir: string }[]>([])
+  const [backupDir, setBackupDirDraft] = useState('')
+  const [backupNote, setBackupNote] = useState('')
+
+  // 首启时问一句「备份放哪」：这台机器上的网盘目录由服务端探测（用户不知道自己的网盘在哪）。
+  useEffect(() => {
+    void fetchBackup()
+      .then((result) => { setBackupDirs(result.suggestions); setBackupDirDraft('') })
+      .catch(() => { setBackupDirs([]) })
+  }, [])
+
+  /** 把选择落到服务端（写进设置，重启后仍然用它）。 */
+  const commitBackupDir = (dir: string): void => {
+    if (dir.trim() === '') return
+    void setBackupDir(`${dir.trim()}\\LINGHAN-Studio-backup`)
+      .then(() => { setBackupNote(`备份将放在 ${dir.trim()}\\LINGHAN-Studio-backup`) })
+      .catch((problem: unknown) => { setBackupNote(problem instanceof Error ? problem.message : '这个目录用不了') })
+  }
 
   const mismatch = password !== '' && repeat !== '' && password !== repeat
 
@@ -118,6 +137,42 @@ export function SetupPage({ session, onDone }: SetupPageProps) {
               所以整个文件夹拷走就是搬家；想放到别处就设环境变量 <code>STUDIO_DATA_DIR</code>。
             </p>
             <p className="muted">当前版本 {session.version ?? '未知'}。</p>
+
+            {/* 备份放哪：**这一步值得单独问**。画布与素材只在这台机器上（服务器不存），
+                而备份放在同一个硬盘上，硬盘坏了备份也跟着坏 —— 那这个功能就白做了。 */}
+            <h2 style={{ marginTop: 18 }}>备份放哪</h2>
+            <p className="muted">
+              每天会自动备份一次（保留 7 份）。放在同一个硬盘上，硬盘坏了备份也没了；
+              放到另一块盘或网盘同步目录，重装系统、换电脑都能找回来。
+            </p>
+            <div className="setup-drivers">
+              {backupDirs.length === 0 ? (
+                <p className="muted">这台机器上没探测到常见的网盘目录（OneDrive / 坚果云 / 百度网盘…）。用默认位置就行，之后也能在设置页改。</p>
+              ) : backupDirs.map((dir) => (
+                <button
+                  key={dir.label}
+                  type="button"
+                  className={`setup-driver${backupDir === dir.dir ? ' active' : ''}`}
+                  data-testid={`setup-backup-${dir.label}`}
+                  onClick={() => { setBackupDirDraft(dir.dir); commitBackupDir(dir.dir) }}
+                >
+                  <strong>用「{dir.label}」</strong>
+                  <span className="muted">{dir.dir}</span>
+                </button>
+              ))}
+            </div>
+            <label>
+              或者自己填一个目录（留空 = 用安装目录下的 backups/）
+              <input
+                value={backupDir}
+                data-testid="setup-backup-dir"
+                onChange={(event) => { setBackupDirDraft(event.target.value) }}
+                onBlur={(event) => { commitBackupDir(event.target.value) }}
+                placeholder="例如 D:\\backup\\studio"
+              />
+            </label>
+            {backupNote === '' ? null : <p className="muted" data-testid="setup-backup-note">{backupNote}</p>}
+
             <div className="setup-actions">
               <button type="button" className="primary" data-testid="setup-next" onClick={() => { setStep(1) }}>下一步</button>
             </div>

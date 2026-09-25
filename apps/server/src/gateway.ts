@@ -626,6 +626,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
       // 驱动把地址存成了自己的变量，所以这里要主动同步一次；其余读 config 的地方
       // 因为配置对象是就地改的，本来就立刻生效。
       comfyui.setBase(config.comfyuiUrl)
+      // 远端实例（用户自己租的云工坊）要带鉴权：改完设置立刻生效。
+      comfyui.setAuth(config.comfyuiAuth)
     },
     async abortRender(comfyPromptId) {
       // 只有本地 ComfyUI 能真的被中止；云端 API 一旦提交就只能等它回来，

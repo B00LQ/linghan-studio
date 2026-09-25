@@ -27,8 +27,15 @@ export interface StudioConfig {
   dataDir: string
   /** Image backend the gateway dispatches to. */
   imageDriver: 'stub' | 'comfyui' | 'ark'
-  /** ComfyUI base URL, used by the `comfyui` driver. */
+  /** ComfyUI base URL, used by the `comfyui` driver. 远端实例（用户自己租的云工坊）也填这儿。 */
   comfyuiUrl: string
+  /**
+   * 远端 ComfyUI 的鉴权头（Authorization: Bearer xxx / X-API-Key: xxx）。
+   *
+   * 本机实例留空；用户自己租的云实例通常挂在反向代理后面，需要它。
+   * 「凭据只存本机」是定稿方案的一条：这个值不进服务器，也不下发到任何地方。
+   */
+  comfyuiAuth: string
   /** Volcengine Ark API key, used by the `ark` driver. */
   arkApiKey: string
   /** Volcengine Ark base URL. */
@@ -90,6 +97,14 @@ export const SETTINGS: SettingSpec[] = [
     group: 'image',
     hint: '容器里要用 host.docker.internal 指向宿主机；本机直跑就用 127.0.0.1',
     placeholder: 'http://host.docker.internal:8188',
+  },
+  {
+    key: 'COMFYUI_AUTH',
+    label: '远端 ComfyUI 鉴权',
+    group: 'image',
+    secret: true,
+    hint: '只在用自己租的云实例时填；形如 Authorization: Bearer xxx（本机留空）',
+    placeholder: 'Authorization: Bearer …',
   },
   { key: 'ARK_API_KEY', label: '方舟 Key', group: 'image', secret: true, hint: '只有图像后端选 ark 时才用得到' },
   { key: 'ARK_MODEL', label: '方舟模型', group: 'image', placeholder: 'doubao-seedream-4-0-250828' },
@@ -172,6 +187,7 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
     dataDir: resolve(dataDir !== '' ? dataDir : join(homedir(), '.studio')),
     imageDriver: driver === 'comfyui' || driver === 'ark' ? driver : 'stub',
     comfyuiUrl: pick('COMFYUI_URL') || 'http://127.0.0.1:8188',
+    comfyuiAuth: pick('COMFYUI_AUTH'),
     arkApiKey: pick('ARK_API_KEY'),
     arkBaseUrl: pick('ARK_BASE_URL') || 'https://ark.cn-beijing.volces.com/api/v3',
     arkModel: pick('ARK_MODEL') || 'doubao-seedream-4-0-250828',

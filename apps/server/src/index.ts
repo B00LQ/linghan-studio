@@ -23,6 +23,7 @@ import { createJobRegistry } from './jobs.ts'
 import { createTextBackend } from './text.ts'
 import { createAudioBackend } from './audio.ts'
 import { createAccounts, createConsoleMailer, createWebhookMailer } from './accounts.ts'
+import { applyPendingRestore, createBackups } from './backup.ts'
 import { applyGeneration, applyOps, applyText, inboundAssetUrl, readDocument, writeDocument } from './ops.ts'
 import { openStore } from './store.ts'
 import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, resetWorkflow, saveWorkflow, summarize, updateWorkflow, type StudioWorkflow, type WorkflowBinding, type WorkflowNode } from './workflow-library.ts'
@@ -54,6 +55,12 @@ const MIME: Record<string, string> = {
  * 否则改一次设置就把所有人踢下线。
  */
 const baseConfig = loadConfig()
+/** 这次启动是不是「刚从备份恢复」——界面要为此说一句话。 */
+let restoredFromBackup = false
+// **必须在打开数据库之前**应用「待恢复」的快照（见 backup.ts 的说明）。
+if (applyPendingRestore(baseConfig.dataDir, (message) => { console.log(`[studio] ${message}`) })) {
+  restoredFromBackup = true
+}
 const store = openStore(baseConfig.dataDir)
 /** 设置页写下来的覆盖值；改一次就重新读一遍（后端每次调用都会重新解析配置）。 */
 let settings = store.getSettings()
@@ -86,6 +93,27 @@ const accounts = createAccounts({
     : createWebhookMailer(config.mailWebhookUrl, (message) => { console.log(`[studio] ${message}`) }),
   log: (message) => { console.log(`[studio] ${message}`) },
 })
+/**
+ * 本地备份（M2 的保险丝）。
+ *
+ * 备份目录存在设置里（键 `STUDIO_BACKUP_DIR`，和别的设置同一套三层取值），
+ * 换位置立刻生效。**启动时如果距上次超过 20 小时就自动做一次**，
+ * 之后每 6 小时检查一次 —— 用户不需要记得点任何按钮。
+ */
+const backups = createBackups({ dataDir: config.dataDir, log: (message) => { console.log(`[studio] ${message}`) } })
+if ((settings.STUDIO_BACKUP_DIR ?? '') !== '') backups.setDir(settings.STUDIO_BACKUP_DIR as string)
+const runDailyBackup = (): void => {
+  // 只备份「自己管自己数据」的那种部署：cloud 模式下这个进程没有画布与素材。
+  if (config.mode !== 'local') return
+  if (!backups.dueForDaily()) return
+  const result = backups.run('每天自动')
+  if (typeof result === 'string') console.log(`[studio] 自动备份失败：${result}`)
+}
+if (config.mode === 'local') {
+  setTimeout(runDailyBackup, 8_000)
+  setInterval(runDailyBackup, 6 * 60 * 60 * 1000)
+}
+
 const bridge = createBridge((message) => { console.log(`[studio] ${message}`) })
 const gateway = createGateway({
   config,
@@ -1764,6 +1792,114 @@ const server = createServer((req, res) => {
           return
         }
         json(res, 200, { ok: true })
+        return
+      }
+
+      // 备份：看状态 / 改位置 / 现在做一次 / 从某一份恢复（重启后生效）。
+      if (pathname === '/api/backup' && method === 'GET') {
+        json(res, 200, { ...backups.status(), restoredFromBackup })
+        return
+      }
+      if (pathname === '/api/backup' && method === 'POST') {
+        const result = backups.run('手动')
+        json(res, typeof result === 'string' ? 500 : 200, typeof result === 'string' ? { error: result } : { point: result, status: backups.status() })
+        return
+      }
+      if (pathname === '/api/backup/config' && method === 'PUT') {
+        const body = parseJson(await readText(req))
+        const dir = typeof body.dir === 'string' ? body.dir.trim() : ''
+        if (dir === '') {
+          json(res, 400, { error: '备份目录不能为空' })
+          return
+        }
+        try {
+          backups.setDir(dir)
+        } catch (error) {
+          json(res, 400, { error: error instanceof Error ? error.message : '这个目录用不了' })
+          return
+        }
+        // 存进设置，重启后仍然用它。
+        store.setSetting('STUDIO_BACKUP_DIR', dir)
+        applySettings()
+        json(res, 200, { status: backups.status() })
+        return
+      }
+      if (pathname === '/api/backup/restore' && method === 'POST') {
+        const body = parseJson(await readText(req))
+        const id = typeof body.id === 'string' ? body.id : ''
+        const result = backups.requestRestore(id)
+        if (result !== true) {
+          json(res, 400, { error: result })
+          return
+        }
+        json(res, 200, {
+          ok: true,
+          note: '已经准备好了：重启 Studio 之后就是这份备份里的数据（重启前当前状态也自动备份了一份）',
+          status: backups.status(),
+        })
+        return
+      }
+
+      /**
+       * 导出画布包：一个 zip，里面有画布文档 + 它用到的素材 + 用到的内置工作流。
+       *
+       * 「东西只在本机」这个决定之下，**换电脑靠它**：导出 → 拷到新机器 → 导入。
+       * 素材按内容寻址去重，所以包里同一张图只会出现一次。
+       */
+      const exportMatch = /^\/api\/canvases\/([^/]+)\/export$/u.exec(canvasPath)
+      if (exportMatch !== null && method === 'GET') {
+        const canvasId = decodeURIComponent(exportMatch[1] as string)
+        const canvas = store.getCanvas(canvasId)
+        if (canvas === undefined) {
+          json(res, 404, { error: '画布不存在' })
+          return
+        }
+        const doc = readDocument(store, canvasId)
+        const used = new Set<string>()
+        for (const node of doc.nodes) {
+          const url = (node.data as { url?: unknown } | undefined)?.url
+          if (typeof url !== 'string') continue
+          const match = /\/api\/assets\/([^/]+)/u.exec(url)
+          if (match !== null) used.add(match[1] as string)
+        }
+        const entries: ZipEntry[] = [{
+          name: 'canvas.json',
+          bytes: Buffer.from(JSON.stringify({
+            format: 'linghan-canvas',
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            name: canvas.name,
+            doc: JSON.parse(JSON.stringify(doc)) as unknown,
+          }, null, 2), 'utf8'),
+        }]
+        let missing = 0
+        for (const assetId of used) {
+          const asset = store.getAsset(assetId)
+          if (asset === undefined) continue
+          try {
+            entries.push({ name: `assets/${assetId}${extOf(asset.relPath)}`, bytes: await readFile(store.assetPath(asset)) })
+          } catch {
+            missing += 1
+          }
+        }
+        // 用到的内置工作流一起带上：换台机器如果没有这套工作流，画布是跑不起来的。
+        const workflowIds = new Set<string>()
+        for (const node of doc.nodes) {
+          const id = (node.data as { workflow?: unknown } | undefined)?.workflow
+          if (typeof id === 'string' && id !== '') workflowIds.add(id)
+        }
+        for (const workflow of workflowList()) {
+          if (!workflowIds.has(workflow.id) || isBuiltIn(workflow.id)) continue
+          entries.push({ name: `workflows/${workflow.id}.json`, bytes: Buffer.from(JSON.stringify(workflow, null, 2), 'utf8') })
+        }
+        const archive = makeZip(entries)
+        console.log(`[studio] 导出画布包：${canvas.name}（${String(entries.length)} 个文件，${String(missing)} 个素材读不到）`)
+        res.writeHead(200, {
+          'content-type': 'application/zip',
+          'content-length': String(archive.length),
+          'content-disposition': `attachment; filename="linghan-canvas-${String(Date.now())}.zip"`,
+        })
+        res.end(archive)
         return
       }
 

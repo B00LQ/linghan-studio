@@ -161,6 +161,8 @@ export interface ComfyUiOptions {
   baseUrl: string
   /** Override for the template directory (tests). */
   templateDir?: string
+  /** 远端实例的鉴权头（`Authorization: Bearer …`）；本机留空。 */
+  authHeader?: string
   /** Diagnostics sink. */
   log: (message: string) => void
   /** Progress sink; omitted in tests and scripts that do not care. */
@@ -232,6 +234,13 @@ export interface ComfyUiDriver {
    * @param baseUrl - the new base URL.
    */
   setBase: (baseUrl: string) => void
+  /**
+   * 换一个鉴权头（远端实例用）。
+   *
+   * 与 `setBase` 一样是**就地改**：设置页改完立刻生效，不用重启。
+   * @param header - 一整行 `Authorization: Bearer xxx`；空串表示不带鉴权。
+   */
+  setAuth: (header: string) => void
 }
 
 /** Fetch with a hard timeout, so a hung ComfyUI cannot pin a request forever. */
@@ -317,6 +326,13 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
   // **可变**：设置页改完地址要立刻生效，不必重启容器。所有用到 base 的地方都读这个
   // 变量本身，所以 setBase 之后下一次请求就走新地址。
   let base = options.baseUrl.replace(/\/+$/u, '')
+  /**
+   * 远端实例的鉴权头（形如 `Authorization: Bearer xxx`）。
+   *
+   * 本机 ComfyUI 不需要它；用户自己租的云实例通常挂在反向代理后面，需要。
+   * 设置页里是一个字段（`COMFYUI_AUTH`），改完立刻生效。
+   */
+  let authHeader = options.authHeader ?? ''
   const directory = options.templateDir ?? TEMPLATE_DIR
   let cached: StudioWorkflow | undefined
 
@@ -463,7 +479,7 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
 
     const submit = await fetchWithTimeout(`${base}/prompt`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: withAuth({ 'content-type': 'application/json' }),
       body: JSON.stringify({ prompt: graph, client_id: clientId }),
     }, 30_000)
     const queued = (await submit.json()) as { prompt_id?: string; error?: unknown; node_errors?: unknown }
@@ -539,10 +555,24 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
 
   /** Node catalogue, cached briefly: the upload form may ask several times in a row. */
   let catalog: { at: number; value: Record<string, { input?: { required?: Record<string, unknown[]> } }> } | null = null
+
+  /**
+   * 给发往 ComfyUI 的请求加上鉴权头（远端实例用）。
+   *
+   * 用户填的是一整行 `Authorization: Bearer xxx`（也可能是 `X-API-Key: xxx`），
+   * 这样不用猜是哪家的鉴权方案；填错了「测一下」会直接报出来。
+   */
+  const withAuth = (headers: Record<string, string>): Record<string, string> => {
+    const text = authHeader.trim()
+    const separator = text.indexOf(':')
+    if (text === '' || separator <= 0) return headers
+    return { ...headers, [text.slice(0, separator).trim()]: text.slice(separator + 1).trim() }
+  }
+
   const objectInfo = async (): Promise<Record<string, { input?: { required?: Record<string, unknown[]> } }> | null> => {
     if (catalog !== null && Date.now() - catalog.at < 30_000) return catalog.value
     try {
-      const response = await fetchWithTimeout(`${base}/object_info`, {}, 60_000)
+      const response = await fetchWithTimeout(`${base}/object_info`, { headers: withAuth({}) }, 60_000)
       if (!response.ok) return null
       const value = (await response.json()) as Record<string, { input?: { required?: Record<string, unknown[]> } }>
       catalog = { at: Date.now(), value }
@@ -556,6 +586,13 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     selfCheck,
     capabilities: { progress: 'steps' },
     objectInfo,
+    setAuth(header) {
+      authHeader = header ?? ''
+      // 换了实例/凭据，按旧实例探出来的目录与模板缓存都不算数了。
+      catalog = null
+      cached = undefined
+      options.log(`comfyui: 鉴权头已${authHeader === '' ? '清空' : '更新'}`)
+    },
     setBase(baseUrl) {
       base = baseUrl.replace(/\/+$/u, '')
       catalog = null
@@ -601,7 +638,7 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
       try {
         const removed = await fetchWithTimeout(`${base}/queue`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: withAuth({ 'content-type': 'application/json' }),
           body: JSON.stringify({ delete: [comfyPromptId] }),
         }, 10_000)
         if (removed.ok) {

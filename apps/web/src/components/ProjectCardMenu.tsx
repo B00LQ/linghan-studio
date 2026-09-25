@@ -6,7 +6,7 @@
  * how "where do I rename this?" becomes a hunt.
  */
 import { Menu, MenuItem } from './Menu.tsx'
-import type { FolderInfo, CanvasInfo } from '../api.ts'
+import { canvasExportUrl, type FolderInfo, type CanvasInfo } from '../api.ts'
 
 /** Props for {@link ProjectCardMenu}. */
 export interface ProjectCardMenuProps {
@@ -47,6 +47,9 @@ export function ProjectCardMenu(props: ProjectCardMenuProps) {
           <MenuItem onClick={() => { close(); onRename() }}>重命名</MenuItem>
           <MenuItem onClick={() => { close(); onCover() }}>修改封面</MenuItem>
           <MenuItem onClick={() => { close(); onDuplicate() }}>创建副本</MenuItem>
+          {/* 导出画布包：**画布与素材只在本机**，所以换电脑/长期归档靠它 ——
+              一个 zip，里面有画布文档 + 用到的素材 + 用到的上传工作流。 */}
+          <MenuItem onClick={() => { close(); window.location.href = canvasExportUrl(project.id) }}>导出画布包（换电脑用）</MenuItem>
           <div className="menu-sep" />
           {folders.length === 0
             ? <p className="note">还没有文件夹，先去「项目」页新建一个</p>

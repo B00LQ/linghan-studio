@@ -448,6 +448,46 @@ export interface UpdateState {
 /** 问更新源有没有新版（只读，不改磁盘）。 */
 export const fetchUpdate = (): Promise<UpdateState> => request('/api/update')
 
+/** 一个备份点。 */
+export interface BackupPoint {
+  id: string
+  createdAt: string
+  bytes: number
+  reason: string
+}
+
+/** 备份状态（设置页的「数据安全」一节用）。 */
+export interface BackupState {
+  dir: string
+  keep: number
+  lastAt: string
+  lastError: string
+  points: BackupPoint[]
+  mirrorFiles: number
+  mirrorBytes: number
+  pendingRestore: string
+  suggestions: { label: string; dir: string }[]
+  /** 这次启动是不是刚从备份恢复的（界面要说一句）。 */
+  restoredFromBackup?: boolean
+}
+
+/** 读备份状态。 */
+export const fetchBackup = (): Promise<BackupState> => request('/api/backup')
+
+/** 现在做一次备份。 */
+export const runBackup = (): Promise<{ point: BackupPoint; status: BackupState }> => request('/api/backup', { method: 'POST' })
+
+/** 换备份目录（可以指到另一块盘或网盘同步目录）。 */
+export const setBackupDir = (dir: string): Promise<{ status: BackupState }> =>
+  request('/api/backup/config', { method: 'PUT', body: JSON.stringify({ dir }) })
+
+/** 从某个备份点恢复。**重启后生效**（恢复前会自动把当前状态也备份一份）。 */
+export const restoreBackup = (id: string): Promise<{ ok: boolean; note: string; status: BackupState }> =>
+  request('/api/backup/restore', { method: 'POST', body: JSON.stringify({ id }) })
+
+/** 导出某张画布的画布包（画布文档 + 用到的素材 + 工作流），用于换电脑与归档。 */
+export const canvasExportUrl = (canvasId: string): string => `/api/canvases/${encodeURIComponent(canvasId)}/export`
+
 /** 装最新版。装完要重启才生效 —— 正在跑的进程替换不了自己。 */
 export const applyUpdate = (): Promise<{ ok: boolean; version: string; files: number; bytes: number; note: string }> =>
   request('/api/update/apply', { method: 'POST' })
