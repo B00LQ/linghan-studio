@@ -601,7 +601,7 @@ function accountPage(consoleMail: boolean): string {
   $('reg-submit').addEventListener('click', async () => {
     say('reg-note', '正在注册…');
     const { ok, body } = await api('/register', { method: 'POST', body: JSON.stringify({
-      email: $('reg-email').value, password: $('reg-password').value, displayName: $('reg-name').value,
+      email: $('reg-email').value, password: $('reg-password').value, displayName: $('reg-name').value, label: '浏览器',
     }) });
     if (!ok) { say('reg-note', body.error || '注册失败', true); return; }
     say('reg-note', '注册成功。');
@@ -788,7 +788,8 @@ const server = createServer((req, res) => {
           const tokens = (await accounts.login({
             email: result.user.email,
             password: typeof body.password === 'string' ? body.password : '',
-            label: req.headers['user-agent']?.slice(0, 60) ?? '',
+            // 设备名：客户端能报就报，报不了才退到 User-Agent（那一长串没人看得懂）。
+            label: typeof body.label === 'string' && body.label !== '' ? body.label : (req.headers['user-agent']?.slice(0, 60) ?? ''),
           }))
           if ('message' in tokens) {
             json(res, 200, { user: publicUser(result.user), verificationSent: true })

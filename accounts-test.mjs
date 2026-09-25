@@ -123,11 +123,14 @@ const run = async () => {
 
   const email = `owner-${String(Date.now()).slice(-6)}@example.com`
   const password = 'correct-horse-battery'
-  const registered = await call('/api/v1/auth/register', { method: 'POST', body: JSON.stringify({ email, password, displayName: '提出者' }) })
+  const registered = await call('/api/v1/auth/register', { method: 'POST', body: JSON.stringify({ email, password, displayName: '提出者', label: '验收浏览器' }) })
   check('注册成功', registered.status === 200 && registered.json.user?.email === email, JSON.stringify(registered.json).slice(0, 160))
   check('第一个账号是管理员（服务器刚搭起来总得有人能进后台）', registered.json.user?.role === 'admin', String(registered.json.user?.role))
   check('邮箱还没验证', registered.json.user?.emailVerified === false)
   check('注册时就把会话给了（不用再登一次）', typeof registered.json.tokens?.accessToken === 'string' && typeof registered.json.tokens?.refreshToken === 'string')
+  check('注册也能带上设备名（不然设备列表里是一长串 User-Agent）',
+    ((await call('/api/v1/auth/sessions', { headers: bearer(registered.json.tokens.accessToken) })).json.sessions ?? [])[0]?.label === '验收浏览器',
+    JSON.stringify(((await call('/api/v1/auth/sessions', { headers: bearer(registered.json.tokens.accessToken) })).json.sessions ?? [])[0] ?? {}))
   check('网页端也拿到了 cookie', registered.cookies.some((item) => item.startsWith('studio_user=')), registered.cookies.join(' | '))
 
   const duplicate = await call('/api/v1/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) })
