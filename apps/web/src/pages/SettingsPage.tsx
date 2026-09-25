@@ -13,8 +13,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   applyUpdate, fetchBackup, fetchSettings, fetchUpdate, listWorkflows, restoreBackup, runBackup, saveSettings,
-  setBackupDir, testBackend,
-  type BackendTest, type BackupState, type SettingField, type SettingsState, type UpdateState, type WorkflowInfo,
+  fetchCloudLink, setBackupDir, startCloudLogin, testBackend, unbindCloud,
+  type BackendTest, type BackupState, type CloudLinkState, type SettingField, type SettingsState, type UpdateState, type WorkflowInfo,
 } from '../api.ts'
 
 /** 每组字段的标题。 */
@@ -23,6 +23,7 @@ const GROUP_TITLE: Record<SettingField['group'], string> = {
   text: '文本 · 文本节点用它写',
   audio: '语音 · 音频节点用它念',
   update: '更新源 · 绿色包自助更新用',
+  account: '账号 · 只用来发布作品',
 }
 
 /** 有「测一下」的分组（更新源不是后端，没什么可探的）。 */
@@ -67,6 +68,10 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
   const [backupDirDraft, setBackupDirDraft] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
   const [backupNote, setBackupNote] = useState('')
+  /** 账号绑定状态（只用来发布作品）。 */
+  const [link, setLink] = useState<CloudLinkState | null>(null)
+  const [linkBusy, setLinkBusy] = useState(false)
+  const [linkNote, setLinkNote] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -75,6 +80,8 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '读设置失败')
     }
+    // 账号绑定：不绑定也能用，但绑了才谈得上发布。
+    void fetchCloudLink().then(setLink).catch(() => { setLink(null) })
     // 备份状态：这一页要显示「上次什么时候备的、备到哪」，失败也要看得见。
     void fetchBackup()
       .then((result) => { setBackup(result); setBackupDirDraft(result.dir) })
@@ -220,6 +227,64 @@ export function SettingsPage({ refreshToken }: SettingsPageProps) {
             </button>
             {message === '' ? null : <span className="setting-message" data-testid="settings-message">{message}</span>}
           </div>
+
+          <section className="settings-group" data-testid="settings-account">
+            <header>
+              <h2>账号 · 只用来发布作品</h2>
+              {link === null || !link.bound ? null : (
+                <button type="button" className="link" data-testid="cloud-unbind" onClick={() => {
+                  void unbindCloud().then(() => { setLinkNote('已解绑（云端那边的设备列表里仍可单独撤销）'); void fetchCloudLink().then(setLink) })
+                }}>解绑</button>
+              )}
+            </header>
+            {/* 这一节要反复说清一件事：**不绑定账号也能用**。画布、算力、备份都在本机，
+                账号只为一件事 —— 把作品发布到服务器上给人看。 */}
+            <p className="muted">
+              画布、算力、备份都在你自己的机器上，不绑定账号照样能用。
+              绑定只有一个用处：把作品发布到服务器（主页）给别人看。
+            </p>
+            {link === null ? <p className="muted">正在读绑定状态…</p> : link.bound ? (
+              <p className="setting-test is-ok">
+                ✓ 已绑定 {link.email === '' ? '（暂时读不到邮箱，可能连不上服务器）' : link.email}
+                {link.reachable ? '' : ' · 现在连不上服务器，发布时会再试'}
+              </p>
+            ) : (
+              <div className="settings-actions">
+                <button
+                  type="button" className="primary" data-testid="cloud-bind" disabled={linkBusy}
+                  onClick={() => {
+                    setLinkBusy(true)
+                    setLinkNote('正在打开浏览器…')
+                    void startCloudLogin()
+                      .then((result) => {
+                        // 授权页在浏览器里，回跳会打到本机服务上（本机服务再用码换令牌）。
+                        window.open(result.url, '_blank', 'noopener')
+                        setLinkNote('浏览器里登录并点「授权这台电脑」，这里会自动变成已绑定')
+                        // 授权完成后本机服务已经存下令牌，轮询一下就行（不用刷新页面）。
+                        let tries = 0
+                        const timer = window.setInterval(() => {
+                          tries += 1
+                          void fetchCloudLink().then((state) => {
+                            if (state.bound || tries > 60) {
+                              window.clearInterval(timer)
+                              setLink(state)
+                              setLinkNote(state.bound ? '绑定成功' : '还没完成授权，再点一次「绑定账号」试试')
+                              setLinkBusy(false)
+                            }
+                          })
+                        }, 2000)
+                      })
+                      .catch((problem: unknown) => {
+                        setLinkNote(problem instanceof Error ? problem.message : '打不开授权页')
+                        setLinkBusy(false)
+                      })
+                  }}
+                >绑定账号</button>
+                <span className="muted">会用浏览器打开授权页：密码只填在浏览器里，不经过 Studio。</span>
+              </div>
+            )}
+            {linkNote === '' ? null : <p className="setting-test" data-testid="cloud-note">{linkNote}</p>}
+          </section>
 
           <section className="settings-group" data-testid="settings-backup">
             <header>

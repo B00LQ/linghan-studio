@@ -46,6 +46,8 @@ export interface StudioConfig {
   cookieSecret: string
   /** 更新源清单地址（绿色包自助更新用）；空串 = 没有更新源。 */
   updateUrl: string
+  /** 云服务地址（服务器端）；本地模式拿它做「绑定账号」与发布作品。空串 = 没配。 */
+  cloudUrl: string
   /** 对外可访问的地址，用于邮件里的验证/重置链接；空串时按 `http://127.0.0.1:<port>` 推。 */
   publicUrl: string
   /**
@@ -73,7 +75,7 @@ export interface SettingSpec {
   /** 界面上那一行写什么。 */
   label: string
   /** 归在哪个分组下。 */
-  group: 'image' | 'text' | 'audio' | 'update'
+  group: 'image' | 'text' | 'audio' | 'update' | 'account'
   /** 机密：读回来时打码，界面上也不回显。 */
   secret?: boolean
   /** 一句说明/取值提示。 */
@@ -122,6 +124,13 @@ export const SETTINGS: SettingSpec[] = [
   { key: 'STUDIO_AUDIO_BASE_URL', label: '语音接口地址', group: 'audio', placeholder: 'https://api.openai.com/v1' },
   { key: 'STUDIO_AUDIO_MODEL', label: '语音模型名', group: 'audio', placeholder: 'gpt-4o-mini-tts' },
   { key: 'STUDIO_AUDIO_VOICE', label: '音色', group: 'audio', placeholder: 'alloy' },
+  {
+    key: 'STUDIO_CLOUD_URL',
+    label: '云服务地址',
+    group: 'account',
+    hint: '服务器端那一份的地址（用来绑定账号、发布作品）；只在你想发布作品时才需要',
+    placeholder: 'https://studio.example.com',
+  },
   {
     key: 'STUDIO_UPDATE_URL',
     label: '更新源',
@@ -196,6 +205,7 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
     // **重解析时要沿用旧的那个**：否则改一次设置就把所有人踢下线。
     cookieSecret: pick('STUDIO_SECRET') || previous?.cookieSecret || randomBytes(32).toString('base64url'),
     updateUrl: pick('STUDIO_UPDATE_URL'),
+    cloudUrl: pick('STUDIO_CLOUD_URL'),
     publicUrl: pick('STUDIO_PUBLIC_URL'),
     mailWebhookUrl: pick('STUDIO_MAIL_WEBHOOK'),
   }

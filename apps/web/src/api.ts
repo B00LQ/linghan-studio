@@ -488,6 +488,30 @@ export const restoreBackup = (id: string): Promise<{ ok: boolean; note: string; 
 /** 导出某张画布的画布包（画布文档 + 用到的素材 + 工作流），用于换电脑与归档。 */
 export const canvasExportUrl = (canvasId: string): string => `/api/canvases/${encodeURIComponent(canvasId)}/export`
 
+/** 账号绑定状态（本地模式用它发布作品）。 */
+export interface CloudLinkState {
+  cloudUrl: string
+  bound: boolean
+  email: string
+  role: string
+  /** 云服务现在连得上吗（绑过但连不上时界面要说明）。 */
+  reachable: boolean
+}
+
+/** 读绑定状态。 */
+export const fetchCloudLink = (): Promise<CloudLinkState> => request('/api/cloud')
+
+/**
+ * 开始绑定：拿到一个要用户在浏览器里打开的地址。
+ *
+ * 走的是「浏览器回跳」：用户在那边的页面登录并授权，浏览器把一次性码回跳给本机服务，
+ * **密码不经过这个应用**。
+ */
+export const startCloudLogin = (): Promise<{ url: string }> => request('/api/cloud/login', { method: 'POST' })
+
+/** 解绑（云端那边的会话仍然可以在「登录过的设备」里单独撤销）。 */
+export const unbindCloud = (): Promise<{ ok: boolean }> => request('/api/cloud/logout', { method: 'POST' })
+
 /** 装最新版。装完要重启才生效 —— 正在跑的进程替换不了自己。 */
 export const applyUpdate = (): Promise<{ ok: boolean; version: string; files: number; bytes: number; note: string }> =>
   request('/api/update/apply', { method: 'POST' })
@@ -509,7 +533,7 @@ export interface SettingField {
   /** 环境变量名，也是提交时的键。 */
   key: string
   label: string
-  group: 'image' | 'text' | 'audio' | 'update'
+  group: 'image' | 'text' | 'audio' | 'update' | 'account'
   secret?: boolean
   hint?: string
   placeholder?: string

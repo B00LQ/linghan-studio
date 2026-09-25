@@ -174,6 +174,21 @@ export interface Accounts {
    * 而且只返回**当前登录用户自己邮箱**的那几封。真实部署配了 webhook 之后这个接口自动消失。
    */
   devMails: (email: string) => { subject: string; text: string; at: string }[]
+  /**
+   * 发一个「桌面端登录」的一次性授权码（浏览器里已登录的人点「授权这台电脑」时调用）。
+   * @param userId - 授权给谁。
+   * @returns 明文码（只出现这一次）。
+   */
+  issueDesktopCode: (userId: string) => string
+  /**
+   * 用授权码换令牌（**本地服务端**拿着码来换，不经过浏览器）。
+   *
+   * 这是「浏览器回跳登录」的另一半：用户在浏览器里登录并点授权，
+   * 浏览器把码回跳给本机服务，本机服务再用码换长期令牌。
+   * 好处是**密码永远不经过桌面应用**，而且码是一次性的、几分钟就过期。
+   * @param code - 明文授权码。
+   */
+  claimDesktopCode: (code: string) => Promise<{ user: StudioUser; tokens: SessionTokens } | AccountFailure>
 }
 
 /** 校验邮箱形状与密码强度，返回一句人话或 undefined。 */
@@ -370,6 +385,31 @@ export function createAccounts(deps: AccountDeps): Accounts {
 
     devMails(email) {
       return recentMails.get(email.trim().toLowerCase()) ?? []
+    },
+
+    issueDesktopCode(userId) {
+      const { token, hash } = newToken()
+      store.createAuthToken({
+        userId,
+        kind: 'desktop_login',
+        tokenHash: hash,
+        // 5 分钟：够用户点完「授权」，又不至于长期有效被人捡走。
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      })
+      return token
+    },
+
+    async claimDesktopCode(code) {
+      const found = store.findAuthToken('desktop_login', hashToken(code), new Date().toISOString())
+      if (found === undefined) return { status: 400, message: '这个授权码无效或已经用过了' }
+      const user = store.getUserById(found.userId)
+      if (user === undefined || user.status === 'banned') return { status: 400, message: '这个授权码无效或已经用过了' }
+      // 一次性：先作废，再发令牌（中间失败也不会留下可复用的码）。
+      store.consumeAuthToken(found.id, new Date().toISOString())
+      store.touchUserLogin(user.id)
+      const tokens = openSession(user, '桌面端')
+      log(`[accounts] 桌面端登录授权：${user.email}`)
+      return { user, tokens }
     },
   }
 }

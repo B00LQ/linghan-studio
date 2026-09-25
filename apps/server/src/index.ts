@@ -7,6 +7,7 @@
  * self-hosted deployment holds provider credentials server-side.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -113,6 +114,9 @@ if (config.mode === 'local') {
   setTimeout(runDailyBackup, 8_000)
   setInterval(runDailyBackup, 6 * 60 * 60 * 1000)
 }
+
+/** 正在进行的「绑定账号」流程的 state（一次一个，够用）。 */
+let pendingCloudState = ''
 
 const bridge = createBridge((message) => { console.log(`[studio] ${message}`) })
 const gateway = createGateway({
@@ -471,6 +475,87 @@ function htmlPage(title: string, body: string): string {
 }
 
 /**
+ * 「授权这台电脑」页（浏览器回跳登录的那一半）。
+ *
+ * 流程：桌面端打开这一页 → 用户在这里登录（如果还没登录）→ 点「授权」→
+ * 页面拿一次性码 → 回跳给本机服务（`http://127.0.0.1:<端口>/api/cloud/callback`）。
+ * **密码不经过桌面应用**，码是一次性的、5 分钟过期。
+ *
+ * `redirect` 只允许本机回环地址：这是防止有人拿这一页把码骗到自己的服务器上。
+ * @param redirect - 本机服务给的回跳地址。
+ * @param state - 桌面端生成的随机串（回跳时原样带回，用来防串号）。
+ * @returns 完整的 HTML 文本。
+ */
+function desktopAuthPage(redirect: string, state: string): string {
+  const safeRedirect = /^http:\/\/(127\.0\.0\.1|localhost):\d+\//u.test(redirect) ? redirect : ''
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>授权这台电脑 · LINGHAN Studio</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0d12; color: #e8ecf4;
+         font: 14px/1.7 system-ui, "Microsoft YaHei", sans-serif; }
+  .card { width: min(420px, 90vw); padding: 28px; background: #141821; border: 1px solid #263041; border-radius: 14px; }
+  h1 { margin: 0 0 10px; font-size: 18px; }
+  p { margin: 0 0 10px; }
+  .muted { color: #8b97a8; font-size: 13px; }
+  .ok { color: #7ad1a3; } .bad { color: #ff8f8f; }
+  input { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 9px 10px; border-radius: 8px;
+          border: 1px solid #263041; background: #0b0d12; color: #e8ecf4; font-size: 14px; }
+  button { width: 100%; padding: 10px; border: 0; border-radius: 8px; background: #7aa2ff; color: #0b0d12;
+           font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: 8px; }
+  button.ghost { background: transparent; color: #8b97a8; border: 1px solid #263041; font-weight: 400; }
+</style></head>
+<body><div class="card">
+  <h1>授权这台电脑</h1>
+  <p class="muted">桌面端要用你的账号发布作品。授权之后，桌面端拿到的是**可以随时撤销**的登录凭据，密码不会经过它。</p>
+  <div id="login" style="display:none">
+    <label class="muted">邮箱</label><input id="email" type="email" autocomplete="email" />
+    <label class="muted">密码</label><input id="password" type="password" autocomplete="current-password" />
+    <button id="signin">登录并继续</button>
+  </div>
+  <div id="grant" style="display:none">
+    <p class="muted">已登录：<span id="who"></span></p>
+    <button id="authorize">授权这台电脑</button>
+  </div>
+  <p class="muted" id="note"></p>
+  <script>
+    const redirect = ${JSON.stringify(safeRedirect)};
+    const state = ${JSON.stringify(state)};
+    const $ = (id) => document.getElementById(id);
+    const say = (text, bad) => { $('note').className = bad ? 'bad' : 'muted'; $('note').textContent = text; };
+    const api = async (path, init = {}) => {
+      const response = await fetch('/api/v1/auth' + path, { ...init, headers: { 'content-type': 'application/json', ...(init.headers ?? {}) } });
+      return { ok: response.ok, status: response.status, body: await response.json().catch(() => ({})) };
+    };
+    const show = async () => {
+      const { ok, body } = await api('/me');
+      $('login').style.display = ok ? 'none' : 'block';
+      $('grant').style.display = ok ? 'block' : 'none';
+      if (ok) $('who').textContent = body.user.email;
+      if (!redirect) say('这个授权链接不完整（缺少回跳地址），请回到桌面端点一次「绑定账号」。', true);
+    };
+    $('signin').addEventListener('click', async () => {
+      say('正在登录…');
+      const { ok, body } = await api('/login', { method: 'POST', body: JSON.stringify({ email: $('email').value, password: $('password').value, label: '浏览器（授权桌面端）' }) });
+      if (!ok) { say(body.error || '登录失败', true); return; }
+      say('');
+      await show();
+    });
+    $('authorize').addEventListener('click', async () => {
+      if (!redirect) return;
+      say('正在授权…');
+      const { ok, body } = await api('/desktop/issue', { method: 'POST', body: '{}' });
+      if (!ok) { say(body.error || '授权失败', true); return; }
+      location.href = redirect + '?code=' + encodeURIComponent(body.code) + '&state=' + encodeURIComponent(state);
+    });
+    void show();
+  </script>
+</div></body></html>`
+}
+
+/**
  * 服务器端（cloud 模式）的账号页。
  *
  * 为什么现在就做这一页：**服务器端的东西不该只有懂命令行的人能看见**。
@@ -732,6 +817,15 @@ function requiresSession(pathname: string): boolean {
   // 首启向导要能在**还没有密码的时候**走完 —— 自举是它唯一存在的理由。
   // 它自己会把门关死（配过之后就 403），所以这不是一个常开的洞。
   if (pathname === '/api/setup') return false
+  /**
+   * 「绑定账号」的回跳也要能免登录进来。
+   *
+   * 它是**浏览器从云端跳回来的**那一下：那个浏览器可能没在这个本机服务上登录过
+   * （换个浏览器、或者刚重装）。要求它带本机会话会让绑定在某些情况下莫名其妙失败。
+   * 这个接口自己有三道锁：**只认本机回环来源**、`state` 必须与这次流程对得上、
+   * 授权码一次性且 5 分钟过期。它拿不到任何数据，只能把一次授权落成令牌。
+   */
+  if (pathname === '/api/cloud/callback') return false
   return pathname.startsWith('/api/') || pathname.startsWith('/v1/') || pathname.startsWith('/proxy/')
 }
 
@@ -916,6 +1010,27 @@ const server = createServer((req, res) => {
           return
         }
 
+        // 桌面端登录：① 浏览器里已登录的人点「授权这台电脑」→ 拿一次性码；
+        // ② 浏览器把码回跳给本机服务；③ 本机服务用码换长期令牌（不经过浏览器）。
+        if (route === 'desktop/issue' && method === 'POST') {
+          const user = accounts.me(accessTokenOf())
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          json(res, 200, { code: accounts.issueDesktopCode(user.id), expiresInSeconds: 300 })
+          return
+        }
+        if (route === 'desktop/claim' && method === 'POST') {
+          const result = await accounts.claimDesktopCode(typeof body.code === 'string' ? body.code : '')
+          if ('message' in result) {
+            json(res, result.status, { error: result.message })
+            return
+          }
+          json(res, 200, { user: publicUser(result.user), tokens: result.tokens })
+          return
+        }
+
         if (route === 'dev-mail' && method === 'GET') {
           // 只在「邮件根本没真发出去」时存在（没配 webhook），而且只给当前登录用户自己的那几封。
           if (config.mailWebhookUrl !== '') {
@@ -973,6 +1088,12 @@ const server = createServer((req, res) => {
        */
       if (config.mode === 'cloud' && (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) && pathname !== '/api/health') {
         json(res, 404, { error: '这是服务器端（cloud 模式）：画布、素材与算力都在你自己的桌面端里，不在这台服务器上' })
+        return
+      }
+
+      if (config.mode === 'cloud' && method === 'GET' && pathname === '/desktop-auth') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(desktopAuthPage(url.searchParams.get('redirect') ?? '', url.searchParams.get('state') ?? ''))
         return
       }
 
@@ -1791,6 +1912,107 @@ const server = createServer((req, res) => {
           json(res, 409, { error: '内置工作流不能删除（它是随程序发布的文件）——要改就在原地改，或者点「恢复内置默认」退回去' })
           return
         }
+        json(res, 200, { ok: true })
+        return
+      }
+
+      /**
+       * 绑定账号（本地模式）。
+       *
+       * 桌面端/本机服务**不需要账号也能用**（画布、算力、备份都在本机）；
+       * 账号只为一件事：**发布作品**到服务器。
+       *
+       * 绑定走「浏览器回跳」：本机服务生成 state → 让用户去云端的 `/desktop-auth` 登录并授权 →
+       * 浏览器把一次性码回跳到本机服务的 `/api/cloud/callback` → **本机服务**用码换令牌。
+       * 密码因此永远不经过这个应用；令牌存在本机设置里，随时可以在云端撤销。
+       */
+      if (pathname === '/api/cloud' && method === 'GET') {
+        const token = settings.STUDIO_CLOUD_TOKEN ?? ''
+        let email = ''
+        let role = ''
+        if (token !== '' && config.cloudUrl !== '') {
+          try {
+            const response = await fetch(`${config.cloudUrl.replace(/\/+$/u, '')}/api/v1/auth/me`, {
+              headers: { authorization: `Bearer ${token}` },
+            })
+            if (response.ok) {
+              const body = await response.json() as { user?: { email?: string; role?: string } }
+              email = body.user?.email ?? ''
+              role = body.user?.role ?? ''
+            }
+          } catch {
+            // 连不上云服务不算错：下面的 bound 仍为 true，界面会说明「暂时连不上」。
+          }
+        }
+        json(res, 200, {
+          cloudUrl: config.cloudUrl,
+          bound: token !== '',
+          email,
+          role,
+          reachable: email !== '' || token === '',
+        })
+        return
+      }
+      if (pathname === '/api/cloud/login' && method === 'POST') {
+        if (config.cloudUrl === '') {
+          json(res, 400, { error: '还没填云服务地址：先去设置页的「账号」一节填上服务器地址' })
+          return
+        }
+        const state = randomBytes(16).toString('base64url')
+        pendingCloudState = state
+        const redirect = `http://127.0.0.1:${String(config.port)}/api/cloud/callback`
+        const target = `${config.cloudUrl.replace(/\/+$/u, '')}/desktop-auth?redirect=${encodeURIComponent(redirect)}&state=${encodeURIComponent(state)}`
+        json(res, 200, { url: target, state })
+        return
+      }
+      if (pathname === '/api/cloud/callback' && method === 'GET') {
+        const code = url.searchParams.get('code') ?? ''
+        const state = url.searchParams.get('state') ?? ''
+        const fail = (message: string, status = 400): void => {
+          res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(htmlPage('绑定失败', `<p class="bad">${escapeHtml(message)}</p>`))
+        }
+        // 免登录接口，所以来源必须是本机回环：别人从外面打过来也不该能落令牌。
+        const from = req.socket.remoteAddress ?? ''
+        if (!(from === '127.0.0.1' || from === '::1' || from === '::ffff:127.0.0.1')) {
+          fail('这个回跳只能从本机发起', 403)
+          return
+        }
+        if (pendingCloudState === '' || state !== pendingCloudState) {
+          fail('这次授权对不上号（state 不匹配）。回到桌面端重新点一次「绑定账号」。')
+          return
+        }
+        if (code === '') {
+          fail('没有拿到授权码。回到桌面端重新点一次「绑定账号」。')
+          return
+        }
+        try {
+          const response = await fetch(`${config.cloudUrl.replace(/\/+$/u, '')}/api/v1/auth/desktop/claim`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ code }),
+          })
+          const body = await response.json() as { user?: { email?: string }; tokens?: { accessToken?: string; refreshToken?: string }; error?: string }
+          if (!response.ok || typeof body.tokens?.accessToken !== 'string') {
+            fail(body.error ?? `云端拒绝了这次授权（HTTP ${String(response.status)}）`)
+            return
+          }
+          store.setSetting('STUDIO_CLOUD_TOKEN', body.tokens.accessToken)
+          store.setSetting('STUDIO_CLOUD_REFRESH', body.tokens.refreshToken ?? '')
+          applySettings()
+          pendingCloudState = ''
+          console.log(`[studio] 已绑定账号：${body.user?.email ?? '（未知）'}`)
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(htmlPage('绑定成功', `<p class="ok">已绑定账号 ${escapeHtml(body.user?.email ?? '')}，可以关掉这个页面回到 Studio 了。</p>`))
+        } catch (error) {
+          fail(`连不上云服务：${error instanceof Error ? error.message : String(error)}`, 502)
+        }
+        return
+      }
+      if (pathname === '/api/cloud/logout' && method === 'POST') {
+        store.setSetting('STUDIO_CLOUD_TOKEN', '')
+        store.setSetting('STUDIO_CLOUD_REFRESH', '')
+        applySettings()
         json(res, 200, { ok: true })
         return
       }
