@@ -1602,6 +1602,23 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   font-size: 12px;
 }
 .studio-node.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* 被禁用的节点：整张卡片降饱和 + 半透明，右上角挂「已禁用」。
+   **必须看得出来**：禁用会真的拦住生成（按 ↑ 只会得到一句「被禁用了」），
+   如果卡片长得和平时一样，那个按钮就变成了一个坏掉的按钮。 */
+.studio-node.is-disabled { opacity: 0.55; border-style: dashed; }
+.studio-node.is-disabled .node-disabled-badge {
+  position: absolute;
+  top: -10px;
+  right: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+  z-index: 2;
+}
 .studio-node header {
   display: flex;
   align-items: center;

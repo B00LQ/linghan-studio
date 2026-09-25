@@ -69,6 +69,13 @@ export interface StudioNodeData extends Record<string, unknown> {
   takeNumber?: number
   /** Whether the displayed take is the one marked chosen. */
   chosen?: boolean
+  /**
+   * 这个节点被停用了（右键菜单里切换）。
+   *
+   * 「先别动这个」的用处很具体：试验一条新支路时，旧支路不该跟着一起重跑；
+   * 而它必须**真的拦住生成**（不只是变灰），否则禁用只是个装饰。
+   */
+  disabled?: boolean
 }
 
 /** A Studio canvas node: either a content card or a group frame. */
@@ -271,6 +278,10 @@ function PromptInput({ value, placeholder, onInput, onBegin }: {
 function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
   const { takes, activeNodeId, showTake, rerunTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, workflowLabel, workflowHint, takeDetail, sizeFor, blockedOf, nodeBackend } = useContext(CanvasContext)
   const spec = specOf(data.kind)
+  /** 为什么现在不能生成：禁用了，或者后端/工作流那边有话说。按钮与悬停都用这一句。 */
+  const refusal = data.disabled === true
+    ? '这个节点被禁用了（右键可以启用）'
+    : (spec === undefined ? undefined : blockedOf(spec))
   /**
    * 这一版是几步出的。
    *
@@ -295,7 +306,13 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
   const active = activeNodeId === id
 
   return (
-    <div className={`studio-node ${selected ? 'is-selected' : ''}`} data-kind={data.kind}>
+    <div
+      className={`studio-node ${selected ? 'is-selected' : ''}${data.disabled === true ? ' is-disabled' : ''}`}
+      data-kind={data.kind}
+    >
+      {/* 被禁用的节点：卡片本身变灰，右上角挂一个「已禁用」——
+          否则「为什么点不动」就成了一个要靠右键才能发现的谜。 */}
+      {data.disabled === true ? <span className="node-disabled-badge" data-testid="node-disabled">已禁用</span> : null}
       {/* 图像工具条：贴在卡片上方，**选中这个节点时才出现**。
           它管的是「已经存在的这张画面」，和下方提示词窗口（管怎么再生成一张）
           是两件事，所以不放在同一个窗口里。 */}
@@ -542,8 +559,8 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
             <button
               type="button"
               className="send nodrag"
-              disabled={running || blockedOf(spec) !== undefined}
-              title={blockedOf(spec) ?? '生成'}
+              disabled={running || refusal !== undefined}
+              title={refusal ?? '生成'}
               onClick={() => { generate(id) }}
             >
               {running ? '…' : '↑'}
@@ -718,8 +735,19 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   const [menu, setMenu] = useState<
     | { kind: 'nodes' | 'context'; screenX: number; screenY: number; worldX: number; worldY: number; flipY?: number }
     | { kind: 'fromNode'; screenX: number; screenY: number; worldX: number; worldY: number; sourceNodeId: string; sourceHandleId: string; sourcePortKind: PortKind }
+    /** 右键点在**某个节点**上（债务第 22 条）：复制 / 粘贴 / 禁用 / 删除都在这儿。 */
+    | { kind: 'node'; screenX: number; screenY: number; worldX: number; worldY: number; nodeId: string; flipY?: number }
     | null
   >(null)
+  /**
+   * 画布内剪贴板。
+   *
+   * 只活在内存里（不是系统剪贴板）：节点数据里有素材 url、镜头 id 这些本机概念，
+   * 粘到别的应用里没有意义，从别的应用里粘进来也不是节点。
+   * 复制的是**节点之间的连线**（`edges`），不是它们与外界的关系 ——
+   * 粘贴一份带外连的副本会让两条支路悄悄耦合在一起。
+   */
+  const [clipboard, setClipboard] = useState<{ nodes: StudioNode[]; edges: Edge[] } | null>(null)
   const [takes, setTakes] = useState<Record<string, TakeInfo[]>>({})
   /** Picture currently open in the crop/rotate editor, and what to start from. */
   const [editing, setEditing] = useState<{ nodeId: string; url: string; crop?: boolean } | null>(null)
@@ -1147,6 +1175,77 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     setStatus(`已复制 ${String(created.length)} 个节点（生成历史不会跟过来）`)
   }, [checkpoint, markDirty, setNodes])
 
+  /**
+   * 复制选中的节点到**画布内剪贴板**（债务第 22 条）。
+   *
+   * 复制的是节点 + 它们**彼此之间**的连线：一份带外连的副本会让两条支路悄悄耦合
+   * （改上游一个节点，两处都变），而人复制的是「这一小段」。
+   */
+  const copyNodes = useCallback((ids: string[]) => {
+    const picked = nodesRef.current.filter((node) => ids.includes(node.id))
+    if (picked.length === 0) return
+    const inside = new Set(picked.map((node) => node.id))
+    const wires = edgesRef.current.filter((edge) => inside.has(edge.source) && inside.has(edge.target))
+    setClipboard({ nodes: picked, edges: wires })
+    setStatus(`已复制 ${String(picked.length)} 个节点（Ctrl+V 粘贴）`)
+  }, [])
+
+  /**
+   * 把剪贴板里的节点粘到画布上。
+   *
+   * 位置：给了落点就用落点（右键菜单在哪儿点就贴哪儿），否则在原位置偏 40px ——
+   * 原地粘贴会精确盖住原件，看起来像什么都没发生。
+   */
+  const pasteClipboard = useCallback((at?: { x: number; y: number }) => {
+    if (clipboard === null || clipboard.nodes.length === 0) return
+    checkpoint()
+    markDirty()
+    const origin = clipboard.nodes[0]?.position ?? { x: 0, y: 0 }
+    // 落点模式：把「第一个节点」放到落点，其余按相对位置跟过去，形状保持不变。
+    const shift = at === undefined ? { x: 40, y: 40 } : { x: at.x - origin.x, y: at.y - origin.y }
+    const idMap = new Map<string, string>()
+    const created: StudioNode[] = []
+    for (const source of clipboard.nodes) {
+      nodeSeq.current += 1
+      const id = `${source.data.kind}-${String(Date.now())}-${String(nodeSeq.current)}`
+      idMap.set(source.id, id)
+      const data: StudioNodeData = { ...source.data, status: 'idle' }
+      // 历史跟着原件，不跟着副本：两份卡片共用一个 shotId 会互相改对方的版本。
+      delete data.shotId
+      delete data.takeId
+      delete data.takeNumber
+      delete data.chosen
+      created.push({
+        id,
+        type: 'studio' as const,
+        position: findFreeSlot([...nodesRef.current, ...created], { x: source.position.x + shift.x, y: source.position.y + shift.y }, source.data.kind),
+        data,
+      })
+    }
+    const wires: Edge[] = clipboard.edges.flatMap((edge, index) => {
+      const source = idMap.get(edge.source)
+      const target = idMap.get(edge.target)
+      if (source === undefined || target === undefined) return []
+      return [{ ...edge, id: `edge-${String(Date.now())}-${String(index)}`, source, target, selected: false }]
+    })
+    setNodes((current) => [...current, ...created])
+    setEdges((current) => [...current, ...wires])
+    const newIds = new Set(created.map((node) => node.id))
+    setNodes((current) => current.map((node) => ({ ...node, selected: newIds.has(node.id) })))
+    setSelection(null)
+    setStatus(`已粘贴 ${String(created.length)} 个节点`)
+  }, [checkpoint, clipboard, markDirty, setEdges, setNodes])
+
+  /** 停用 / 启用一个节点：禁用之后生成按钮会真的按不下去。 */
+  const toggleDisabled = useCallback((nodeId: string) => {
+    const target = nodesRef.current.find((node) => node.id === nodeId)
+    if (target === undefined) return
+    markDirty()
+    const next = target.data.disabled !== true
+    setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, data: { ...node.data, disabled: next } } : node)))
+    setStatus(next ? '已禁用这个节点（右键可以启用）' : '已启用这个节点')
+  }, [markDirty, setNodes])
+
   /** Add several nodes to the Agent's context at once. */
   const addSelectedToAgent = useCallback((ids: string[]) => {
     if (ids.length === 0) return
@@ -1555,6 +1654,12 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     if (target === undefined) return
     const spec = specOf(target.data.kind)
     if (spec === undefined) return
+    // 被禁用的节点不跑（债务第 22 条）：禁用是「先别动这个」的意思，
+    // 而它必须**真的拦住提交**，否则那只是个看起来灰掉的装饰。
+    if (target.data.disabled === true) {
+      setStatus('这个节点被禁用了（右键可以启用）')
+      return
+    }
     const blocked = blockedOf(spec)
     if (blocked !== undefined) {
       setStatus(blocked)
@@ -2120,11 +2225,26 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
         if (event.shiftKey) redo()
         else undo()
       }
+      // 复制 / 粘贴（债务第 22 条）。
+      // 在输入框里按 Ctrl+C 必须是**系统复制**，所以上面 `typing` 那一关先挡住了。
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+        const picked = (flowRef.current?.getNodes() ?? []).filter((node) => node.selected === true).map((node) => node.id)
+        if (picked.length > 0) {
+          event.preventDefault()
+          copyNodes(picked)
+        }
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+        if (clipboard !== null) {
+          event.preventDefault()
+          pasteClipboard()
+        }
+      }
       if (event.key === 'Escape') setMenu(null)
     }
     window.addEventListener('keydown', onKey)
     return () => { window.removeEventListener('keydown', onKey) }
-  }, [redo, undo])
+  }, [clipboard, copyNodes, pasteClipboard, redo, undo])
 
   /** Reload the shared media library, which the sidebar's 资产 tab lists. */
   const refreshAssets = useCallback(async (): Promise<void> => {
@@ -2308,6 +2428,20 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
               const native = event as unknown as MouseEvent
               const position = flowRef.current?.screenToFlowPosition({ x: native.clientX, y: native.clientY }) ?? { x: 0, y: 0 }
               setMenu({ kind: 'context', screenX: native.clientX, screenY: native.clientY, worldX: position.x, worldY: position.y })
+            }}
+            // 右键**节点** → 节点菜单（债务第 22 条：以前右键只能点在空白处）。
+            // 顺带选中它：菜单里的动作作用于「这一个」，而画布上看不出右键点的是哪个的话，
+            // 人没法确认自己点中了没有。
+            onNodeContextMenu={(event, node) => {
+              event.preventDefault()
+              selectOnly(node.id)
+              const native = event as unknown as MouseEvent
+              const position = flowRef.current?.screenToFlowPosition({ x: native.clientX, y: native.clientY }) ?? { x: 0, y: 0 }
+              setMenu({
+                kind: 'node', nodeId: node.id,
+                screenX: native.clientX, screenY: native.clientY,
+                worldX: position.x, worldY: position.y,
+              })
             }}
             onNodeDoubleClick={(_event, node) => { selectOnly(node.id); focusNodes([node.id]) }}
             onNodeClick={(_event, node) => { selectOnly(node.id) }}
@@ -2537,10 +2671,69 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
                   ))}
                   {candidatesFor(menu.sourcePortKind).length === 0 ? <p className="note">这个输出暂时没有可接的节点类型</p> : null}
                 </>
+              ) : menu.kind === 'node' ? (
+                /* 右键节点（债务第 22 条）。
+                   从前右键只认空白处，于是「复制这一个 / 删掉这一个」要么去侧栏、要么先框选。
+                   「粘贴」只在剪贴板里有东西时出现 —— 不放点了没反应的项。 */
+                <>
+                  <header>{nodeLabel(nodes, menu.nodeId)}</header>
+                  <button
+                    type="button"
+                    data-testid="node-menu-duplicate"
+                    title="在旁边放一份副本（生成历史不会跟过来）"
+                    onClick={() => { setMenu(null); duplicateNode(menu.nodeId) }}
+                  >复制一份</button>
+                  <button
+                    type="button"
+                    data-testid="node-menu-copy"
+                    title="复制到画布剪贴板（Ctrl+C），之后可以粘到别处"
+                    onClick={() => { setMenu(null); copyNodes([menu.nodeId]) }}
+                  >复制<span className="hint">Ctrl+C</span></button>
+                  {clipboard === null ? null : (
+                    <button
+                      type="button"
+                      data-testid="node-menu-paste"
+                      title="把复制过的节点粘在这里"
+                      onClick={() => { const at = { x: menu.worldX, y: menu.worldY }; setMenu(null); pasteClipboard(at) }}
+                    >粘贴<span className="hint">Ctrl+V</span></button>
+                  )}
+                  <div className="sep" />
+                  <button
+                    type="button"
+                    data-testid="node-menu-disable"
+                    title={nodes.find((node) => node.id === menu.nodeId)?.data.disabled === true
+                      ? '恢复这个节点：生成按钮会重新可按'
+                      : '先别动这个节点：拦下它的生成，连线与内容都留着'}
+                    onClick={() => { setMenu(null); toggleDisabled(menu.nodeId) }}
+                  >
+                    {nodes.find((node) => node.id === menu.nodeId)?.data.disabled === true ? '启用' : '禁用'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="node-menu-agent"
+                    onClick={() => { setMenu(null); toggleAgentNode(menu.nodeId) }}
+                  >{agentIds.includes(menu.nodeId) ? '从 Agent 移除' : '添加到 Agent'}</button>
+                  <div className="sep" />
+                  <button
+                    type="button"
+                    className="danger"
+                    data-testid="node-menu-delete"
+                    onClick={() => { setMenu(null); deleteNode(menu.nodeId) }}
+                  >删除</button>
+                </>
               ) : (
                 <>
                   <button type="button" onClick={() => { beginUpload(menu) }}>上传素材</button>
                   <button type="button" onClick={() => { setMenu({ ...menu, kind: 'nodes' }) }}>添加节点<span className="hint">›</span></button>
+                  {/* 粘贴现在真的能用（债务第 22 条），所以它出现在这里了 ——
+                      从前菜单里刻意不放它，是因为点了没反应。 */}
+                  {clipboard === null ? null : (
+                    <button
+                      type="button"
+                      data-testid="canvas-menu-paste"
+                      onClick={() => { const at = { x: menu.worldX, y: menu.worldY }; setMenu(null); pasteClipboard(at) }}
+                    >粘贴<span className="hint">Ctrl+V</span></button>
+                  )}
                   <div className="sep" />
                   <button type="button" disabled={historyDepth.past === 0} onClick={() => { setMenu(null); undo() }}>
                     撤销<span className="hint">{historyDepth.past === 0 ? '' : `${String(historyDepth.past)} 步`}</span>

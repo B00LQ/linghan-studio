@@ -740,6 +740,15 @@ const server = createServer((req, res) => {
           json(res, 400, { error: '缺少 nodeId 或 prompt' })
           return
         }
+        // 被禁用的节点不跑（债务第 22 条）。**这条必须在服务端也拦**：
+        // 禁用是文档里的一个字段，而 Agent 走的是 HTTP —— 只在界面上拦住，
+        // 就成了「人按不动、Agent 照样跑」，而那正是最不该发生的一种不一致。
+        const disabledNode = readDocument(store, projectId).nodes
+          .find((node) => (node as { id?: unknown }).id === nodeId) as { data?: { disabled?: unknown } } | undefined
+        if (disabledNode?.data?.disabled === true) {
+          json(res, 409, { error: '这个节点被禁用了（画布上右键可以启用）' })
+          return
+        }
         const job = jobs.submit({
           // 文本/音频节点提交的是「后端作业」：同样的注册表，干活的换成 LLM 或语音模型。
           ...(body.kind === 'text' || body.kind === 'audio' ? { kind: body.kind } : {}),

@@ -339,6 +339,117 @@ const run = async () => {
   })()`)
   check('整理后零重叠', overlaps === 0, `${overlaps} 处`)
 
+  log('⑨ 右键节点：复制 / 粘贴 / 禁用 / 删除（债务第 22 条）')
+  // 这一节要读文档、也要直接打接口，所以先备两个小工具（这个用例原来是裸 fetch）。
+  const projectId = project.project.id
+  const getDoc = async () => await (await fetch(`${BASE}/api/projects/${projectId}/canvas`, { headers: { cookie } })).json()
+  const apiCall = async (path, init = {}) => {
+    const response = await fetch(`${BASE}${path}`, {
+      ...init,
+      headers: { 'content-type': 'application/json', cookie, ...(init.headers ?? {}) },
+    })
+    const text = await response.text()
+    return { status: response.status, json: text === '' ? {} : JSON.parse(text) }
+  }
+  // 从前右键只在空白处有菜单，「复制这一个 / 删掉这一个」要么去侧栏、要么先框选。
+  const rightClickNode = async (index = 0) => await s.evaluate(`(async () => {
+    const node = document.querySelectorAll('.react-flow__node')[${String(index)}];
+    if (!node) return -1;
+    const box = node.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2), y = Math.round(box.top + 10);
+    node.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2, buttons: 2 }));
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return document.querySelectorAll('.studio-menu').length;
+  })()`)
+  /** 点菜单里某一项。按**第一个子节点**的文本比，因为「复制」那几项后面还挂着快捷键提示。 */
+  const clickMenu = (label) => s.evaluate(`(() => {
+    const hit = [...document.querySelectorAll('.studio-menu button')]
+      .find((b) => ((b.childNodes[0]?.textContent || '').trim() === ${JSON.stringify(label)}));
+    if (!hit) return false; hit.click(); return true;
+  })()`)
+  check('右键节点会打开菜单', (await rightClickNode(0)) === 1)
+  const nodeMenu = await s.evaluate(menuItems)
+  check('菜单里有 复制一份 / 复制 / 删除',
+    ['复制一份', '复制', '删除'].every((label) => nodeMenu.some((item) => item.text.startsWith(label))),
+    nodeMenu.map((item) => item.text).join(' | '))
+  check('菜单里有 禁用', nodeMenu.some((item) => item.text.startsWith('禁用')), nodeMenu.map((item) => item.text).join(' | '))
+
+  const nodesBefore = ((await getDoc()).doc?.nodes ?? []).length
+  check('点「复制一份」', await clickMenu('复制一份'))
+  await sleep(1200)
+  const afterDuplicate = ((await getDoc()).doc?.nodes ?? []).length
+  check('画布上多了一个节点', afterDuplicate === nodesBefore + 1, `${String(nodesBefore)} -> ${String(afterDuplicate)}`)
+
+  // 复制到剪贴板 → 空白处右键 → 粘贴。
+  check('右键节点 → 复制', (await rightClickNode(0)) === 1)
+  check('点「复制」', await clickMenu('复制'))
+  await sleep(600)
+  check('空白处右键', await s.evaluate(`(() => {
+    const pane = document.querySelector('.react-flow__pane');
+    if (!pane) return false;
+    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 400, clientY: 300, button: 2, buttons: 2 }));
+    return true;
+  })()`))
+  await sleep(700)
+  check('菜单里有「粘贴」', await s.evaluate(`[...document.querySelectorAll('.studio-menu button')].some((b) => ((b.childNodes[0]?.textContent || '').trim() === '粘贴'))`))
+  const beforePaste = ((await getDoc()).doc?.nodes ?? []).length
+  check('点「粘贴」', await clickMenu('粘贴'))
+  await sleep(1200)
+  const afterPaste = ((await getDoc()).doc?.nodes ?? []).length
+  check('粘贴又多了节点（Ctrl+V 的菜单版）', afterPaste === beforePaste + 1, `${String(beforePaste)} -> ${String(afterPaste)}`)
+
+  log('⑨b 禁用：真的拦住生成，而且服务端也拦（Agent 走的是 HTTP）')
+  check('右键节点 → 禁用', (await rightClickNode(0)) === 1)
+  check('点「禁用」', await clickMenu('禁用'))
+  await sleep(1200)
+  const disabledState = await s.evaluate(`(() => {
+    const node = document.querySelector('.react-flow__node');
+    const send = node?.querySelector('.send');
+    return {
+      badge: (node?.textContent || '').includes('已禁用'),
+      marked: node?.querySelector('.studio-node')?.className.includes('is-disabled') === true,
+      sendDisabled: send?.disabled === true,
+      sendTitle: send?.title || '',
+    };
+  })()`)
+  check('卡片上出现「已禁用」并且整卡变灰', disabledState.badge && disabledState.marked, JSON.stringify(disabledState))
+  check('生成按钮按不下去，并说清为什么', disabledState.sendDisabled && disabledState.sendTitle.includes('禁用'), JSON.stringify(disabledState))
+  const canvasDoc = await getDoc()
+  const disabledId = (canvasDoc.doc?.nodes ?? []).find((node) => node.data?.disabled === true)?.id ?? ''
+  check('画布文档里记着「已禁用」（刷新之后还在）', disabledId !== '', disabledId)
+  const refused = await apiCall('/api/jobs', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, nodeId: disabledId, prompt: '禁用了还要跑' }),
+  })
+  check('服务端也拒绝（不是只有界面拦）', refused.status === 409 && String(refused.json.error).includes('禁用'),
+    `HTTP ${String(refused.status)} ${JSON.stringify(refused.json)}`)
+
+  check('右键 → 启用', (await rightClickNode(0)) === 1)
+  check('点「启用」', await clickMenu('启用'))
+  await sleep(1200)
+  const afterEnable = await s.evaluate(`(() => {
+    const node = document.querySelector('.react-flow__node');
+    const send = node?.querySelector('.send');
+    return {
+      badge: (node?.textContent || '').includes('已禁用'),
+      marked: node?.querySelector('.studio-node')?.className.includes('is-disabled') === true,
+      title: send?.title || '',
+    };
+  })()`)
+  // 判据要落在**「禁用」这个理由消失了**，而不是「按钮一定可点」：
+  // 按钮还可能因为别的原因按不下去（文本后端没配、工作流缺东西…），
+  // 那些和这一节要验的东西无关 —— 把它们混进同一条断言，只会在别的用例改动时误报。
+  check('禁用标记消失，按钮不再因为「禁用」而按不下去',
+    !afterEnable.badge && !afterEnable.marked && !afterEnable.title.includes('禁用'), JSON.stringify(afterEnable))
+
+  log('⑨c 右键 → 删除，只删这一个')
+  const beforeDelete = ((await getDoc()).doc?.nodes ?? []).length
+  check('右键节点 → 删除', (await rightClickNode(0)) === 1)
+  check('点「删除」', await clickMenu('删除'))
+  await sleep(1200)
+  const afterDelete = ((await getDoc()).doc?.nodes ?? []).length
+  check('少了一个节点', afterDelete === beforeDelete - 1, `${String(beforeDelete)} -> ${String(afterDelete)}`)
+
   await s.shot('canvas-io-final.png')
   log(`截图：${join(OUT, 'canvas-io-final.png')}`)
   edge.kill()
