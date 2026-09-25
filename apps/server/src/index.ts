@@ -442,6 +442,203 @@ function htmlPage(title: string, body: string): string {
 <body><div class="card"><h1>${escapeHtml(title)}</h1>${body}</div></body></html>`
 }
 
+/**
+ * 服务器端（cloud 模式）的账号页。
+ *
+ * 为什么现在就做这一页：**服务器端的东西不该只有懂命令行的人能看见**。
+ * 它也是 M3 那个正式网页界面的种子（那时候加上作品与主页）。
+ *
+ * 一页搞定：注册 / 登录 / 看自己的账号 / 设备列表与撤销 / 忘记密码。
+ * @param consoleMail - 邮件是不是只打在日志里（没配转发）——是的话页面会把验证链接直接显示出来。
+ * @returns 完整的 HTML 文本。
+ */
+function accountPage(consoleMail: boolean): string {
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>账号 · LINGHAN Studio（服务器端）</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; background: #0b0d12; color: #e8ecf4;
+         font: 14px/1.7 system-ui, "Microsoft YaHei", sans-serif; padding: 28px 16px; }
+  .wrap { width: min(760px, 100%); margin: 0 auto; }
+  .card { padding: 20px 22px; background: #141821; border: 1px solid #263041; border-radius: 14px; margin-bottom: 14px; }
+  h1 { margin: 0 0 6px; font-size: 20px; }
+  h2 { margin: 0 0 12px; font-size: 15px; }
+  p { margin: 0 0 10px; }
+  .muted { color: #8b97a8; font-size: 13px; }
+  .ok { color: #7ad1a3; } .bad { color: #ff8f8f; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .cols { grid-template-columns: 1fr; } }
+  label { display: block; font-size: 12px; color: #8b97a8; margin-bottom: 4px; }
+  input { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 9px 10px; border-radius: 8px;
+          border: 1px solid #263041; background: #0b0d12; color: #e8ecf4; font-size: 14px; }
+  button { padding: 9px 14px; border: 0; border-radius: 8px; background: #7aa2ff; color: #0b0d12;
+           font-size: 13px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: #8b97a8; border: 1px solid #263041; font-weight: 400; }
+  button.danger { background: transparent; color: #ff8f8f; border: 1px solid #3a2530; font-weight: 400; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid #1d2431; }
+  .row:first-of-type { border-top: 0; }
+  .row .grow { flex: 1; min-width: 0; }
+  code { font-size: 12px; color: #cfe0ff; word-break: break-all; }
+  .tag { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid #263041; color: #8b97a8; }
+  .tag.ok { border-color: #2c4a3a; color: #7ad1a3; }
+  .tag.bad { border-color: #4a2c2c; color: #ff8f8f; }
+</style></head>
+<body><div class="wrap">
+  <div class="card">
+    <h1>LINGHAN Studio · 服务器端</h1>
+    <p class="muted">这台服务器**只管账号与作品展示**。画布、素材、算力都在你自己的桌面端里，
+      不在这台机器上（这也是为什么这里没有画布列表）。</p>
+    <div id="who" class="muted">正在读取登录状态…</div>
+  </div>
+
+  <div id="guest">
+    <div class="cols">
+      <div class="card">
+        <h2>注册</h2>
+        <label>邮箱</label><input id="reg-email" type="email" autocomplete="email" />
+        <label>密码（至少 8 位）</label><input id="reg-password" type="password" autocomplete="new-password" />
+        <label>怎么称呼你（可留空）</label><input id="reg-name" />
+        <button id="reg-submit">注册</button>
+        <p class="muted" id="reg-note"></p>
+      </div>
+      <div class="card">
+        <h2>登录</h2>
+        <label>邮箱</label><input id="log-email" type="email" autocomplete="email" />
+        <label>密码</label><input id="log-password" type="password" autocomplete="current-password" />
+        <button id="log-submit">登录</button>
+        <p class="muted">忘记密码？填上面的邮箱，点下面这个。</p>
+        <button class="ghost" id="forgot">发一封重置密码的邮件</button>
+        <p class="muted" id="log-note"></p>
+      </div>
+    </div>
+  </div>
+
+  <div id="me" style="display:none">
+    <div class="card">
+      <h2>我的账号</h2>
+      <div class="row"><span class="grow" id="me-email"></span><span id="me-role" class="tag"></span><span id="me-verified" class="tag"></span></div>
+      <div class="row"><span class="grow muted">注册时间</span><span id="me-created" class="muted"></span></div>
+      <div class="row">
+        <button class="ghost" id="resend">重新发验证邮件</button>
+        <button class="danger" id="logout">退出登录</button>
+      </div>
+      <p class="muted" id="me-note"></p>
+      ${consoleMail ? `
+      <div id="devmail" style="display:none">
+        <p class="muted">这台服务器**还没有配发信服务**，所以验证邮件只打在了服务器日志里。
+          为了让你能点，最近一封的内容显示在这里（配好发信服务后这段会自动消失）：</p>
+        <div class="row"><code id="devmail-text"></code></div>
+      </div>` : ''}
+    </div>
+    <div class="card">
+      <h2>登录过的设备</h2>
+      <p class="muted">一条就是一次登录。发现不认识的设备，点「撤销」它就得重新登录。</p>
+      <div id="sessions"></div>
+    </div>
+  </div>
+</div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const say = (el, text, bad) => { const node = $(el); node.className = bad ? 'bad' : 'muted'; node.textContent = text; };
+  const api = async (path, init = {}) => {
+    const response = await fetch('/api/v1/auth' + path, {
+      ...init,
+      headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
+    });
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, body };
+  };
+  const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  const render = (user) => {
+    const signedIn = user !== null;
+    $('guest').style.display = signedIn ? 'none' : 'block';
+    $('me').style.display = signedIn ? 'block' : 'none';
+    if (!signedIn) { $('who').textContent = '当前未登录。注册或登录之后，这里会显示你的账号与设备。'; return; }
+    $('who').textContent = '已登录：' + user.email;
+    $('me-email').textContent = user.email + (user.displayName ? '（' + user.displayName + '）' : '');
+    $('me-role').textContent = user.role === 'admin' ? '管理员' : '普通用户';
+    $('me-verified').className = 'tag ' + (user.emailVerified ? 'ok' : 'bad');
+    $('me-verified').textContent = user.emailVerified ? '邮箱已验证' : '邮箱未验证';
+    $('me-created').textContent = new Date(user.createdAt).toLocaleString('zh-CN');
+    void loadSessions();
+    void loadDevMail();
+  };
+
+  const loadSessions = async () => {
+    const { body } = await api('/sessions');
+    const rows = body.sessions ?? [];
+    $('sessions').innerHTML = rows.length === 0 ? '<p class="muted">还没有记录。</p>' : rows.map((item) => (
+      '<div class="row"><span class="grow">' + escape(item.label || '未命名的设备') +
+      '<br /><span class="muted">最近使用 ' + new Date(item.lastSeenAt).toLocaleString('zh-CN') + '</span></span>' +
+      (item.revoked ? '<span class="tag">已撤销</span>' : '<button class="danger" data-revoke="' + escape(item.id) + '">撤销</button>') +
+      '</div>'
+    )).join('');
+    for (const button of document.querySelectorAll('[data-revoke]')) {
+      button.addEventListener('click', async () => {
+        await api('/sessions/' + button.getAttribute('data-revoke'), { method: 'DELETE' });
+        void loadSessions();
+      });
+    }
+  };
+
+  const loadDevMail = async () => {
+    ${consoleMail ? `
+    const { ok, body } = await api('/dev-mail');
+    if (!ok || (body.mails ?? []).length === 0) { $('devmail').style.display = 'none'; return; }
+    $('devmail').style.display = 'block';
+    $('devmail-text').textContent = body.mails[0].text;
+    ` : ''}
+  };
+
+  const refresh = async () => {
+    const { ok, body } = await api('/me');
+    render(ok ? body.user : null);
+  };
+
+  $('reg-submit').addEventListener('click', async () => {
+    say('reg-note', '正在注册…');
+    const { ok, body } = await api('/register', { method: 'POST', body: JSON.stringify({
+      email: $('reg-email').value, password: $('reg-password').value, displayName: $('reg-name').value,
+    }) });
+    if (!ok) { say('reg-note', body.error || '注册失败', true); return; }
+    say('reg-note', '注册成功。');
+    await refresh();
+  });
+
+  $('log-submit').addEventListener('click', async () => {
+    say('log-note', '正在登录…');
+    const { ok, body } = await api('/login', { method: 'POST', body: JSON.stringify({
+      email: $('log-email').value, password: $('log-password').value, label: '浏览器',
+    }) });
+    if (!ok) { say('log-note', body.error || '登录失败', true); return; }
+    say('log-note', '');
+    await refresh();
+  });
+
+  $('forgot').addEventListener('click', async () => {
+    const { body } = await api('/forgot-password', { method: 'POST', body: JSON.stringify({ email: $('log-email').value }) });
+    say('log-note', body.note || '已处理');
+  });
+
+  $('resend').addEventListener('click', async () => {
+    const { body } = await api('/resend-verification', { method: 'POST', body: JSON.stringify({ email: $('me-email').textContent.split('（')[0] }) });
+    say('me-note', body.note || '已处理');
+    void loadDevMail();
+  });
+
+  $('logout').addEventListener('click', async () => {
+    await api('/logout', { method: 'POST', body: '{}' });
+    await refresh();
+  });
+
+  void refresh();
+</script>
+</body></html>`
+}
+
 /** Read a request body as text, bounded to 16 MiB. */
 async function readText(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = []
@@ -690,6 +887,21 @@ const server = createServer((req, res) => {
           return
         }
 
+        if (route === 'dev-mail' && method === 'GET') {
+          // 只在「邮件根本没真发出去」时存在（没配 webhook），而且只给当前登录用户自己的那几封。
+          if (config.mailWebhookUrl !== '') {
+            json(res, 404, { error: '这台服务器配了邮件转发，邮件是真的发出去了' })
+            return
+          }
+          const user = accounts.me(accessTokenOf())
+          if (user === undefined) {
+            json(res, 401, { error: '需要登录' })
+            return
+          }
+          json(res, 200, { mails: accounts.devMails(user.email) })
+          return
+        }
+
         if (route === 'sessions' && method === 'GET') {
           const user = accounts.me(accessTokenOf())
           if (user === undefined) {
@@ -732,6 +944,12 @@ const server = createServer((req, res) => {
        */
       if (config.mode === 'cloud' && (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) && pathname !== '/api/health') {
         json(res, 404, { error: '这是服务器端（cloud 模式）：画布、素材与算力都在你自己的桌面端里，不在这台服务器上' })
+        return
+      }
+
+      if (config.mode === 'cloud' && method === 'GET' && (pathname === '/' || pathname === '/account')) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(accountPage(config.mailWebhookUrl === ''))
         return
       }
 

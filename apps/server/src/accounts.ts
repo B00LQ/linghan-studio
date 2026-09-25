@@ -165,6 +165,15 @@ export interface Accounts {
   listSessions: (userId: string) => ReturnType<StudioStore['listSessions']>
   /** 撤销自己的某个会话。 */
   revokeSession: (userId: string, sessionId: string) => boolean
+  /**
+   * **仅供本机开发/演示**：最近发给某个邮箱的邮件原文。
+   *
+   * 默认 mailer 把邮件打到日志，而日志在控制台里 —— 想点邮件里那个验证链接就没法点了。
+   * 所以把最近几封按邮箱记在内存里，配一个 `/dev-mail` 接口让页面直接显示。
+   * 只在**没有配置 webhook**（也就是邮件根本没真发出去）时才可用，
+   * 而且只返回**当前登录用户自己邮箱**的那几封。真实部署配了 webhook 之后这个接口自动消失。
+   */
+  devMails: (email: string) => { subject: string; text: string; at: string }[]
 }
 
 /** 校验邮箱形状与密码强度，返回一句人话或 undefined。 */
@@ -182,6 +191,8 @@ function validateCredentials(email: string, password: string): string | undefine
 export function createAccounts(deps: AccountDeps): Accounts {
   const { store, mailer, log } = deps
   const base = (): string => (deps.publicUrl !== '' ? deps.publicUrl.replace(/\/+$/u, '') : 'http://127.0.0.1:8080')
+  /** 最近发出去的邮件（内存里，按邮箱分组，只留几封）——见 `devMails` 的说明。 */
+  const recentMails = new Map<string, { subject: string; text: string; at: string }[]>()
 
   /** 写一条一次性令牌，并把链接交给邮件。 */
   const issueActionToken = async (user: StudioUser, kind: 'verify_email' | 'reset_password'): Promise<void> => {
@@ -195,7 +206,7 @@ export function createAccounts(deps: AccountDeps): Accounts {
     const path = kind === 'verify_email' ? '/verify-email' : '/reset-password'
     const link = `${base()}${path}?token=${encodeURIComponent(token)}`
     const name = user.displayName !== '' ? user.displayName : (user.email.split('@')[0] ?? '')
-    await mailer.send(kind === 'verify_email'
+    const message = kind === 'verify_email'
       ? {
         to: user.email,
         subject: '验证你的邮箱 · LINGHAN Studio',
@@ -206,7 +217,11 @@ export function createAccounts(deps: AccountDeps): Accounts {
         to: user.email,
         subject: '重置密码 · LINGHAN Studio',
         text: `${name} 你好：\n\n点这个链接设置新密码（1 小时内有效）：\n${link}\n\n如果不是你本人操作，忽略这封邮件；你的密码不会被改动。`,
-      })
+      }
+    const kept = recentMails.get(user.email) ?? []
+    kept.unshift({ subject: message.subject, text: message.text, at: new Date().toISOString() })
+    recentMails.set(user.email, kept.slice(0, 5))
+    await mailer.send(message)
   }
 
   /** 造一对令牌并落一个会话。 */
@@ -351,6 +366,10 @@ export function createAccounts(deps: AccountDeps): Accounts {
       if (session === undefined) return false
       store.revokeSession(sessionId, new Date().toISOString())
       return true
+    },
+
+    devMails(email) {
+      return recentMails.get(email.trim().toLowerCase()) ?? []
     },
   }
 }

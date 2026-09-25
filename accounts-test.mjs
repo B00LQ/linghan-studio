@@ -204,6 +204,28 @@ const run = async () => {
   check('登出后刷新令牌也不能用了',
     (await call('/api/v1/auth/refresh', { method: 'POST', body: JSON.stringify({ refreshToken: toLogout.refreshToken }) })).status === 401)
 
+  log('⑨ 服务器端有一页能点的界面（不懂命令行的人也要能看见）')
+  const page = await fetch(`${base}/`)
+  const pageHtml = await page.text()
+  check('根路径是账号页（不是画布 SPA）',
+    page.status === 200 && pageHtml.includes('注册') && pageHtml.includes('登录') && pageHtml.includes('服务器端'),
+    `HTTP ${String(page.status)}`)
+  check('页面上说清了「画布与算力在你自己的桌面端里」',
+    pageHtml.includes('画布、素材、算力都在你自己的桌面端里'))
+  check('页面上有设备列表与撤销（账号能自己管）',
+    pageHtml.includes('登录过的设备') && pageHtml.includes('撤销'))
+  check('/account 也是同一页', (await fetch(`${base}/account`)).status === 200)
+
+  log('⑩ 没配发信服务时，验证链接在页面上就能点（配了 webhook 就自动消失）')
+  const devMailAnon = await call('/api/v1/auth/dev-mail')
+  check('未登录读不到别人的邮件', devMailAnon.status === 401, `HTTP ${String(devMailAnon.status)}`)
+  const freshEmail = `demo-${String(Date.now()).slice(-6)}@example.com`
+  const fresh = await call('/api/v1/auth/register', { method: 'POST', body: JSON.stringify({ email: freshEmail, password: 'demo-password-1' }) })
+  const freshToken = fresh.json.tokens?.accessToken ?? ''
+  const devMail = await call('/api/v1/auth/dev-mail', { headers: bearer(freshToken) })
+  check('登录后能看到**自己**那一封开发邮件', (devMail.json.mails ?? []).length > 0, JSON.stringify(devMail.json).slice(0, 120))
+  check('里面就是验证链接', String(devMail.json.mails?.[0]?.text ?? '').includes('/verify-email?token='))
+
   log('⑧ 数据库里存的是哈希，不是明文')
   child.kill()
   await sleep(600)
