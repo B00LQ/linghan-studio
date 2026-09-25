@@ -1,0 +1,8 @@
+{
+  "name": "linghan-studio-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "LINGHAN Studio 的桌面窗口外壳（Electron 只做窗口与生命周期，服务端仍由自带的 node.exe 跑）",
+  "main": "main.cjs",
+  "license": "UNLICENSED"
+}

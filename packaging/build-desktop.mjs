@@ -28,6 +28,7 @@ import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
+import { writeIcon } from './make-icon.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
@@ -41,6 +42,10 @@ const NAME = flag('name', 'LINGHAN-Studio')
 const OUT = resolve(repo, flag('out', 'dist-desktop'))
 const UPDATE_URL = flag('url', 'https://example.invalid/linghan-studio-<version>-update.zip')
 const NOTES = flag('notes', '')
+/** 打不打 Electron（默认打：桌面端要是**应用窗口**，不是浏览器窗口）。 */
+const WITH_ELECTRON = !has('no-electron')
+const ELECTRON_VERSION = flag('electron-version', '33.4.11')
+const mirror = process.env.ELECTRON_MIRROR ?? 'https://registry.npmmirror.com/-/binary/electron/'
 const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
 const VERSION = pkg.version
 const bundle = join(OUT, NAME)
@@ -83,6 +88,49 @@ for (const entry of PAYLOAD) {
 
 // 启动器放在包根目录（它是**不会被更新**的那一层：更新换的是 app/ 那一份）。
 cpSync(join(repo, 'packaging', 'launch.mjs'), join(bundle, 'launch.mjs'))
+// 桌面窗口外壳（Electron 主进程 + 端口探测）也放在不会被更新的那一层。
+cpSync(join(repo, 'packaging', 'desktop'), join(bundle, 'desktop'), { recursive: true })
+// 图标：任务栏与安装程序里那张脸。
+writeIcon(join(bundle, 'icon.png'))
+log('桌面外壳与图标已就位（desktop/、icon.png）')
+
+/**
+ * Electron：**独立应用窗口**要用它（没有地址栏、没有标签页、任务栏上是自己）。
+ *
+ * 它只做窗口，服务端仍由自带的 `node/node.exe` 跑 —— 因为 Electron 的 Node
+ * **没有** `node:sqlite`（实测 Electron 33 / Node 20：`No such built-in module`），
+ * 服务端搬不进去。代价是包大一倍多，换来的是它看起来、用起来都是一个应用。
+ *
+ * 二进制走镜像下载（`ELECTRON_MIRROR`）：这里直连 GitHub Releases 不通，
+ * 而 npm 包本身装了也没有二进制。下不下来就**明说跳过**，退到浏览器窗口模式。
+ */
+if (WITH_ELECTRON) {
+  const cache = join(OUT, '.electron')
+  const dist = join(cache, 'node_modules', 'electron', 'dist')
+  if (!existsSync(join(dist, 'electron.exe'))) {
+    log(`下载 Electron ${ELECTRON_VERSION}（约 180 MB，走 ${mirror}）…`)
+    rmSync(cache, { recursive: true, force: true })
+    mkdirSync(cache, { recursive: true })
+    writeFileSync(join(cache, 'package.json'), '{"name":"electron-download","private":true}\n', 'utf8')
+    try {
+      execFileSync('npm', ['install', `electron@${ELECTRON_VERSION}`, '--no-audit', '--no-fund', '--loglevel=error'], {
+        cwd: cache,
+        stdio: 'inherit',
+        shell: true,
+        env: { ...process.env, ELECTRON_MIRROR: mirror },
+      })
+    } catch (error) {
+      log(`Electron 下载失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (existsSync(join(dist, process.platform === 'win32' ? 'electron.exe' : 'electron'))) {
+    cpSync(dist, join(bundle, 'electron'), { recursive: true })
+    log('Electron 已打进包：双击启动的是**独立应用窗口**（无地址栏/标签页）')
+  } else {
+    log('没有可用的 Electron：这个包会用 Chromium 的 --app= 窗口，或退到系统浏览器。')
+    log(`想拿到真应用窗口：设 ELECTRON_MIRROR 后重跑，或先手动 node ${join(repo, 'packaging', 'build-desktop.mjs')} --electron-version=<版本>。`)
+  }
+}
 
 // Node 运行时：默认用「正在跑这个脚本的那个 node」，所以构建机器上是什么版本，
 // 用户拿到就是什么版本 —— 这个产品的部署承诺里写着「只需要 Node 24」。

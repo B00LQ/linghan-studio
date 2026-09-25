@@ -13,9 +13,9 @@ node packaging/build-desktop.mjs
 
 | 产物 | 是什么 | 给谁 |
 | --- | --- | --- |
-| `LINGHAN-Studio/` | 目录形态：自带 Node + 程序 + 启动器 | 自己用 / 拷进 U 盘 |
-| `LINGHAN-Studio-<版本>-win-x64.zip` | 上者的压缩包 | 发给别人（解压双击就能跑） |
-| `LINGHAN-Studio-<版本>-update.zip` | **只有程序**（不含 Node 与启动器） | 已经装过的人自助更新 |
+| `LINGHAN-Studio/` | 目录形态：自带 Node + Electron + 程序 + 启动器 | 自己用 / 拷进 U 盘 |
+| `LINGHAN-Studio-<版本>-win-x64.zip` | 上者的压缩包（约 143 MB） | 发给别人（解压双击就能跑） |
+| `LINGHAN-Studio-<版本>-update.zip` | **只有程序**（不含 Node 与 Electron） | 已经装过的人自助更新 |
 | `update.json` | 更新源清单（`version` / `url` / `sha256` / `notes`） | 放到 HTTPS 上给 `STUDIO_UPDATE_URL` 用 |
 | `LINGHAN-Studio-<版本>-setup.exe` | 安装程序 | 想「像正常软件一样安装」的人（需装 Inno Setup） |
 
@@ -26,7 +26,39 @@ node packaging/build-desktop.mjs --node "C:\path\to\node.exe"   # 指定要捆�
 node packaging/build-desktop.mjs --url https://…/update.zip     # 写进 update.json 的下载地址
 node packaging/build-desktop.mjs --notes "这一版修了什么"        # 更新说明（界面上会显示）
 node packaging/build-desktop.mjs --skip-build                   # 前端已构建，省掉一次构建
+node packaging/build-desktop.mjs --no-electron                  # 不打 Electron（包小一半，退回浏览器窗口）
 ```
+
+## 桌面端是**独立应用窗口**
+
+双击「启动 Studio.cmd」打开的是**应用窗口**，不是浏览器页面：没有地址栏、没有标签页，
+任务栏上是它自己的图标，关掉窗口就是退出应用（服务端进程一起带走），
+再点一次图标是把已有窗口叫到前面，窗口大小与位置记在数据目录里（`window.json`）。
+
+分工：**Electron 只做窗口与生命周期，服务端仍由自带的 `node/node.exe` 跑**。
+原因是 Electron 内建的 Node **没有** `node:sqlite`（这个产品的数据库模块），
+实测 Electron 33 / Node 20 直接报 `No such built-in module: node:sqlite`，
+而类型剥离也要 Node 22.18+。代价是包大一倍多（约 180 MB + 110 MB），换来的是它真的是个应用。
+
+三级退化（`STUDIO_WINDOW=browser|app|electron` 可强制）：
+
+| 条件 | 打开的窗口 |
+| --- | --- |
+| 包里有 `electron/`（默认打） | **Electron 应用窗口**：无地址栏/标签页，任务栏是自己 |
+| 没有 Electron，但有 Edge/Chrome | Chromium 的 `--app=` 窗口：同样无地址栏，外壳是浏览器厂商的；用专用 profile，不碰用户自己的浏览器 |
+| 都没有 | 系统默认浏览器（这时它确实是网页） |
+
+Electron 二进制走镜像下载（`ELECTRON_MIRROR`，默认 `https://registry.npmmirror.com/-/binary/electron/`）：
+这台机器直连 GitHub Releases 拿不到二进制，npm 包本身装了也没用。下不下来会**明说跳过**
+并退回 `--app=` 窗口，不会假装成功。
+
+### 端口探测为什么不能只「绑一下试试」
+
+Windows 上，容器把端口转发到 `0.0.0.0:8080` 时，我们去绑 `127.0.0.1:8080` **能成功**（实测），
+于是探测说「空闲」—— 而连接可能落到容器里的另一个服务上，
+表现是「桌面应用里看到的是别的程序」。所以判据是**先连一下**（连得上就是有人在听），
+绑定检测只作第二道。实测：容器在跑时桌面端会自己选 8081。
+这份探测由启动器与 Electron 外壳共用（`desktop/ports.mjs`）。
 
 安装程序**不是必需的**：绿色包解压即用，`setup.exe` 只是多给一个开始菜单快捷方式与卸载项。
 没装 [Inno Setup](https://jrsoftware.org/isdl.php)（`ISCC.exe`）时脚本会**明确说跳过**，

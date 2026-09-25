@@ -241,6 +241,15 @@ export interface StudioStore {
   listTakes: (shotId: string) => StudioTake[]
   /** Mark one take as the chosen one for its shot. */
   selectTake: (shotId: string, takeId: string) => void
+  /**
+   * 删掉一条 take（某一版）。
+   *
+   * 一串残渣版本会长成「版本条上一堆没人看的格子」，而它们占的是真磁盘。
+   * 删掉**最后一版**时连镜头也一起删：镜头是「这条生成线」的壳，
+   * 没有版本了留着它只会让下一个版本接着旧线走（版本号接着往上加，看着像丢了东西）。
+   * @returns 这一版是否存在并被删掉。
+   */
+  deleteTake: (shotId: string, takeId: string) => boolean
   /** Persist one asset's bytes and index them by content hash. */
   saveAsset: (bytes: Buffer, mime: string, kind: string) => StudioAsset
   /** Look up one asset by id. */
@@ -833,6 +842,16 @@ export function openStore(dataDir: string): StudioStore {
       db.prepare('UPDATE take SET mark = ? WHERE id = ? AND shot_id = ?').run('selected', takeId, shotId)
       db.prepare('UPDATE shot SET selected_take_id = ? WHERE id = ?').run(takeId, shotId)
       db.prepare('UPDATE shot SET status = ? WHERE id = ?').run('locked', shotId)
+    },
+    deleteTake(shotId, takeId) {
+      const exists = db.prepare('SELECT id FROM take WHERE id = ? AND shot_id = ?').get(takeId, shotId)
+      if (exists === undefined) return false
+      db.prepare('DELETE FROM take WHERE id = ?').run(takeId)
+      const left = db.prepare('SELECT COUNT(*) AS n FROM take WHERE shot_id = ?').get(shotId) as Row | undefined
+      // 最后一版被删掉 = 这条生成线没有内容了：镜头也一起删，
+      // 免得下一次生成接着旧线把版本号继续往上加（看起来像丢了东西）。
+      if (integer(left ?? {}, 'n') === 0) db.prepare('DELETE FROM shot WHERE id = ?').run(shotId)
+      return true
     },
     saveAsset(bytes, mime, kind) {
       const id = createHash('sha256').update(bytes).digest('hex').slice(0, 32)

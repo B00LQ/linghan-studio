@@ -1063,6 +1063,10 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 /* 版本条下面那一行：用这一版重跑。 */
 .prompt-window .take-actions { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
 .prompt-window .take-actions .link { padding: 0; }
+/* 「删掉这一版」是破坏性动作：平时低调，hover 才红 —— 它就在「复现这一版」旁边，
+   两者长得一样的话，手快点错就是删掉一版素材。 */
+.prompt-window .take-actions .link.danger { color: var(--muted); opacity: 0.75; }
+.prompt-window .take-actions .link.danger:hover { color: #ff8f8f; opacity: 1; }
 .prompt-window .take-actions-note { font-variant-numeric: tabular-nums; opacity: 0.75; }
 
 /* 音频卡：一条播放器，没有画面。它没有 16:9 的框，所以给它自己的宽度。 */

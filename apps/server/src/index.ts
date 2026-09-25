@@ -1033,6 +1033,79 @@ const server = createServer((req, res) => {
         }
       }
 
+      // 删掉某一版（take）。
+      //
+      // 一件必须做对的事：**画布上那张卡片可能正显示着这一版**。只删数据库里的行，
+      // 卡片就会指向一个不存在的素材（裂图），而裂图比「多一个版本」严重得多。
+      // 所以这里顺手把文档也改掉：
+      // 优先切到剩下最新的一版；一版都不剩就把这张卡片清空（回到「还没生成」的样子）。
+      const takeDeleteMatch = /^\/api\/shots\/([^/]+)\/takes\/([^/]+)$/u.exec(pathname)
+      if (takeDeleteMatch !== null && method === 'DELETE') {
+        const shotId = decodeURIComponent(takeDeleteMatch[1] as string)
+        const takeId = decodeURIComponent(takeDeleteMatch[2] as string)
+        const shot = store.getShot(shotId)
+        if (shot === undefined) {
+          json(res, 404, { error: '镜头不存在' })
+          return
+        }
+        const before = store.listTakes(shotId)
+        const target = before.find((take) => take.id === takeId)
+        if (target === undefined) {
+          json(res, 404, { error: '这一版不存在' })
+          return
+        }
+        store.deleteTake(shotId, takeId)
+        const remaining = store.listTakes(shotId)
+        // 文档修正：正显示这一版的卡片要换一张（或清空）。
+        const doc = readDocument(store, shot.canvasId)
+        const next = remaining.find((take) => take.status === 'succeeded' && take.assetId !== '')
+        let touched = false
+        for (const node of doc.nodes) {
+          const data = node.data as Record<string, unknown> | undefined
+          if (data === undefined || data.shotId !== shotId) continue
+          const showsThis = data.takeId === takeId || data.takeId === undefined || data.takeId === ''
+          if (!showsThis) continue
+          touched = true
+          if (next === undefined) {
+            delete data.url
+            delete data.takeId
+            delete data.takeNumber
+            delete data.chosen
+            data.status = 'idle'
+            // 镜头已经没了（最后一版）：把 shotId 也摘掉，下次生成是全新的一条线。
+            if (remaining.length === 0) delete data.shotId
+          } else {
+            data.url = `/api/assets/${next.assetId}`
+            data.takeId = next.id
+            // 版本序号按**剩下的这一串**重算：删掉中间某一版之后，
+            // 存着的旧序号会指着别的版本（「第 3 版」显示的是第 2 版）。
+            data.takeNumber = remaining.length - remaining.findIndex((take) => take.id === next.id)
+            data.chosen = next.mark === 'selected'
+          }
+        }
+        if (touched) {
+          writeDocument(store, shot.canvasId, doc)
+          bridge.broadcastDocument(shot.canvasId, 'take-deleted')
+        }
+        /**
+         * 最后才清素材，而且**必须在文档改完之后**：删掉的那一版如果正是卡片显示的，
+         * 文档在这一刻之前还引用着它（`assetInUse` 为真），先问就永远清不掉 ——
+         * 界面上的确认框写着「素材也一起清掉」，那就得真的清掉。
+         */
+        let assetRemoved = false
+        if (target.assetId !== '' && !remaining.some((take) => take.assetId === target.assetId) && !store.assetInUse(target.assetId)) {
+          assetRemoved = store.deleteAsset(target.assetId)
+        }
+        json(res, 200, {
+          ok: true,
+          remaining: remaining.length,
+          shotGone: remaining.length === 0,
+          assetRemoved,
+          shown: next === undefined ? '' : next.id,
+        })
+        return
+      }
+
       // 把一条 take 换成另一张素材：连续同一种编辑（连点四次右转）时**改这一版**，
       // 而不是往版本条上堆四版。换下来的那张图没人用了就顺手删掉。
       const takeAssetMatch = /^\/api\/shots\/([^/]+)\/takes\/([^/]+)\/asset$/u.exec(pathname)

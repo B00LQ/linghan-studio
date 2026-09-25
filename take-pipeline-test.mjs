@@ -116,6 +116,53 @@ const run = async () => {
   check('带无效 shotId 仍然出图成功（只是不记 take）', stray.ok, `HTTP ${stray.status}`)
   check('无效 shotId 时不返回 takeId', stray.payload.data?.[0]?.takeId === undefined)
 
+  log('⑧ 删掉某一版：库里、素材、画布文档三处都要对')
+  /**
+   * 这一节要证的是「删一版」不是只删数据库那一行：
+   * ① 画布上正显示它的话，卡片要换成剩下最新的一版（**不能指向一个已删的素材**，
+   *    裂图比多一个版本严重得多）；
+   * ② 版本序号要按剩下的重算（否则「第 3 版」显示的是第 2 版）；
+   * ③ 那一版占的素材没人用了要一起清掉（版本删了、图还留着，才是真垃圾）；
+   * ④ 删掉**最后一版**时镜头也一起清掉，卡片回到「还没生成」，并摘掉旧镜头 id
+   *    （不然下一次生成接着旧线，版本号会从 3 开始，看起来像丢了东西）。
+   */
+  // 先造一张「画布上正显示最新那一版」的卡片：这个用例走 /v1 接口，本来不碰画布。
+  const shownTake = list[0]
+  const otherTake = list[1]
+  const doc = {
+    nodes: [{
+      id: 'image-a', type: 'studio', position: { x: 0, y: 0 },
+      data: { kind: 'image', text: prompt, shotId, takeId: shownTake.id, takeNumber: 2, chosen: true, url: `/api/assets/${shownTake.assetId}` },
+    }],
+    edges: [],
+    viewport: { x: 0, y: 0, zoom: 1 },
+  }
+  const saved = await call(`/api/canvases/${projectId}/doc`, { method: 'PUT', body: JSON.stringify({ doc }) })
+  check('先把「正显示这一版」写进画布文档', saved.ok, `HTTP ${saved.status}`)
+
+  const deleted = await call(`/api/shots/${shotId}/takes/${shownTake.id}`, { method: 'DELETE' })
+  check('删掉这一版成功', deleted.ok, `HTTP ${deleted.status} ${JSON.stringify(deleted.payload)}`)
+  check('返回里说还剩几版', deleted.payload.remaining === 1, JSON.stringify(deleted.payload))
+  check('那一版占的素材被一起清掉了', deleted.payload.assetRemoved === true, JSON.stringify(deleted.payload))
+  check('被删的素材确实取不到了', (await call(`/api/assets/${shownTake.assetId}`)).status === 404)
+  check('剩下那一版的素材还在', (await call(`/api/assets/${otherTake.assetId}`)).status === 200)
+
+  const movedNode = (await call(`/api/canvases/${projectId}/doc`)).payload.doc?.nodes?.[0]?.data ?? {}
+  check('卡片换成了剩下那一版（不是裂图）', movedNode.url === `/api/assets/${otherTake.assetId}`, String(movedNode.url))
+  check('卡片记的 takeId 也换了', movedNode.takeId === otherTake.id, String(movedNode.takeId))
+  check('版本序号按剩下的重算（2 → 1）', movedNode.takeNumber === 1, String(movedNode.takeNumber))
+
+  check('删不存在的版本返回 404',
+    (await call(`/api/shots/${shotId}/takes/not-a-real-take`, { method: 'DELETE' })).status === 404)
+
+  const lastOne = await call(`/api/shots/${shotId}/takes/${otherTake.id}`, { method: 'DELETE' })
+  check('删掉最后一版成功', lastOne.ok && lastOne.payload.shotGone === true, JSON.stringify(lastOne.payload))
+  const emptyNode = (await call(`/api/canvases/${projectId}/doc`)).payload.doc?.nodes?.[0]?.data ?? {}
+  check('卡片被清空（回到还没生成的样子）',
+    emptyNode.url === undefined && emptyNode.takeId === undefined && emptyNode.status === 'idle', JSON.stringify(emptyNode))
+  check('旧镜头 id 也摘掉了（下次是全新的一条线）', emptyNode.shotId === undefined, String(emptyNode.shotId))
+  check('镜头本身也没了', ((await call(`/api/shots/${shotId}/takes`)).payload.takes ?? []).length === 0)
+
   log(failures === 0 ? '\n全部通过' : `\n有 ${failures} 项未通过`)
   process.exit(failures === 0 ? 0 : 1)
 }

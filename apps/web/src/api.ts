@@ -653,6 +653,15 @@ export const createShot = (projectId: string, title: string, prompt: string): Pr
 export const listTakes = (shotId: string): Promise<{ takes: TakeInfo[] }> =>
   request(`/api/shots/${encodeURIComponent(shotId)}/takes`)
 
+/**
+ * 删掉某一版。
+ *
+ * 服务端会把该清的一起清掉：画布上正显示它的话把卡片换成剩下最新的一版
+ * （一版都不剩就清空成「还没生成」），以及那张没人再用的素材。
+ */
+export const deleteTake = (shotId: string, takeId: string): Promise<{ ok: boolean; remaining: number; shotGone: boolean; assetRemoved: boolean }> =>
+  request(`/api/shots/${encodeURIComponent(shotId)}/takes/${encodeURIComponent(takeId)}`, { method: 'DELETE' })
+
 /** Mark one take as the chosen one for its shot. */
 export const selectTake = (shotId: string, takeId: string): Promise<{ ok: boolean }> =>
   request(`/api/shots/${encodeURIComponent(shotId)}/select`, {

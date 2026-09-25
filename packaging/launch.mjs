@@ -1,21 +1,22 @@
 /**
  * 绿色包的启动器（**这个文件会被原样拷进安装目录**，见 `build-desktop.mjs`）。
  *
- * 它只做四件事，每一件都有个具体理由：
+ * 它做四件事，每一件都有个具体理由：
  *
  * 1. **决定跑哪一份代码**：先看 `current.txt` 指的 `versions/<版本>`，
  *    没有就跑自带的 `app/`。自助更新就是「换这个指针」，所以这段逻辑和
  *    服务端的 `update.ts` 共用一份实现（`activeVersionDir`）。
- * 2. **决定数据放哪**：默认是安装目录下的 `data/`（整个文件夹拷走就是搬家），
+ * 2. **挑端口**：先用 8080，被占了就往后找一个空的。判据是**先连一下**
+ *    （见 `desktop/ports.mjs`：只「绑一下试试」在 Windows 上会被 Docker 的端口转发骗过去）。
+ * 3. **开一个**独立应用窗口**：装了 Electron 就用它（没有地址栏、没有标签页、
+ *    任务栏上是自己的图标），没装就退到 Chromium 的 `--app=` 窗口，
+ *    再不行才用系统默认浏览器。`STUDIO_WINDOW=browser|app|electron` 可以强制。
+ * 4. **决定数据放哪**：默认是安装目录下的 `data/`（整个文件夹拷走就是搬家），
  *    也可以用环境变量 `STUDIO_DATA_DIR` 指到别处。
- * 3. **挑端口**：先用 8080，被占了就往后找到一个空的。绿色包不该因为「端口被占」
- *    这种理由启动失败，而失败的提示又往往看不懂。
- * 4. **把浏览器叫起来**：这是一个本地服务，人期待的是「双击 → 看到界面」。
  *
  * 它**不做**的事：不装服务、不写注册表、不改系统设置。卸载就是删文件夹
  * （`data/` 要不要留由人自己决定 —— 见 README）。
  */
-import { createServer } from 'node:http'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -37,20 +38,7 @@ if (!existsSync(join(bundledApp, 'apps', 'server', 'src', 'index.ts'))) {
   process.exit(1)
 }
 const { activeVersionDir, installedVersions } = await import(pathToFileURL(join(bundledApp, 'apps', 'server', 'src', 'update.ts')).href)
-
-/** 从 `preferred` 开始找一个能监听的端口。 */
-async function freePort(preferred) {
-  for (let port = preferred; port < preferred + 120; port += 1) {
-    const free = await new Promise((resolve) => {
-      const probe = createServer()
-      probe.once('error', () => { resolve(false) })
-      probe.once('listening', () => { probe.close(() => { resolve(true) }) })
-      probe.listen(port, '127.0.0.1')
-    })
-    if (free) return port
-  }
-  return preferred
-}
+const { freePort } = await import(pathToFileURL(join(home, 'desktop', 'ports.mjs')).href)
 
 const preferred = Number.parseInt(process.env.PORT ?? '8080', 10)
 const port = await freePort(Number.isFinite(preferred) ? preferred : 8080)
@@ -72,18 +60,62 @@ console.log(`  界面：${url}`)
 console.log(`  数据：${process.env.STUDIO_DATA_DIR}`)
 console.log(`  程序：${appDir}${versioned === undefined ? '（自带版本）' : ''}`)
 console.log(`  已有版本：${installedVersions(home).join('、') || '（只有自带这一份）'}`)
-console.log('  关掉这个窗口就是退出；数据不会丢（都在数据目录里）。')
+console.log('  关掉应用窗口就是退出；数据不会丢（都在数据目录里）。')
 console.log('─'.repeat(60))
 
-// 只有真的要给人看的时候才开浏览器：测试与无头环境用 STUDIO_NO_BROWSER=1 关掉。
+/**
+ * 开窗口。三种方式，从「最像应用」往后退：
+ *
+ * 1. **Electron**（`electron/` 里有运行时）：真应用窗口 —— 没有地址栏、没有标签页，
+ *    任务栏上是它自己，关窗口就等于退出。
+ * 2. **Chromium 的 `--app=`**（Edge/Chrome 在场但没有 Electron）：同样是无地址栏的窗口，
+ *    只是外壳是浏览器厂商的。用一个**专用 profile 目录**，免得跟人自己开的浏览器互相影响。
+ * 3. **系统默认浏览器**：最后一条路。这时它是网页，但至少能用。
+ *
+ * `STUDIO_WINDOW=browser|app|electron` 可以强制（排障用）。
+ * 测试与无头环境用 `STUDIO_NO_BROWSER=1` 全关掉。
+ */
+function openWindow() {
+  const mode = process.env.STUDIO_WINDOW ?? 'auto'
+  const electronExe = join(home, 'electron', process.platform === 'win32' ? 'electron.exe' : 'electron')
+  const shell = join(home, 'desktop', 'main.cjs')
+  /** 窗口进程退出 = 用户关掉了应用：把服务端一起带走，不留占着端口的孤儿。 */
+  const follow = (child) => { child.on('exit', () => { process.kill(process.pid, 'SIGTERM') }) }
+  if (mode !== 'browser' && mode !== 'app' && existsSync(electronExe) && existsSync(shell)) {
+    follow(spawn(electronExe, [join(home, 'desktop')], { stdio: 'ignore' }))
+    return 'electron'
+  }
+  const chromium = [
+    join(process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+  ].find((candidate) => existsSync(candidate))
+  if (mode !== 'browser' && chromium !== undefined) {
+    // `--app=` 去掉地址栏与标签页；专用 profile 让窗口大小/位置记得住，也不碰用户的浏览器。
+    follow(spawn(chromium, [
+      `--app=${url}`,
+      `--user-data-dir=${join(home, 'window-profile')}`,
+      '--window-size=1440,900',
+      '--no-first-run',
+      '--no-default-browser-check',
+    ], { stdio: 'ignore' }))
+    return 'app'
+  }
+  try {
+    const child = spawn('cmd.exe', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' })
+    child.unref()
+    return 'browser'
+  } catch {
+    console.log(`[studio] 没能自动打开窗口，手动访问 ${url} 就行`)
+    return 'none'
+  }
+}
+
+// 只有真的要给人看的时候才开窗口：测试与无头环境用 STUDIO_NO_BROWSER=1 关掉。
 if (process.env.STUDIO_NO_BROWSER !== '1') {
   setTimeout(() => {
-    try {
-      const child = spawn('cmd.exe', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' })
-      child.unref()
-    } catch {
-      console.log(`[studio] 没能自动打开浏览器，手动访问 ${url} 就行`)
-    }
+    const opened = openWindow()
+    console.log(`[studio] 窗口方式：${opened}`)
   }, 900)
 }
 

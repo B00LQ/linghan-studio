@@ -33,7 +33,7 @@ import {
   type ReactFlowInstance,
 } from '@xyflow/react'
 import { listWorkflows, type WorkflowInfo } from '../api.ts'
-import { createShot, deleteAsset, downloadAssets, fetchAudioBackend, fetchGenerationStats, fetchTextBackend, listAssetFolders, listAssets, listTakes, loadCanvas, replaceTakeAsset, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type AssetFolderInfo, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
+import { createShot, deleteAsset, deleteTake, downloadAssets, fetchAudioBackend, fetchGenerationStats, fetchTextBackend, listAssetFolders, listAssets, listTakes, loadCanvas, replaceTakeAsset, saveCanvas, selectTake, uploadAsset, addTake, submitJob, listJobs, cancelJob, type AssetFolderInfo, type CanvasDoc, type StudioJob, type TakeInfo, type TextBackendInfo } from '../api.ts'
 import { arrangeLayout, arrangeSubset, findFreeSlot, findOverlaps, nodeRect } from './layout.ts'
 import { NodePanel, AssetPanel } from './CanvasPanels.tsx'
 import { ImageEditor } from './ImageEditor.tsx'
@@ -104,6 +104,8 @@ const CanvasContext = createContext<{
   showTake: (nodeId: string, takeId: string) => void
   /** 用某一版的参数再跑一次（含种子）；失败的版本就是重试。 */
   rerunTake: (nodeId: string, take: TakeInfo) => Promise<void>
+  /** 删掉某一版（含它占的素材）；正显示它的话卡片会换成剩下最新的一版。 */
+  removeTake: (nodeId: string, take: TakeInfo) => Promise<void>
   /** Ask the node's running job to stop. */
   cancelRun: (nodeId: string) => void
   /** Open the crop/rotate editor on the picture a node is showing. */
@@ -167,6 +169,7 @@ const CanvasContext = createContext<{
   activeNodeId: null,
   showTake: () => { /* replaced by the provider */ },
   rerunTake: async () => { /* replaced by the provider */ },
+  removeTake: async () => { /* replaced by the provider */ },
   cancelRun: () => { /* replaced by the provider */ },
   editImage: () => { /* replaced by the provider */ },
   quickEdit: () => { /* replaced by the provider */ },
@@ -276,7 +279,7 @@ function PromptInput({ value, placeholder, onInput, onBegin }: {
 
 /** One canvas node's rendering. */
 function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
-  const { takes, activeNodeId, showTake, rerunTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, workflowLabel, workflowHint, takeDetail, sizeFor, blockedOf, nodeBackend } = useContext(CanvasContext)
+  const { takes, activeNodeId, showTake, rerunTake, removeTake, cancelRun, editImage, quickEdit, compare, setParam, beginEdit, generate, runningNodeId, labelOf, statusOf, runnable, workflowFor, workflowLabel, workflowHint, takeDetail, sizeFor, blockedOf, nodeBackend } = useContext(CanvasContext)
   const spec = specOf(data.kind)
   /** 为什么现在不能生成：禁用了，或者后端/工作流那边有话说。按钮与悬停都用这一句。 */
   const refusal = data.disabled === true
@@ -407,10 +410,12 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
               ))}
             </div>
           ) : null}
-          {/* 版本条下面这一行：**用这一版重跑**。
+          {/* 版本条下面这一行：**用这一版重跑** / **删掉这一版**。
               债务清单第 21 条：版本能记录、能比较、能选用，却一直不能「用这一版的参数
               再跑一次」—— 而参数与种子其实都存着，缺的只是这个入口。
-              （失败的版本不走这里：它显示不出来，点它的格子就是重试。） */}
+              （失败的版本不走这里：它显示不出来，点它的格子就是重试。）
+              「删掉这一版」是后来补的：跑坏的、试出来的那一堆得能清掉，
+              否则版本条会一直长，而它们占的是真磁盘。 */}
           {spec.picture && shown !== undefined ? (
             <div className="take-actions" data-testid="take-actions">
               <button
@@ -424,6 +429,16 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                 ↻ 复现这一版
               </button>
               {shown.seed === undefined ? null : <span className="take-actions-note">种子 {String(shown.seed)}</span>}
+              <button
+                type="button"
+                className="link nodrag danger"
+                data-testid="delete-take"
+                disabled={running}
+                title="删掉这一版（它占的素材也一起清掉；别的画布用着就不会动）"
+                onClick={() => { void removeTake(id, shown) }}
+              >
+                删掉这一版
+              </button>
             </div>
           ) : null}
           <PromptInput
@@ -1833,6 +1848,54 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   }, [loadTakes, showTakeIn, takes])
 
   /**
+   * 删掉某一版。
+   *
+   * 服务端会把该清的一起清掉（正显示的卡片换成剩下最新的一版、一版不剩就清空卡片、
+   * 以及那张没人再用的素材），但**客户端也要跟着改**：不然版本条会继续显示那一格，
+   * 而人以为没删掉。所以这里删完立刻重取列表，并按结果修正卡片。
+   */
+  const removeTake = useCallback(async (nodeId: string, take: TakeInfo) => {
+    const node = nodesRef.current.find((item) => item.id === nodeId)
+    const shotId = typeof node?.data.shotId === 'string' ? node.data.shotId : ''
+    if (shotId === '') return
+    const label = take.status === 'failed' ? '这一条失败记录' : '这一版'
+    if (!window.confirm(`删掉${label}？这一版占的素材也会一起清掉（别的画布用着的话不会动）。`)) return
+    try {
+      const result = await deleteTake(shotId, take.id)
+      const rest = await loadTakes(shotId)
+      markDirty()
+      setNodes((current) => current.map((item) => {
+        if (item.id !== nodeId) return item
+        const data = { ...item.data }
+        if (result.shotGone) {
+          // 一版都不剩：卡片回到「还没生成」的样子，并摘掉旧镜头，
+          // 免得下一次生成接着旧线把版本号往上加。
+          delete data.url
+          delete data.takeId
+          delete data.takeNumber
+          delete data.chosen
+          delete data.shotId
+          data.status = 'idle'
+          return { ...item, data }
+        }
+        // 删的是正显示的那一版 → 换成剩下最新的一版；删的是别的版 → 只把序号重算。
+        const shown = rest.find((candidate) => candidate.id === data.takeId)
+        const fallback = rest.find((candidate) => candidate.status === 'succeeded' && candidate.assetId !== '')
+        if (shown === undefined && fallback !== undefined) {
+          data.url = `/api/assets/${fallback.assetId}`
+          data.takeId = fallback.id
+          data.chosen = fallback.mark === 'selected'
+        }
+        if (typeof data.takeId === 'string') data.takeNumber = ordinal(rest, data.takeId)
+        return { ...item, data }
+      }))
+      setStatus(result.shotGone ? '已删掉最后一版（这张卡片回到未生成状态）' : `已删掉这一版，还剩 ${String(result.remaining)} 版`)
+    } catch (problem) {
+      setStatus(problem instanceof Error ? problem.message : '删除失败')
+    }
+  }, [loadTakes, markDirty, setNodes, setStatus])
+
+  /**
    * Change a parameter.
    *
    * `history: false` is for continuous editing (typing): the caller records one
@@ -2095,6 +2158,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     activeNodeId: selection,
     showTake,
     rerunTake,
+    removeTake,
     cancelRun,
     editImage,
     quickEdit,
