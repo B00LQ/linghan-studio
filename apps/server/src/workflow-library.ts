@@ -92,6 +92,14 @@ export interface StudioWorkflow {
    * 声明成 optional 之后，「没有首帧」就变成「那条支路不存在」，而这正是它的语义。
    */
   optional?: string[]
+  /**
+   * 必须接上的输入（端口 id，如 `ref`）。
+   *
+   * 和 `optional` 正好相反，而且**两者都要有**：`optional` 说的是「没人给值就把这条支路
+   * 剪掉」（首帧可以不接），`requires` 说的是「没人给值就别跑」（图生图没有参考图，
+   * 跑出来的东西和参考图毫无关系）。只声明 optional 会让第二种情况悄悄出一张无关的图。
+   */
+  requires?: string[]
 }
 
 /** Guess what a graph produces from the classes it uses. */
@@ -324,7 +332,7 @@ export function checkWorkflow(graph: Record<string, WorkflowNode>, objectInfo: R
  * 默认跑的仍是已知能出片的那条，快的这条要人选。这不是保守，是「换默认值」和「多给
  * 一个选项」是两件事：前者会在人没准备好时改变产出质量。
  */
-const BUILT_IN = new Set(['z-image-turbo', 'minimax-h3-video', 'minimax-h3-video-fast', 'minimax-h3-video-pdd'])
+const BUILT_IN = new Set(['z-image-turbo', 'z-image-turbo-img2img', 'minimax-h3-video', 'minimax-h3-video-fast', 'minimax-h3-video-pdd'])
 
 /** A stored workflow plus its provenance. */
 export interface WorkflowSummary {
@@ -339,6 +347,13 @@ export interface WorkflowSummary {
   models: string[]
   /** Whether the prompt binding is set (a workflow without one cannot run). */
   ready: boolean
+  /**
+   * 必须接上的输入（端口 id）。
+   *
+   * 画布要拿它做两件事：**没接就别默认选它**（接了参考图之后默认还落在文生图上，
+   * 等于「连了却没用」），以及生成前拦一道、给人话而不是让它跑出一张无关的图。
+   */
+  requires: string[]
 }
 
 /** Where uploaded workflows live. */
@@ -372,13 +387,14 @@ export function loadWorkflows(dataDir: string, builtInDir: string): StudioWorkfl
         defaults: parsed.defaults ?? {},
         models: parsed.models ?? {},
         optional: parsed.optional ?? [],
+        requires: parsed.requires ?? [],
       }
     } catch {
       return undefined
     }
   }
 
-  for (const name of ['z-image-turbo.json', 'minimax-h3-video.json', 'minimax-h3-video-fast.json', 'minimax-h3-video-pdd.json']) {
+  for (const name of ['z-image-turbo.json', 'z-image-turbo-img2img.json', 'minimax-h3-video.json', 'minimax-h3-video-fast.json', 'minimax-h3-video-pdd.json']) {
     const parsed = readOne(join(builtInDir, name), name.replace(/\.json$/u, ''))
     if (parsed !== undefined) workflows.push(parsed)
   }
@@ -411,6 +427,7 @@ export function summarize(workflow: StudioWorkflow): WorkflowSummary {
       ...Object.values(workflow.graph).flatMap((node) => Object.values(node.inputs ?? {}).map(str)),
     ].filter((value) => MODEL_EXT.test(value)))],
     ready: binding !== undefined && binding.node !== '' && binding.input !== '',
+    requires: workflow.requires ?? [],
   }
 }
 

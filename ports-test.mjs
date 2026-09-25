@@ -11,9 +11,9 @@
  * 这三件事都在**看不见的地方**：错了不会崩，只会「连了线却没生效」或者
  * 「提交了一个不存在的文件名」。所以在这里逐条钉住，用内存里的文档，不碰显卡。
  */
-import { CONNECTABLE_PORTS, TARGET_PORT_BY_SOURCE, inboundImageUrl, resolvePrompt } from './apps/server/src/ops.ts'
+import { CONNECTABLE_PORTS, TARGET_PORT_BY_KIND, inboundImageUrl, resolvePrompt } from './apps/server/src/ops.ts'
 import { CANVAS_NODES } from './apps/web/src/canvas/ports.ts'
-import { resolveGraph } from './apps/server/src/workflow-library.ts'
+import { loadWorkflows, resolveGraph } from './apps/server/src/workflow-library.ts'
 
 let failures = 0
 const log = (...a) => console.log('[ports]', ...a)
@@ -32,17 +32,25 @@ const edge = (id, source, target, targetHandle) => ({
 log('① 服务端的「按类型选入口」必须与前端端口目录一致')
 // 这条是防漂移：两边各写一份，迟早会有一边改了名字而没人发现。改错的方向很具体——
 // Agent 把图片接到视频节点上会落到第一个入边（提示词）上，成为一条不生效的线。
-for (const [sourceKind, handle] of Object.entries(TARGET_PORT_BY_SOURCE)) {
-  const hosts = CANVAS_NODES.filter((spec) => spec.inputs.some((input) => input.id === handle))
-  check(`有节点带 ${handle} 入口`, hosts.length > 0, hosts.map((spec) => spec.kind).join(','))
-  check(`带 ${handle} 入口的节点收的正是 ${sourceKind}`,
-    hosts.some((spec) => spec.inputs.find((input) => input.id === handle)?.kind === sourceKind),
-    hosts.map((spec) => `${spec.kind}:${spec.inputs.find((input) => input.id === handle)?.kind}`).join(','))
+//
+// **而且必须按两头一起判**：图片接到视频上是「首帧」，接到图片上却是「参考图」。
+// 只按上游类型那张表分不出这两种。
+for (const [sourceKind, byTarget] of Object.entries(TARGET_PORT_BY_KIND)) {
+  for (const [targetKind, handle] of Object.entries(byTarget)) {
+    const spec = CANVAS_NODES.find((item) => item.kind === targetKind)
+    const input = spec?.inputs.find((item) => item.id === handle)
+    check(`${sourceKind} 接到 ${targetKind} 上落到「${String(handle)}」且类型对得上`,
+      input !== undefined && input.kind === sourceKind,
+      input === undefined ? `节点 ${targetKind} 没有 ${String(handle)} 入口` : `${targetKind}:${input.id}=${input.kind}`)
+  }
 }
 // 反过来：每个节点的图片/文本入边都得有一张「谁往这儿接」的票，否则 Agent 根本连不上它。
-// 票有两种：按类型自动选的（TARGET_PORT_BY_SOURCE），以及显式点名的（CONNECTABLE_PORTS，
+// 票有两种：按类型自动选的（TARGET_PORT_BY_KIND），以及显式点名的（CONNECTABLE_PORTS，
 // 「尾帧」就是这一种——它没有默认值）。
-const reachable = new Set([...Object.values(TARGET_PORT_BY_SOURCE), ...CONNECTABLE_PORTS])
+const reachable = new Set([
+  ...Object.values(TARGET_PORT_BY_KIND).flatMap((byTarget) => Object.values(byTarget)),
+  ...CONNECTABLE_PORTS,
+])
 for (const spec of CANVAS_NODES) {
   for (const input of spec.inputs) {
     if (input.kind !== 'image' && input.kind !== 'text') continue
@@ -54,6 +62,21 @@ for (const port of CONNECTABLE_PORTS) {
   check(`可点名的 ${port} 确实是某个节点的入边`,
     CANVAS_NODES.some((spec) => spec.inputs.some((input) => input.id === port)),
     CANVAS_NODES.flatMap((spec) => spec.inputs.map((input) => `${spec.kind}:${input.id}`)).join(','))
+}
+// 内置工作流声明「必须要」的输入，必须是画布上真有的端口——写错一个名字的症状是
+// 「生成永远被拒绝」，而人怎么也看不出哪里错了。
+const builtIns = loadWorkflows('./data-does-not-exist', './apps/server/src/comfyui')
+for (const workflow of builtIns) {
+  for (const name of workflow.requires ?? []) {
+    check(`${workflow.id} 要求的「${name}」是画布上的端口`,
+      CANVAS_NODES.some((spec) => spec.inputs.some((input) => input.id === name)),
+      CANVAS_NODES.flatMap((spec) => spec.inputs.map((input) => input.id)).join(','))
+  }
+  // optional 与 requires 不能指的是同一个名字：一个说「没人给就剪掉」，
+  // 一个说「没人给就别跑」，同时声明等于自相矛盾。
+  for (const name of workflow.requires ?? []) {
+    check(`${workflow.id} 的「${name}」没被同时声明为 optional`, !(workflow.optional ?? []).includes(name))
+  }
 }
 
 log('② 首帧/尾帧：从入边找到那张图')

@@ -42,7 +42,7 @@
     "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
     "weightDtype": "default"
   },
-  "optional": ["firstFrame", "lastFrame"],
+  "optional": ["first", "last"],
   "graph": {
     "unet": {
       "class_type": "UNETLoader",
@@ -77,11 +77,11 @@
     },
     "loadFirst": {
       "class_type": "LoadImage",
-      "inputs": { "image": "$firstFrame" }
+      "inputs": { "image": "$first" }
     },
     "loadLast": {
       "class_type": "LoadImage",
-      "inputs": { "image": "$lastFrame" }
+      "inputs": { "image": "$last" }
     },
     "i2v": {
       "class_type": "MiniMaxH3ImageToVideo",

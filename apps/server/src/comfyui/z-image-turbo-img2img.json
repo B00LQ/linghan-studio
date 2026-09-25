@@ -1,0 +1,105 @@
+{
+  "id": "z-image-turbo-img2img",
+  "title": "Z-Image Turbo 图生图（接参考图）",
+  "capability": "image",
+  "source": "文生图那套（z-image-turbo）的图生图版本：把 LoadImage 拿到的参考图缩到请求的画幅、VAE 编码成隐变量，再交给同一个 KSampler 去噪。denoise 默认 0.6 —— 它是这套工作流唯一的「像不像原图」旋钮：1.0 等于完全重画（参考图白接），太低又等于什么都没改。占位符 `$ref` 就是画布上的「参考图」入口（端口 id），服务端按入边自动填，不需要人手动指定。",
+  "requiredNodes": [
+    "UNETLoader",
+    "CLIPLoader",
+    "VAELoader",
+    "CLIPTextEncode",
+    "ConditioningZeroOut",
+    "ModelSamplingAuraFlow",
+    "LoadImage",
+    "ImageScale",
+    "VAEEncode",
+    "KSampler",
+    "VAEDecode",
+    "SaveImage"
+  ],
+  "requires": ["ref"],
+  "defaults": {
+    "width": 1024,
+    "height": 1024,
+    "steps": 8,
+    "cfg": 1,
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "shift": 3,
+    "denoise": 0.6
+  },
+  "models": {
+    "unet": "z_image_turbo_int8_convrot.safetensors",
+    "clip": "qwen_3_4b_fp8_mixed.safetensors",
+    "clipType": "lumina2",
+    "vae": "ae.safetensors",
+    "weightDtype": "default"
+  },
+  "graph": {
+    "1": {
+      "class_type": "UNETLoader",
+      "inputs": { "unet_name": "$unet", "weight_dtype": "$weightDtype" }
+    },
+    "2": {
+      "class_type": "CLIPLoader",
+      "inputs": { "clip_name": "$clip", "type": "$clipType" }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": { "vae_name": "$vae" }
+    },
+    "4": {
+      "class_type": "CLIPTextEncode",
+      "inputs": { "text": "$prompt", "clip": ["2", 0] }
+    },
+    "5": {
+      "class_type": "ConditioningZeroOut",
+      "inputs": { "conditioning": ["4", 0] }
+    },
+    "7": {
+      "class_type": "ModelSamplingAuraFlow",
+      "inputs": { "model": ["1", 0], "shift": "$shift" }
+    },
+    "12": {
+      "class_type": "LoadImage",
+      "inputs": { "image": "$ref" }
+    },
+    "13": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": ["12", 0],
+        "upscale_method": "lanczos",
+        "width": "$width",
+        "height": "$height",
+        "crop": "center"
+      }
+    },
+    "11": {
+      "class_type": "VAEEncode",
+      "inputs": { "pixels": ["13", 0], "vae": ["3", 0] }
+    },
+    "8": {
+      "class_type": "KSampler",
+      "inputs": {
+        "model": ["7", 0],
+        "positive": ["4", 0],
+        "negative": ["5", 0],
+        "latent_image": ["11", 0],
+        "seed": "$seed",
+        "steps": "$steps",
+        "cfg": "$cfg",
+        "sampler_name": "$sampler",
+        "scheduler": "$scheduler",
+        "denoise": "$denoise"
+      }
+    },
+    "9": {
+      "class_type": "VAEDecode",
+      "inputs": { "samples": ["8", 0], "vae": ["3", 0] }
+    },
+    "10": {
+      "class_type": "SaveImage",
+      "inputs": { "images": ["9", 0], "filename_prefix": "$prefix" }
+    }
+  }
+}

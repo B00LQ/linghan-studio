@@ -126,7 +126,7 @@ const CanvasContext = createContext<{
    * Shared with the dropdown so what is shown and what is submitted cannot drift
    * apart — that drift is what let a video node run an image workflow.
    */
-  workflowFor: (data: StudioNodeData) => string
+  workflowFor: (nodeId: string, data: StudioNodeData) => string
   /** Same rule for the size control: what is shown is what is submitted. */
   sizeFor: (data: StudioNodeData) => string
 }>({
@@ -357,7 +357,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
                 <select
                   className="nodrag workflow-select"
                   title={data.kind === 'video' ? '用哪套工作流出视频（在「工作流」页导入）' : '用哪套工作流出图（在「工作流」页导入）'}
-                  value={workflowFor(data)}
+                  value={workflowFor(id, data)}
                   onChange={(event) => { setParam(id, { workflow: event.target.value }) }}
                 >
                   {runnable.filter((item) => item.capability === spec.kind).map((item) => (
@@ -1106,6 +1106,13 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   const runnable = useMemo(() => workflows.filter((item) =>
     item.ready && item.missingNodes.length === 0 && item.missingModels.length === 0), [workflows])
 
+  /** 这个节点上接了哪些入边（端口 id）。判断「工作流要的输入有没有接上」靠它。 */
+  const connectedPorts = useCallback((nodeId: string): Set<string> => new Set(
+    edges
+      .filter((edge) => edge.target === nodeId && typeof edge.targetHandle === 'string' && edge.targetHandle !== '')
+      .map((edge) => String(edge.targetHandle)),
+  ), [edges])
+
   /**
    * Which workflow this node will actually run.
    *
@@ -1117,18 +1124,38 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
    * nobody noticed; on a video node it meant a video node ran an **image**
    * workflow, 「3 秒完成」, and the card filled with a PNG that cannot play.
    *
-   * 选过的那条如果**已经不可用**（插件被删、模型被移走），也不能继续按它显示：
-   * 显示什么就提交什么，所以这里退回同类里第一条可用的。
+   * 两条规矩：
+   * ① 选过的那条如果**已经不可用**（插件被删、模型被移走），不能继续按它显示——
+   *    显示什么就提交什么，所以退回一条可用的；
+   * ② **没选过**时优先挑「它要的输入已经接上了」的那一套。图片节点接了参考图之后
+   *    默认还落在文生图上，等于「连了却没用」——那正是这个端口最该避免的观感。
+   *    显式选过的那条**不会**被这条顶掉：人挑了图生图却没接图，该在生成那一刻
+   *    收到一句「缺参考图」，而不是被悄悄换成别的。
    */
-  const workflowFor = useCallback((data: StudioNodeData): string => {
+  const workflowFor = useCallback((nodeId: string, data: StudioNodeData): string => {
     const want = specOf(String(data.kind ?? ''))?.kind
     if (want === undefined) return ''
     const available = runnable.filter((item) => item.capability === want)
     const chosen = typeof data.workflow === 'string' ? data.workflow : ''
     // 空字符串也是「没选过」：下拉里没有「默认」这个条目（那等于把第一条再写一遍，
     // 用户看到两个条目其实是一回事）。
-    return available.some((item) => item.id === chosen) ? chosen : (available[0]?.id ?? '')
-  }, [runnable])
+    const explicit = available.find((item) => item.id === chosen)
+    if (explicit !== undefined) return explicit.id
+    const connected = connectedPorts(nodeId)
+    const fits = available.find((item) => (item.requires ?? []).every((name) => connected.has(name)))
+    return fits?.id ?? available[0]?.id ?? ''
+  }, [connectedPorts, runnable])
+
+  /**
+   * 这套工作流要的输入里，还有哪些没接上（端口 id）。
+   * @param nodeId - the node about to run.
+   * @param workflowId - the workflow it will run.
+   * @returns the missing port ids, empty when it is ready.
+   */
+  const missingInputs = useCallback((nodeId: string, workflowId: string): string[] => {
+    const connected = connectedPorts(nodeId)
+    return (workflows.find((item) => item.id === workflowId)?.requires ?? []).filter((name) => !connected.has(name))
+  }, [connectedPorts, workflows])
 
   /**
    * The size this node will actually ask for — same rule as {@link workflowFor}:
@@ -1315,7 +1342,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
      * 来说那是出图的工作流，结果是「3 秒完成，画框里一张放不出来的图」。
      * 拿不到就明说，别让服务端替我挑一套错的。
      */
-    const workflowId = workflowFor(target.data)
+    const workflowId = workflowFor(nodeId, target.data)
     if (workflowId === '') {
       // 两种「没有」要分清：真的没导入过，还是导入了但这台机器跑不了（缺节点、
       // 缺模型）。下拉里后者是不显示的，所以这里必须说出来，否则人只会觉得
@@ -1324,6 +1351,15 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       setStatus(sameKind.length === 0
         ? `没有可用于「${spec.title}」节点的工作流：去「工作流」页导入一套`
         : `「${spec.title}」的工作流这台机器现在跑不了（缺节点或缺模型）：去「工作流」页看缺什么`)
+      return
+    }
+    // 这套工作流要的输入没接上（图生图没接参考图）：**现在就说**，别让它跑出一张
+    // 和参考图毫无关系的图——那种结果比一句拒绝难查得多。缺的是端口 id，
+    // 人看到的是标签，所以翻一道。
+    const missing = missingInputs(nodeId, workflowId)
+    if (missing.length > 0) {
+      const labels = missing.map((name) => spec.inputs.find((input) => input.id === name)?.label ?? name)
+      setStatus(`这套工作流需要接上「${labels.join('、')}」：把上游节点的输出连到这个节点的对应入口`)
       return
     }
 
@@ -1367,7 +1403,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       setRunningNodeId(null)
       runStartedAt.current.delete(nodeId)
     }
-  }, [markDirty, projectId, setNodes, settleJob, workflowFor])
+  }, [markDirty, missingInputs, projectId, setNodes, settleJob, workflowFor])
 
   /** Show a specific version in the card, and remember it as the chosen one.
    *
@@ -1665,7 +1701,7 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
       const kind = String(node?.data.kind ?? '')
       const known = kind === 'video' || kind === 'image'
       // 先精确到「这一类 + 这一套工作流」，没有才退到「这一类」，再没有就不说。
-      const exact = known && node !== undefined ? stats.byWorkflow[`${kind}/${workflowFor(node.data)}`] : undefined
+      const exact = known && node !== undefined ? stats.byWorkflow[`${kind}/${workflowFor(node.id, node.data)}`] : undefined
       const estimateMs = exact?.medianMs ?? (known ? (stats.byKind[kind]?.medianMs ?? 0) : stats.medianMs)
       // 开始时间按节点记：两件活同时跑时，一个全局时间戳会让两边的倒计时都错。
       const startedAt = runStartedAt.current.get(nodeId) ?? 0

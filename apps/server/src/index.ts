@@ -124,12 +124,20 @@ const jobs = createJobRegistry({
       shotId = store.addShot(request.projectId, request.prompt.slice(0, 40), request.prompt).id
     }
     const history = store.listTakes(shotId)
-    // 首帧/尾帧从画布上解析：入边指向的那张图的素材地址。**只在这里读一次文档**，
-    // 而且只为解析连线——落盘前会再读一次，因为渲染这十几分钟里别人可能改了画布，
+    // 入边上的输入图（首帧/尾帧/参考图）。**端口 id 就是工作流里的占位符名**
+    // （`first` / `last` / `ref`），所以这里只按端口名收一遍就够了——不需要
+    // 「端口 → 占位符」的第二张对照表，工作流用不到的键它自己会忽略。
+    // 只读这一份文档解析连线；落盘前会再读一次，因为渲染这十几分钟里别人可能改了画布，
     // 拿旧的这份去写会把他的改动覆盖掉。
     const before = readDocument(store, request.projectId)
-    const firstFrameUrl = inboundImageUrl(before, request.nodeId, 'first')
-    const lastFrameUrl = inboundImageUrl(before, request.nodeId, 'last')
+    const images: Record<string, string> = {}
+    for (const edge of before.edges) {
+      if (edge.target !== request.nodeId) continue
+      const name = String(edge.targetHandle ?? '')
+      if (name === '' || images[name] !== undefined) continue
+      const url = inboundImageUrl(before, request.nodeId, name)
+      if (url !== '') images[name] = url
+    }
     const files = await gateway.renderImage({
       prompt: request.prompt,
       shotId,
@@ -137,8 +145,7 @@ const jobs = createJobRegistry({
       ...(request.count === undefined ? {} : { count: request.count }),
       ...(request.workflowId === undefined ? {} : { workflowId: request.workflowId }),
       ...(request.duration === undefined ? {} : { duration: request.duration }),
-      ...(firstFrameUrl === '' ? {} : { firstFrameUrl }),
-      ...(lastFrameUrl === '' ? {} : { lastFrameUrl }),
+      ...(Object.keys(images).length === 0 ? {} : { images }),
     }, {
       onQueued: hooks.queued,
       onProgress: (progress) => { hooks.progress(progress as unknown as Record<string, unknown>) },

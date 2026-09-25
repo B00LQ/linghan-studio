@@ -146,7 +146,7 @@ check('记了一条成功的 take', takes.length === 1 && takes[0]?.status === '
 check('take 上有耗时', (takes[0]?.latencyMs ?? 0) > 60_000, `${String(Math.round((takes[0]?.latencyMs ?? 0) / 1000))}s`)
 // 图生视频时，首帧是哪张图必须落在 take 里：光看提示词分不出「这一版是从哪张图起的」。
 if (FIRST_FRAME !== '') {
-  const recorded = takes[0]?.params?.firstFrame
+  const recorded = takes[0]?.params?.images?.first
   check('take 里记下了首帧', typeof recorded === 'string' && recorded.startsWith(FIRST_FRAME),
     `${String(recorded)}（用的是 ${FIRST_FRAME}）`)
 }

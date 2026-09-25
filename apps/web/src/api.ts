@@ -236,6 +236,13 @@ export interface WorkflowInfo {
   missingModels: string[]
   /** True when the active driver cannot run ComfyUI graphs at all. */
   offline: boolean
+  /**
+   * 必须接上的输入（端口 id，如 `ref`）。
+   *
+   * 画布拿它做两件事：没接就别默认选这套（接了参考图却还用着文生图，等于白连），
+   * 以及生成前拦一道、给人话（而不是跑出一张和参考图无关的图）。
+   */
+  requires: string[]
 }
 
 /** Where one logical value goes in a workflow's graph. */

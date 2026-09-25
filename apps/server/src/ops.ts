@@ -235,12 +235,12 @@ export function applyOps(doc: CanvasDocument, ops: CanvasOp[]): OpResult[] {
         results.push({ type: op.type, edgeId: existing.id, note: '连线已存在' })
         continue
       }
-      // 端口按**上游产品的类型**挑默认入口（见 TARGET_PORT_BY_SOURCE）：Agent 没有
-      // 端口这个概念，而视频节点有三个入边。想接尾帧就显式给 `port`。
+      // 端口按**两头**的类型挑默认入口（见 TARGET_PORT_BY_KIND）：Agent 没有端口这个概念，
+      // 而图片接到视频上是「首帧」、接到图片上却是「参考图」。想接尾帧就显式给 `port`。
       // 这里只写一个 handle id，不校验目标节点有没有这个入口——目标节点有哪些入边是
       // **画布目录**（前端 ports.ts）的事，客户端加载时会照它解释；写错的那条边不会
       // 被 resolvePrompt / inboundImageUrl 采用，所以最多是一条不生效的线，不会出错图。
-      const port = op.port ?? TARGET_PORT_BY_SOURCE[String(from.data.kind ?? '')]
+      const port = op.port ?? TARGET_PORT_BY_KIND[String(from.data.kind ?? '')]?.[String(to.data.kind ?? '')]
       const edge: CanvasEdge = {
         id: `edge-${randomUUID()}`,
         source: op.from,
@@ -294,27 +294,29 @@ export function resolvePrompt(doc: CanvasDocument, node: CanvasNode): string {
 }
 
 /**
- * Which inbound port receives a given kind of upstream product.
+ * Which inbound port receives a product, by (upstream kind, downstream kind).
  *
- * 服务端也得知道「端口」这件事：Agent 的 `canvas_connect` 没有端口这个概念，而视频
- * 节点现在有三个入边（提示词 / 首帧 / 尾帧）。没有这张表，Agent 把图片接到视频节点上
- * 会落到**第一个**入边（提示词）上——那是一条连了却什么都不做的线。
+ * 服务端也得知道「端口」这件事：Agent 的 `canvas_connect` 没有端口这个概念，
+ * 而一个节点现在可以有多个入边（视频：提示词/首帧/尾帧；图片：提示词/参考图）。
  *
- * 这份映射**必须**与 `apps/web/src/canvas/ports.ts` 的目录一致，所以
- * `ports-test.mjs` 会拿两边的目录对一遍：不一致就红，而不是等一个人肉发现。
+ * **必须按两头一起判**：图片接到视频上是「首帧」，接到图片上却是「参考图」——
+ * 只看上游类型分不出这两种，落错口就是一条连了却什么都不做的线。
+ *
+ * 这份映射**必须**与 `apps/web/src/canvas/ports.ts` 的目录一致，所以 `ports-test.mjs`
+ * 会拿两边的目录对一遍：不一致就红，而不是等一个人肉发现。
  */
-export const TARGET_PORT_BY_SOURCE: Record<string, string | undefined> = {
-  text: 'prompt',
-  image: 'first',
+export const TARGET_PORT_BY_KIND: Record<string, Record<string, string | undefined>> = {
+  text: { image: 'prompt', video: 'prompt' },
+  image: { video: 'first', image: 'ref' },
 }
 
 /**
  * Port ids an Agent may name explicitly on a connection.
  *
- * 「首帧」有默认值（图片自动进首帧），「尾帧」没有——所以它只能被显式点名。
+ * 「首帧」「参考图」有默认值（按两头的类型自动选），「尾帧」没有——它只能被显式点名。
  * 这份常量同时是**工具 schema 的枚举**与测试的判据，避免枚举在 schema 里另抄一遍。
  */
-export const CONNECTABLE_PORTS = ['prompt', 'first', 'last'] as const
+export const CONNECTABLE_PORTS = ['prompt', 'first', 'last', 'ref'] as const
 
 /**
  * The asset url feeding one inbound image port of a node.

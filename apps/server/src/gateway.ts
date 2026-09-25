@@ -111,14 +111,12 @@ export interface RenderRequest {
   /** Which stored workflow to run; empty means the default one. */
   workflowId?: string
   /**
-   * 首帧 / 尾帧：画布上那张图的素材 url（`/api/assets/<id>`）。
+   * 首帧 / 尾帧 / 参考图：**键是画布上的端口 id**（`first` / `last` / `ref`），值是素材 url。
    *
-   * 传 url 而不是字节，是因为**读文件这件事归 store**（素材是内容寻址的，
-   * 调用方不该自己拼路径）。驱动会把它上传到 ComfyUI 的 input 目录，再让
-   * 工作流里的 `LoadImage` 用它 —— `LoadImage` 只认那边的文件名。
+   * 键直接用端口 id（而不是另起 `firstFrame` 这种名字），是为了不再需要第二张对照表：
+   * 服务端按入边填，工作流里写 `$first` / `$ref` 就能取到，用不到的键它自己忽略。
    */
-  firstFrameUrl?: string
-  lastFrameUrl?: string
+  images?: Record<string, string>
 }
 
 /** Gateway surface the HTTP layer mounts. */
@@ -198,6 +196,27 @@ function asString(value: unknown): string {
 function asAssetUrl(value: string): string {
   if (value === '') return ''
   return value.startsWith('/api/assets/') ? value : `/api/assets/${value}`
+}
+
+/**
+ * Read the input-image fields an API caller may pass.
+ *
+ * 键就是画布上的端口 id：`first_frame` → `first`、`last_frame` → `last`、`reference` → `ref`。
+ * 画布那条路**不需要**这些字段（服务端自己按入边解析），这是给没有画布的调用方的。
+ * @param body - parsed request body.
+ * @returns a port-id → asset-url map, or undefined when nothing was asked for.
+ */
+function imageInputsOf(body: Record<string, unknown>): Record<string, string> | undefined {
+  const pairs: [string, string][] = [
+    ['first', asString(body.first_frame ?? body.firstFrame)],
+    ['last', asString(body.last_frame ?? body.lastFrame)],
+    ['ref', asString(body.reference ?? body.ref)],
+  ]
+  const images: Record<string, string> = {}
+  for (const [name, value] of pairs) {
+    if (value !== '') images[name] = asAssetUrl(value)
+  }
+  return Object.keys(images).length === 0 ? undefined : images
 }
 
 /** Coerce a field to a bounded positive integer. */
@@ -283,8 +302,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
    * @param url - `/api/assets/<id>`, or empty.
    * @returns the bytes plus a stable file name, or undefined when there is none.
    */
-  const frameOf = (url: string | undefined): { bytes: Buffer; name: string } | undefined => {
-    if (url === undefined || url === '') return undefined
+  const inputOf = (url: string): { bytes: Buffer; name: string } | undefined => {
+    if (url === '') return undefined
     const id = url.split('/').filter((part) => part !== '').pop() ?? ''
     const asset = store.getAsset(id)
     if (asset === undefined || asset.kind !== 'image') return undefined
@@ -295,6 +314,16 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     return { bytes, name: `${asset.id}${ext}` }
   }
 
+  /** 把请求里那张「端口 id → 素材 url」的表读成一包字节。读不到的键直接丢掉。 */
+  const inputsOf = (images: Record<string, string> | undefined): Record<string, { bytes: Buffer; name: string }> => {
+    const ready: Record<string, { bytes: Buffer; name: string }> = {}
+    for (const [name, url] of Object.entries(images ?? {})) {
+      const file = inputOf(url)
+      if (file !== undefined) ready[name] = file
+    }
+    return ready
+  }
+
   const generate = async (
     prompt: string,
     size: { width: number; height: number },
@@ -303,7 +332,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     workflowId = '',
     duration?: number,
     onQueued?: (comfyPromptId: string) => void,
-    frames: { first?: { bytes: Buffer; name: string }; last?: { bytes: Buffer; name: string } } = {},
+    inputs: Record<string, { bytes: Buffer; name: string }> = {},
   ): Promise<GeneratedImage[]> => {
     // 云端与占位驱动都只出图片，所以它们的 mime 是常量；视频只可能来自本地
     // ComfyUI 工作流，也只有那条路需要按文件名判类型。
@@ -318,8 +347,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         count,
         ...(workflowId === '' ? {} : { workflowId }),
         ...(duration === undefined ? {} : { duration }),
-        ...(frames.first === undefined ? {} : { firstFrame: frames.first }),
-        ...(frames.last === undefined ? {} : { lastFrame: frames.last }),
+        ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
       }, onProgress, onQueued)
     }
     log(`gateway: placeholder driver answered "${prompt.slice(0, 40)}" at ${String(size.width)}x${String(size.height)}`)
@@ -375,9 +403,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
      * 空字符串表示「服务端自己挑的默认那套」，那就什么都不记。
      */
     workflowId?: string
-    /** 首帧/尾帧的文件名，图生视频的版本靠它才分得出来。 */
-    firstFrame?: string
-    lastFrame?: string
+    /** 输入图（首帧/尾帧/参考图）的文件名，按端口 id 记，图生视频/图生图的版本靠它才分得出来。 */
+    images?: Record<string, string>
     error?: string
   }): string => {
     if (input.shotId === '') return ''
@@ -397,8 +424,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         size: `${String(input.size.width)}x${String(input.size.height)}`,
         count: input.count,
         ...(input.workflowId === undefined || input.workflowId === '' ? {} : { workflow: input.workflowId }),
-        ...(input.firstFrame === undefined ? {} : { firstFrame: input.firstFrame }),
-        ...(input.lastFrame === undefined ? {} : { lastFrame: input.lastFrame }),
+        ...(input.images === undefined || Object.keys(input.images).length === 0 ? {} : { images: input.images }),
       },
       ...(input.seed === undefined ? {} : { seed: input.seed }),
       latencyMs: input.latencyMs,
@@ -421,11 +447,11 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     const size = asSize(request.size)
     const count = asCount(request.count ?? 1)
     const shotId = request.shotId?.trim() ?? ''
-    // 首帧/尾帧在这一层就从素材库读出来：**读文件归 store**，驱动只负责把字节送进
-    // ComfyUI 的 input 目录。读不到（素材被删、文件丢了）就当没接——工作流里那条
-    // 可选支路会被剪掉，而不是拿一个不存在的文件名去让 ComfyUI 报错。
-    const first = frameOf(request.firstFrameUrl)
-    const last = frameOf(request.lastFrameUrl)
+    // 输入图（首帧/尾帧/参考图）在这一层就从素材库里读出来：**读文件归 store**，
+    // 驱动只负责把字节送进 ComfyUI 的 input 目录。读不到（素材被删、文件丢了）就当没接——
+    // 工作流里那条可选支路会被剪掉；要是它本来就**必需**（图生图要参考图），
+    // 驱动会拒绝并说清楚缺哪个，而不是拿一个不存在的文件名去让 ComfyUI 报错。
+    const inputs = inputsOf(request.images)
     const started = Date.now()
     let artifacts: GeneratedImage[]
     try {
@@ -435,10 +461,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
       artifacts = await generate(prompt, size, count, (progress) => {
         if (shotId !== '') deps.onProgress?.({ shotId, progress })
         hooks.onProgress?.(progress)
-      }, request.workflowId ?? '', request.duration, hooks.onQueued, {
-        ...(first === undefined ? {} : { first }),
-        ...(last === undefined ? {} : { last }),
-      })
+      }, request.workflowId ?? '', request.duration, hooks.onQueued, inputs)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // A failed attempt is still a take — without it the version history lies by omission.
@@ -450,8 +473,7 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         size,
         count,
         workflowId: request.workflowId ?? '',
-        ...(first === undefined ? {} : { firstFrame: first.name }),
-        ...(last === undefined ? {} : { lastFrame: last.name }),
+        ...(Object.keys(inputs).length === 0 ? {} : { images: Object.fromEntries(Object.entries(inputs).map(([name, file]) => [name, file.name])) }),
         error: message,
       })
       throw error
@@ -472,9 +494,8 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         size,
         count,
         workflowId: request.workflowId ?? '',
-        // 记下「这一版是从哪张图开始的」：图生视频的版本，光看提示词分不出来。
-        ...(first === undefined ? {} : { firstFrame: first.name }),
-        ...(last === undefined ? {} : { lastFrame: last.name }),
+        // 记下「这一版是从哪张图起的」：图生视频/图生图的版本，光看提示词分不出来。
+        ...(Object.keys(inputs).length === 0 ? {} : { images: Object.fromEntries(Object.entries(inputs).map(([name, file]) => [name, file.name])) }),
       })
       return {
         url: `/api/assets/${asset.id}`,
@@ -497,14 +518,9 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
         workflowId: asString(body.workflow),
         // 视频工作流用得到；图片工作流会忽略它（图里没有 $duration 就用不上）。
         ...(body.duration === undefined ? {} : { duration: Number(body.duration) }),
-        // 图生视频的首帧/尾帧。**这条路没有画布节点可解析入边**，所以要让调用方直接
-        // 指名是哪张图：给素材 id 或 `/api/assets/<id>` 都认（见 firstFrameUrl 的说明）。
-        ...(asString(body.first_frame ?? body.firstFrame) === ''
-          ? {}
-          : { firstFrameUrl: asAssetUrl(asString(body.first_frame ?? body.firstFrame)) }),
-        ...(asString(body.last_frame ?? body.lastFrame) === ''
-          ? {}
-          : { lastFrameUrl: asAssetUrl(asString(body.last_frame ?? body.lastFrame)) }),
+        // 图生视频/图生图的输入图：这条路没有画布节点可解析入边，所以要显式指名
+        // （素材 id 或 `/api/assets/<id>` 都认）。
+        ...(imageInputsOf(body) === undefined ? {} : { images: imageInputsOf(body) as Record<string, string> }),
       })
       const data = images.map((image) => image.takeId === undefined
         ? { url: image.url }

@@ -69,8 +69,14 @@ export const CANVAS_NODES: CanvasNodeSpec[] = [
   {
     kind: 'image',
     title: '图片',
-    description: '文字生图；也可以接入上游文本作为提示词',
-    inputs: [{ id: 'prompt', kind: 'text', label: '提示词' }],
+    description: '文字生图；也可以接入上游文本作为提示词，或接一张参考图做图生图',
+    // 「参考图」是**可选**入边：接上就默认改用图生图那套工作流（见画布的 workflowFor），
+    // 不接就是文生图。它和视频节点的「首帧」是同一个机制，只是端口名不同（ref / first），
+    // 而端口名就是工作流里的占位符名——服务端不需要第二张对照表。
+    inputs: [
+      { id: 'prompt', kind: 'text', label: '提示词' },
+      { id: 'ref', kind: 'image', label: '参考图' },
+    ],
     outputs: [{ id: 'image', kind: 'image', label: '画面' }],
     placeholder: '可直接文字生图，或接入上游文本。例如：废车站的候车厅，斜射的晨光，尘埃',
     picture: true,

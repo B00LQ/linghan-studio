@@ -99,14 +99,13 @@ export interface ComfyUiRequest {
   /** Which stored workflow to run; the driver's default when omitted. */
   workflowId?: string
   /**
-   * 首帧 / 尾帧的字节。
+   * 输入图：**名字就是工作流里那个 `$占位符` 的名字**，也是画布节点的端口 id
+   * （首帧 = `first`、尾帧 = `last`、参考图 = `ref`）。
    *
-   * 驱动负责把它们**上传到 ComfyUI 的 input 目录**，再把返回的文件名当
-   * `$firstFrame` / `$lastFrame` 交给工作流 —— `LoadImage` 只认那边的文件名，
-   * 而「那边的目录在哪」是驱动才知道的事，所以上传这一趟归这里，不归上层。
+   * 名字用端口 id 而不是另起一套（从前叫 `firstFrame`），是为了**不要再有一张对照表**：
+   * 服务端按入边填这张表，工作流用不到的键它自己会忽略。多一套命名就多一处会漂的地方。
    */
-  firstFrame?: { bytes: Buffer; name: string }
-  lastFrame?: { bytes: Buffer; name: string }
+  inputs?: Record<string, { bytes: Buffer; name: string }>
 }
 
 /**
@@ -399,17 +398,24 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     report: (progress: GenerationProgress) => void,
     onQueued?: (comfyPromptId: string) => void,
   ): Promise<{ bytes: Buffer; mime: string; kind: string }[]> => {
-    // 首帧/尾帧先送过去。顺序在这里是**故意**的：提交之前必须已经在 input 目录里，
+    // 输入图先送过去。顺序在这里是**故意**的：提交之前必须已经在 input 目录里，
     // 否则 ComfyUI 会在校验阶段就拒绝（找不到图）。
-    const frameValues: Record<string, string> = {}
-    if (request.firstFrame !== undefined) frameValues.firstFrame = await uploadImage(request.firstFrame)
-    if (request.lastFrame !== undefined) frameValues.lastFrame = await uploadImage(request.lastFrame)
+    const inputValues: Record<string, string> = {}
+    for (const [name, image] of Object.entries(request.inputs ?? {})) {
+      inputValues[name] = await uploadImage(image)
+    }
+    // 工作流声明了「必须有」的输入却没人给（比如选了图生图但没接参考图）：
+    // **在这里拦住**，而不是让它跑出一张和参考图毫无关系的图。
+    const missing = (libraryWorkflow.requires ?? []).filter((name) => inputValues[name] === undefined)
+    if (missing.length > 0) {
+      throw new Error(`工作流「${libraryWorkflow.title}」需要接上输入：${missing.join('、')}（图生图要参考图、图生视频要首帧），这次没有`)
+    }
 
     // 一套机制运行所有工作流：上传的用显式绑定，内置的用 $占位符，
     // 两条路都收敛到 resolveGraph，驱动不需要分支。
     const graph = resolveGraph(libraryWorkflow, {
       ...libraryWorkflow.defaults,
-      ...frameValues,
+      ...inputValues,
       width: request.width,
       height: request.height,
       ...(request.steps === undefined ? {} : { steps: request.steps }),
