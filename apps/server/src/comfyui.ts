@@ -225,6 +225,13 @@ export interface ComfyUiDriver {
    * @returns the catalogue, or null when ComfyUI cannot be reached.
    */
   objectInfo: () => Promise<Record<string, { input?: { required?: Record<string, unknown[]> } }> | null>
+  /**
+   * 换一个 ComfyUI 地址（设置页改完立刻生效）。
+   *
+   * 顺手清掉两处缓存：节点目录是按旧地址探的，模板缓存也不该跨实例留着。
+   * @param baseUrl - the new base URL.
+   */
+  setBase: (baseUrl: string) => void
 }
 
 /** Fetch with a hard timeout, so a hung ComfyUI cannot pin a request forever. */
@@ -307,7 +314,9 @@ function watchProgress(
  * @returns the driver surface.
  */
 export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
-  const base = options.baseUrl.replace(/\/+$/u, '')
+  // **可变**：设置页改完地址要立刻生效，不必重启容器。所有用到 base 的地方都读这个
+  // 变量本身，所以 setBase 之后下一次请求就走新地址。
+  let base = options.baseUrl.replace(/\/+$/u, '')
   const directory = options.templateDir ?? TEMPLATE_DIR
   let cached: StudioWorkflow | undefined
 
@@ -547,6 +556,12 @@ export function createComfyUiDriver(options: ComfyUiOptions): ComfyUiDriver {
     selfCheck,
     capabilities: { progress: 'steps' },
     objectInfo,
+    setBase(baseUrl) {
+      base = baseUrl.replace(/\/+$/u, '')
+      catalog = null
+      cached = undefined
+      options.log(`comfyui: 地址改为 ${base}`)
+    },
     async generate(request, onProgress, onQueued) {
       const workflow = await template(request.workflowId ?? '')
       const started = Date.now()

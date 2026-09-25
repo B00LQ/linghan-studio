@@ -17,6 +17,7 @@ export type Route =
   | { name: 'projects' }
   | { name: 'assets' }
   | { name: 'workflows' }
+  | { name: 'settings' }
   | { name: 'canvas'; projectId: string }
   | { name: 'notFound'; path: string }
 
@@ -26,6 +27,7 @@ const ROUTES: { pattern: string; name: Route['name'] }[] = [
   { pattern: '/projects', name: 'projects' },
   { pattern: '/assets', name: 'assets' },
   { pattern: '/workflows', name: 'workflows' },
+  { pattern: '/settings', name: 'settings' },
   { pattern: '/canvas/:projectId', name: 'canvas' },
 ]
 

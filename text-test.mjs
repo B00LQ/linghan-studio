@@ -39,7 +39,7 @@ const startFake = async (reply) => {
 const deps = { store: {}, log: () => { /* 安静 */ } }
 
 log('① 没配 key = stub：占位文本，且如实说「没配」')
-const stub = createTextBackend(deps, {})
+const stub = createTextBackend(deps, () => ({}))
 check('stub 驱动', stub.status().driver === 'stub', stub.status().driver)
 check('configured=false', stub.status().configured === false)
 check('note 里说了要设哪个变量', stub.status().note.includes('STUDIO_TEXT_API_KEY'), stub.status().note)
@@ -54,7 +54,7 @@ const env = {
   STUDIO_TEXT_BASE_URL: fake.url,
   STUDIO_TEXT_MODEL: 'my-model',
 }
-const live = createTextBackend(deps, env)
+const live = createTextBackend(deps, () => env)
 check('驱动是 openai', live.status().driver === 'openai', live.status().driver)
 check('model 报的是配的那个', live.status().model === 'my-model', live.status().model)
 check('base url 末尾斜杠被去掉', textConfigFrom({ ...env, STUDIO_TEXT_BASE_URL: `${fake.url}/` }).baseUrl === fake.url, textConfigFrom(env).baseUrl)
@@ -73,7 +73,7 @@ await fake.close()
 
 log('③ 报错要带上服务端的原话（401/404/429 的处理方式完全不同）')
 const denied = await startFake({ status: 401, raw: '{"error":{"message":"Invalid API key"}}' })
-const deniedBackend = createTextBackend(deps, { STUDIO_TEXT_API_KEY: 'bad', STUDIO_TEXT_BASE_URL: denied.url })
+const deniedBackend = createTextBackend(deps, () => ({ STUDIO_TEXT_API_KEY: 'bad', STUDIO_TEXT_BASE_URL: denied.url }))
 let deniedMessage = ''
 try { await deniedBackend.generate({ prompt: 'x' }) } catch (error) { deniedMessage = String(error) }
 check('报错含状态码', deniedMessage.includes('401'), deniedMessage.slice(0, 80))
@@ -82,7 +82,7 @@ await denied.close()
 
 log('④ 回了空内容也算失败（不能把空白写进人的节点）')
 const empty = await startFake({ status: 200, payload: { choices: [{ message: { content: '   ' } }] } })
-const emptyBackend = createTextBackend(deps, { STUDIO_TEXT_API_KEY: 'k', STUDIO_TEXT_BASE_URL: empty.url })
+const emptyBackend = createTextBackend(deps, () => ({ STUDIO_TEXT_API_KEY: 'k', STUDIO_TEXT_BASE_URL: empty.url }))
 let emptyMessage = ''
 try { await emptyBackend.generate({ prompt: 'x' }) } catch (error) { emptyMessage = String(error) }
 check('空内容 → 明确报错', emptyMessage.includes('空内容'), emptyMessage.slice(0, 80))

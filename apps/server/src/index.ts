@@ -15,7 +15,7 @@ import { createAgentFace } from './agent.ts'
 import { createBridge } from './bridge.ts'
 import { createStudioRegistry } from './workflow/nodes.ts'
 import { createWorkflowRoutes } from './workflow/routes.ts'
-import { loadConfig } from './config.ts'
+import { loadConfig, SETTINGS, settingsView } from './config.ts'
 import { loadSiteContent } from './site.ts'
 import { createGateway } from './gateway.ts'
 import { createJobRegistry } from './jobs.ts'
@@ -43,8 +43,18 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 }
 
-const config = loadConfig()
-const store = openStore(config.dataDir)
+/**
+ * 配置分三层：**设置页 → 环境变量 → 内置默认**。
+ *
+ * 存储要用的数据目录只能先按环境变量定；拿到 store 之后再把设置页的覆盖值叠上去，
+ * 所以这里是「先开库、再重解析」。`previous` 传进去是为了沿用同一个 cookie 密钥 ——
+ * 否则改一次设置就把所有人踢下线。
+ */
+const baseConfig = loadConfig()
+const store = openStore(baseConfig.dataDir)
+/** 设置页写下来的覆盖值；改一次就重新读一遍（后端每次调用都会重新解析配置）。 */
+let settings = store.getSettings()
+const config = loadConfig(settings, baseConfig)
 // 回收站保留 30 天：不设期限的话它会变成第二个「全部项目」。
 const expired = store.purgeTrash(30)
 if (expired > 0) console.log(`[studio] 回收站清理：${String(expired)} 个超过 30 天的画布已彻底删除`)
@@ -101,17 +111,34 @@ const workflowRoutes = createWorkflowRoutes({
 })
 const secureCookies = process.env.STUDIO_SECURE_COOKIES === '1'
 
+/**
+ * 设置页改完之后调一次。
+ *
+ * 配置对象**就地**改（`Object.assign`），所以网关、Agent、作业运行器里所有已经
+ * 捕获了 `config` 的闭包立刻看到新值；只有驱动把地址存成了自己的变量，需要
+ * `gateway.applyConfig()` 那一声通知。文本/音频后端每次调用都重新解析，不用管。
+ */
+const applySettings = (): void => {
+  settings = store.getSettings()
+  Object.assign(config, loadConfig(settings, config))
+  gateway.applyConfig()
+  console.log(`[studio] 设置已更新：图像后端 ${config.imageDriver}，ComfyUI ${config.comfyuiUrl}`)
+}
+
+/** 文本/音频后端看到的环境：进程环境 **叠加** 设置页的覆盖值。 */
+const backendEnv = (): NodeJS.ProcessEnv => ({ ...process.env, ...settings })
+
 /** 文本后端：文本节点要能生成，就得有个模型；没配时是占位驱动。 */
 const textBackend = createTextBackend({
   store,
   log: (message) => { console.log(`[studio] ${message}`) },
-})
+}, backendEnv)
 
 /** 音频后端：独立的一段人声/配乐；没配时是占位驱动（合成一段真能播的 WAV）。 */
 const audioBackend = createAudioBackend({
   store,
   log: (message) => { console.log(`[studio] ${message}`) },
-})
+}, backendEnv)
 
 /**
  * 渲染作业：一次生成不再等于一个 HTTP 请求。
@@ -517,6 +544,51 @@ const server = createServer((req, res) => {
       // 音频后端（音频节点靠它出人声）。同一套形状：configured + note 给画布用。
       if (pathname === '/api/audio-backend' && method === 'GET') {
         json(res, 200, audioBackend.status())
+        return
+      }
+
+      // 设置页：读 / 写 / 测。
+      if (pathname === '/api/settings' && method === 'GET') {
+        json(res, 200, {
+          settings: settingsView(settings),
+          // 只读的那几项也一并给出：它们改了要重启（数据目录、端口），但人想知道现在是哪个。
+          dataDir: config.dataDir,
+          port: config.port,
+          passwordSet: config.password !== '',
+        })
+        return
+      }
+      if (pathname === '/api/settings' && method === 'PUT') {
+        const body = parseJson(await readText(req))
+        const values = typeof body.values === 'object' && body.values !== null
+          ? body.values as Record<string, unknown>
+          : {}
+        // **只认字段表里那几个键**：设置页不该能把任意环境变量名写进存储。
+        const allowed = new Set(SETTINGS.map((item) => item.key))
+        const saved: string[] = []
+        for (const [key, raw] of Object.entries(values)) {
+          if (!allowed.has(key)) continue
+          store.setSetting(key, typeof raw === 'string' ? raw.trim() : '')
+          saved.push(key)
+        }
+        if (saved.length > 0) applySettings()
+        json(res, 200, { settings: settingsView(settings), saved })
+        return
+      }
+      if (pathname === '/api/settings/test' && method === 'POST') {
+        const body = parseJson(await readText(req))
+        const target = typeof body.target === 'string' ? body.target : ''
+        if (target === 'image') {
+          json(res, 200, { target, ...(await gateway.backend()) })
+          return
+        }
+        if (target === 'text' || target === 'audio') {
+          const backend = target === 'text' ? textBackend : audioBackend
+          const probe = await backend.probe()
+          json(res, 200, { target, ok: probe.ok, detail: probe.detail, ...backend.status() })
+          return
+        }
+        json(res, 400, { error: 'target 必须是 image / text / audio' })
         return
       }
 

@@ -42,6 +42,11 @@ export interface AudioBackend {
 export interface StudioAudioBackend {
   status: () => AudioBackend
   speak: (request: SpeechRequest) => Promise<SpeechResult>
+  /**
+   * 探一下通不通（只问「有哪些模型」，不花合成的钱）——设置页上「测一下」用它。
+   * @returns 一句人话 + 是否可用。
+   */
+  probe: () => Promise<{ ok: boolean; detail: string }>
 }
 
 /** Everything the audio backend needs. */
@@ -133,27 +138,48 @@ const MIME_BY_FORMAT: Record<string, string> = {
 /**
  * Build the audio backend.
  * @param deps - store and logger.
- * @param env - process environment (injected so tests can drive it).
+ * @param envSource - 当前环境（默认 process.env）。**每次调用都重新解析**，所以设置页
+ *   改完 key / 地址立刻生效；测试也可以塞一份假环境进来。
  * @returns the backend surface.
  */
-export function createAudioBackend(deps: AudioBackendDeps, env: NodeJS.ProcessEnv = process.env): StudioAudioBackend {
-  const config = audioConfigFrom(env)
+export function createAudioBackend(deps: AudioBackendDeps, envSource: () => NodeJS.ProcessEnv = () => process.env): StudioAudioBackend {
+  const cfg = (): AudioConfig => audioConfigFrom(envSource())
 
-  const status = (): AudioBackend => config.driver === 'stub'
-    ? {
-      driver: 'stub',
-      model: '占位音',
-      configured: false,
-      note: '没有配置语音模型：设 STUDIO_AUDIO_API_KEY（以及需要的 STUDIO_AUDIO_BASE_URL / _MODEL / _VOICE）才能真出人声',
+  const status = (): AudioBackend => {
+    const config = cfg()
+    return config.driver === 'stub'
+      ? {
+        driver: 'stub',
+        model: '占位音',
+        configured: false,
+        note: '没有配置语音模型：设 STUDIO_AUDIO_API_KEY（以及需要的 STUDIO_AUDIO_BASE_URL / _MODEL / _VOICE）才能真出人声',
+      }
+      : {
+        driver: 'openai',
+        model: config.model,
+        configured: true,
+        note: `OpenAI 兼容接口：${config.baseUrl}，模型 ${config.model}，音色 ${config.voice}`,
+      }
+  }
+
+  /** 探一下通不通：只问模型列表，不合成一段音频。 */
+  const probe = async (): Promise<{ ok: boolean; detail: string }> => {
+    const config = cfg()
+    if (config.driver === 'stub') return { ok: false, detail: '没有配置 Key（当前是占位音）' }
+    try {
+      const response = await fetch(`${config.baseUrl}/models`, {
+        headers: { authorization: `Bearer ${config.apiKey}` },
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (!response.ok) return { ok: false, detail: `接口回了 HTTP ${String(response.status)}` }
+      return { ok: true, detail: `地址通，模型 ${config.model}，音色 ${config.voice}` }
+    } catch (error) {
+      return { ok: false, detail: `连不上 ${config.baseUrl}：${error instanceof Error ? error.message : String(error)}` }
     }
-    : {
-      driver: 'openai',
-      model: config.model,
-      configured: true,
-      note: `OpenAI 兼容接口：${config.baseUrl}，模型 ${config.model}，音色 ${config.voice}`,
-    }
+  }
 
   const speak = async (request: SpeechRequest): Promise<SpeechResult> => {
+    const config = cfg()
     const voice = request.voice === undefined || request.voice.trim() === '' ? config.voice : request.voice.trim()
     if (config.driver === 'stub') {
       // 时长按字数粗略给：占位音也该「长一点的话更长」，否则人以为长文本被截断了。
@@ -184,5 +210,5 @@ export function createAudioBackend(deps: AudioBackendDeps, env: NodeJS.ProcessEn
     }
   }
 
-  return { status, speak }
+  return { status, speak, probe }
 }

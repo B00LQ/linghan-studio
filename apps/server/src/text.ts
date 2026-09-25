@@ -40,6 +40,11 @@ export interface StudioTextBackend {
   status: () => TextBackend
   /** Generate one piece of text. */
   generate: (request: TextRequest) => Promise<string>
+  /**
+   * 探一下通不通（只问「有哪些模型」，不花生成的钱）——设置页上「测一下」用它。
+   * @returns 一句人话 + 是否可用。
+   */
+  probe: () => Promise<{ ok: boolean; detail: string }>
 }
 
 /** Everything the text backend needs. */
@@ -86,25 +91,50 @@ export function textConfigFrom(env: NodeJS.ProcessEnv): TextConfig {
 /**
  * Build the text backend.
  * @param deps - store and logger.
- * @param env - process environment (injected so tests can drive it).
+ * @param envSource - 当前环境（默认 process.env）。**每次调用都重新解析**，所以设置页
+ *   改完 key / 地址立刻生效，不必重启；测试也可以塞一份假环境进来。
  * @returns the backend surface.
  */
-export function createTextBackend(deps: TextBackendDeps, env: NodeJS.ProcessEnv = process.env): StudioTextBackend {
-  const config = textConfigFrom(env)
+export function createTextBackend(deps: TextBackendDeps, envSource: () => NodeJS.ProcessEnv = () => process.env): StudioTextBackend {
+  /** 每次用之前重新解析一遍：几个字符串操作，换来「改完就生效」。 */
+  const cfg = (): TextConfig => textConfigFrom(envSource())
 
-  const status = (): TextBackend => config.driver === 'stub'
-    ? {
-      driver: 'stub',
-      model: '占位文本',
-      configured: false,
-      note: '没有配置文本模型：设 STUDIO_TEXT_API_KEY（以及需要的 STUDIO_TEXT_BASE_URL / STUDIO_TEXT_MODEL）才能真出文本',
+  const status = (): TextBackend => {
+    const config = cfg()
+    return config.driver === 'stub'
+      ? {
+        driver: 'stub',
+        model: '占位文本',
+        configured: false,
+        note: '没有配置文本模型：设 STUDIO_TEXT_API_KEY（以及需要的 STUDIO_TEXT_BASE_URL / STUDIO_TEXT_MODEL）才能真出文本',
+      }
+      : {
+        driver: 'openai',
+        model: config.model,
+        configured: true,
+        note: `OpenAI 兼容接口：${config.baseUrl}，模型 ${config.model}`,
+      }
+  }
+
+  /**
+   * 探一下这个后端通不通：**只问「有没有模型」**（`GET /models`），
+   * 不真生成一段文本 —— 设置页上点「测一下」不该花人的钱。
+   * @returns 一句人话 + 是否可用。
+   */
+  const probe = async (): Promise<{ ok: boolean; detail: string }> => {
+    const config = cfg()
+    if (config.driver === 'stub') return { ok: false, detail: '没有配置 Key（当前是占位文本）' }
+    try {
+      const response = await fetch(`${config.baseUrl}/models`, {
+        headers: { authorization: `Bearer ${config.apiKey}` },
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (!response.ok) return { ok: false, detail: `接口回了 HTTP ${String(response.status)}` }
+      return { ok: true, detail: `地址通，模型 ${config.model}` }
+    } catch (error) {
+      return { ok: false, detail: `连不上 ${config.baseUrl}：${error instanceof Error ? error.message : String(error)}` }
     }
-    : {
-      driver: 'openai',
-      model: config.model,
-      configured: true,
-      note: `OpenAI 兼容接口：${config.baseUrl}，模型 ${config.model}`,
-    }
+  }
 
   /** 占位文本：把指令原样嵌进去，让人一眼看出「这是占位、不是模型写的」。 */
   const placeholder = (request: TextRequest): string => {
@@ -116,6 +146,7 @@ export function createTextBackend(deps: TextBackendDeps, env: NodeJS.ProcessEnv 
   }
 
   const generate = async (request: TextRequest): Promise<string> => {
+    const config = cfg()
     if (config.driver === 'stub') return placeholder(request)
     const messages: { role: 'system' | 'user'; content: string }[] = [
       {
@@ -154,5 +185,5 @@ export function createTextBackend(deps: TextBackendDeps, env: NodeJS.ProcessEnv 
     }
   }
 
-  return { status, generate }
+  return { status, generate, probe }
 }

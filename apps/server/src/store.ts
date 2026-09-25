@@ -263,6 +263,18 @@ export interface StudioStore {
    * @returns the bytes, or undefined when the row or the file is gone.
    */
   readAsset: (id: string) => Buffer | undefined
+  /**
+   * 设置页写下的覆盖值。
+   *
+   * 键是**环境变量名**（`COMFYUI_URL` / `STUDIO_TEXT_API_KEY` …）：一个东西一个名字，
+   * UI 里因此说得出「这个值来自环境变量还是来自设置页」。空值表示「没有覆盖」，
+   * 于是退回环境变量、再退回内置默认。
+   */
+  getSettings: () => Record<string, string>
+  /** 写一条覆盖；值给空串等于删掉这条覆盖。 */
+  setSetting: (key: string, value: string) => void
+  /** 删掉一条覆盖（退回环境变量/默认）。 */
+  clearSetting: (key: string) => void
   /** Close the underlying database. */
   close: () => void
 }
@@ -298,6 +310,13 @@ CREATE TABLE IF NOT EXISTS shot (
   selected_take_id TEXT
 );
 CREATE INDEX IF NOT EXISTS shot_by_project ON shot(project_id, idx);
+-- 设置页写下来的覆盖值：**键就是环境变量名**（一个东西一个名字，UI 里也说得出「它来自哪」）。
+-- 环境变量仍然有效：存储里的值优先，清掉某一条就退回环境变量/默认值。
+CREATE TABLE IF NOT EXISTS setting (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS take (
   id TEXT PRIMARY KEY,
   shot_id TEXT NOT NULL REFERENCES shot(id) ON DELETE CASCADE,
@@ -854,6 +873,21 @@ export function openStore(dataDir: string): StudioStore {
         // the row is already gone.
       }
       return true
+    },
+    getSettings() {
+      const rows = db.prepare('SELECT key, value FROM setting').all() as Row[]
+      const values: Record<string, string> = {}
+      for (const row of rows) values[text(row, 'key')] = text(row, 'value')
+      return values
+    },
+    setSetting(key, value) {
+      if (value === '') { this.clearSetting(key); return }
+      db.prepare(
+        'INSERT INTO setting (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      ).run(key, value, new Date().toISOString())
+    },
+    clearSetting(key) {
+      db.prepare('DELETE FROM setting WHERE key = ?').run(key)
     },
     close() {
       db.close()

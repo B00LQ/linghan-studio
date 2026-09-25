@@ -13,6 +13,7 @@ import { CanvasPage } from './pages/CanvasPage.tsx'
 import { HomePage } from './pages/HomePage.tsx'
 import { ProjectsPage } from './pages/ProjectsPage.tsx'
 import { WorkflowsPage } from './pages/WorkflowsPage.tsx'
+import { SettingsPage } from './pages/SettingsPage.tsx'
 import { navigate, useRoute } from './router.ts'
 
 /** Application root. */
@@ -134,6 +135,7 @@ export function App() {
         {navItem('/projects', '项目', route.name === 'projects')}
         {navItem('/assets', '资产', route.name === 'assets')}
         {navItem('/workflows', '工作流', route.name === 'workflows')}
+        {navItem('/settings', '设置', route.name === 'settings')}
         <span className="nav-spacer" />
         <footer>
           <span className="muted">本地算力 · {session.driver}</span>
@@ -145,6 +147,7 @@ export function App() {
         {route.name === 'projects' ? <ProjectsPage refreshToken={refreshToken} onChanged={refresh} /> : null}
         {route.name === 'assets' ? <AssetsPage refreshToken={refreshToken} /> : null}
         {route.name === 'workflows' ? <WorkflowsPage refreshToken={refreshToken} onChanged={refresh} /> : null}
+        {route.name === 'settings' ? <SettingsPage refreshToken={refreshToken} /> : null}
         {route.name === 'notFound' ? (
           <div className="page">
             <h1>页面不存在</h1>

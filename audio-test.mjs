@@ -51,7 +51,7 @@ check('不是静音（有实际波形）', tone.subarray(44).some((byte) => byte
 check('首尾是淡入淡出（不爆音）', Math.abs(tone.readInt16LE(44)) < 200, String(tone.readInt16LE(44)))
 
 log('② 没配 key = stub：能播的占位音，且如实说「没配」')
-const stub = createAudioBackend(deps, {})
+const stub = createAudioBackend(deps, () => ({}))
 check('stub 驱动', stub.status().driver === 'stub', stub.status().driver)
 check('configured=false', stub.status().configured === false)
 check('note 里说了要设哪个变量', stub.status().note.includes('STUDIO_AUDIO_API_KEY'), stub.status().note)
@@ -63,7 +63,7 @@ check('文本越长占位音越长（不让人以为被截断）',
 log('③ 配了 key = 走 OpenAI 兼容的 /audio/speech')
 const fake = await startFake({ status: 200, mime: 'audio/mpeg', bytes: Buffer.alloc(2048, 7) })
 const env = { STUDIO_AUDIO_API_KEY: 'sk-test', STUDIO_AUDIO_BASE_URL: fake.url, STUDIO_AUDIO_MODEL: 'my-tts', STUDIO_AUDIO_VOICE: 'cherry' }
-const live = createAudioBackend(deps, env)
+const live = createAudioBackend(deps, () => env)
 check('驱动是 openai', live.status().driver === 'openai', live.status().driver)
 check('base url 末尾斜杠被去掉', audioConfigFrom({ ...env, STUDIO_AUDIO_BASE_URL: `${fake.url}/` }).baseUrl === fake.url)
 const result = await live.speak({ text: '念这一句' })
@@ -82,7 +82,7 @@ await fake.close()
 
 log('④ 报错要带上服务端的原话')
 const denied = await startFake({ status: 401, raw: '{"error":{"message":"Invalid API key"}}' })
-const deniedBackend = createAudioBackend(deps, { STUDIO_AUDIO_API_KEY: 'bad', STUDIO_AUDIO_BASE_URL: denied.url })
+const deniedBackend = createAudioBackend(deps, () => ({ STUDIO_AUDIO_API_KEY: 'bad', STUDIO_AUDIO_BASE_URL: denied.url }))
 let deniedMessage = ''
 try { await deniedBackend.speak({ text: 'x' }) } catch (error) { deniedMessage = String(error) }
 check('报错含状态码与原话', deniedMessage.includes('401') && deniedMessage.includes('Invalid API key'), deniedMessage.slice(0, 120))
@@ -90,7 +90,7 @@ await denied.close()
 
 log('⑤ 回了空音频也算失败（不能把空文件存成素材）')
 const empty = await startFake({ status: 200, bytes: Buffer.alloc(0) })
-const emptyBackend = createAudioBackend(deps, { STUDIO_AUDIO_API_KEY: 'k', STUDIO_AUDIO_BASE_URL: empty.url })
+const emptyBackend = createAudioBackend(deps, () => ({ STUDIO_AUDIO_API_KEY: 'k', STUDIO_AUDIO_BASE_URL: empty.url }))
 let emptyMessage = ''
 try { await emptyBackend.speak({ text: 'x' }) } catch (error) { emptyMessage = String(error) }
 check('空音频 → 明确报错', emptyMessage.includes('空音频'), emptyMessage.slice(0, 80))

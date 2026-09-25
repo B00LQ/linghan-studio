@@ -385,6 +385,67 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 /** Probe the session. */
 export const fetchSession = (): Promise<SessionInfo> => request<SessionInfo>('/api/session')
 
+/** 一个可设置字段的当前状态（服务端 config.ts 的 SettingView）。 */
+export interface SettingField {
+  /** 环境变量名，也是提交时的键。 */
+  key: string
+  label: string
+  group: 'image' | 'text' | 'audio'
+  secret?: boolean
+  hint?: string
+  placeholder?: string
+  /** 非机密字段回显的值；机密字段永远是空串（不回显）。 */
+  value: string
+  /** 有没有值（机密字段靠它显示「已配置」）。 */
+  set: boolean
+  /** 这个值从哪来。 */
+  source: 'settings' | 'env' | 'default'
+  /** 环境变量里也有一份。 */
+  fromEnv: boolean
+}
+
+/** 设置页需要的全部状态。 */
+export interface SettingsState {
+  settings: SettingField[]
+  /** 数据目录与端口是只读展示：改它们要重启，界面上说明白。 */
+  dataDir: string
+  port: number
+  passwordSet: boolean
+}
+
+export const fetchSettings = (): Promise<SettingsState> => request<SettingsState>('/api/settings')
+
+/**
+ * 写设置。空串 = 清掉这条覆盖（退回环境变量/默认）。
+ * @param values - 只提交**改动过**的键。
+ * @returns 新的状态，以及这次实际写进去的键。
+ */
+export const saveSettings = (values: Record<string, string>): Promise<SettingsState & { saved: string[] }> =>
+  request<SettingsState & { saved: string[] }>('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ values }),
+  })
+
+/** 「测一下」的结果。 */
+export interface BackendTest {
+  target: string
+  ok: boolean
+  detail?: string
+  driver?: string
+  problems?: string[]
+  note?: string
+}
+
+/**
+ * 测一个后端通不通。
+ *
+ * 文本/音频只问「有哪些模型」，不真生成 —— 在设置页上点一下不该花人的钱。
+ * @param target - which backend to probe.
+ * @returns the verdict.
+ */
+export const testBackend = (target: 'image' | 'text' | 'audio'): Promise<BackendTest> =>
+  request<BackendTest>('/api/settings/test', { method: 'POST', body: JSON.stringify({ target }) })
+
 /** Exchange the deployment password for a session cookie. */
 export const login = (password: string): Promise<{ authenticated: boolean }> =>
   request('/api/login', { method: 'POST', body: JSON.stringify({ password }) })

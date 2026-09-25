@@ -142,6 +142,13 @@ export interface StudioGateway {
   backend: () => Promise<BackendStatus>
   /** What the active driver can report while it works. */
   capabilities: () => DriverCapabilities
+  /**
+   * 让驱动重新读一遍配置（设置页改了 ComfyUI 地址之后调它）。
+   *
+   * 配置对象是**就地改**的（`Object.assign(config, ...)`），所以网关里所有读
+   * `config.x` 的地方本来就立刻生效；只有驱动把地址存成了自己的变量，需要这一声通知。
+   */
+  applyConfig: () => void
   /** Validate an uploaded workflow before it is saved. */
   checkWorkflow: (graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>) => Promise<WorkflowVerdict>
   /**
@@ -610,6 +617,11 @@ export function createGateway(deps: GatewayDeps): StudioGateway {
     capabilities,
     checkWorkflow,
     renderImage,
+    applyConfig() {
+      // 驱动把地址存成了自己的变量，所以这里要主动同步一次；其余读 config 的地方
+      // 因为配置对象是就地改的，本来就立刻生效。
+      comfyui.setBase(config.comfyuiUrl)
+    },
     async abortRender(comfyPromptId) {
       // 只有本地 ComfyUI 能真的被中止；云端 API 一旦提交就只能等它回来，
       // 那时作业照样标记为已取消、结果丢掉——这是对使用者的承诺。
