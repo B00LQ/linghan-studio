@@ -68,14 +68,24 @@ Name: "desktopicon"; Description: "在桌面上放一个快捷方式"; GroupDesc
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-; 快捷方式指向那个 .cmd 启动器，但**图标用我们自己的**：
-; 不写 IconFilename 的话开始菜单里会是一个黑底白字的 cmd 图标。
-Name: "{group}\{#Product}"; Filename: "{app}\启动 {#Product}.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"
+; 快捷方式**直接指向 electron.exe**，不指向那个 .cmd ——
+; 双击 .cmd 会先弹一个黑糊糊的命令行窗口（cmd 是控制台程序，改不掉），
+; 而 electron.exe 是 GUI 程序：它由 main.cjs 用 `windowsHide: true` 起服务端，
+; 所以从双击到窗口出来，全程没有命令行窗口。
+;
+; 只在**没有 Electron** 的包里退回 .cmd（那种包本来也是排障用的，带控制台正好）。
+; 图标仍然用我们自己的（不写 IconFilename 的话开始菜单里会是个 cmd 图标）。
+Name: "{group}\{#Product}"; Filename: "{app}\electron\electron.exe"; Parameters: """{app}\desktop"""; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"; Check: FileExists(ExpandConstant('{app}\electron\electron.exe'))
+Name: "{group}\{#Product}"; Filename: "{app}\启动 {#Product}.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"; Check: not FileExists(ExpandConstant('{app}\electron\electron.exe'))
+Name: "{group}\{#Product}（带命令行窗口，排障用）"; Filename: "{app}\启动 {#Product}.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"; Check: FileExists(ExpandConstant('{app}\electron\electron.exe'))
 Name: "{group}\卸载 {#Product}"; Filename: "{uninstallexe}"; IconFilename: "{app}\icon.ico"
-Name: "{autodesktop}\{#Product}"; Filename: "{app}\启动 {#Product}.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
+Name: "{autodesktop}\{#Product}"; Filename: "{app}\electron\electron.exe"; Parameters: """{app}\desktop"""; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon; Check: FileExists(ExpandConstant('{app}\electron\electron.exe'))
+Name: "{autodesktop}\{#Product}"; Filename: "{app}\启动 {#Product}.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon; Check: not FileExists(ExpandConstant('{app}\electron\electron.exe'))
 
 [Run]
-Filename: "{app}\启动 {#Product}.cmd"; Description: "现在就启动"; Flags: postinstall nowait skipifsilent
+; 装完"现在就启动"走的也是同一个入口（同样不要那个黑窗口）。
+Filename: "{app}\electron\electron.exe"; Parameters: """{app}\desktop"""; WorkingDir: "{app}"; Description: "现在就启动"; Flags: postinstall nowait skipifsilent; Check: FileExists(ExpandConstant('{app}\electron\electron.exe'))
+Filename: "{app}\启动 {#Product}.cmd"; Description: "现在就启动"; Flags: postinstall nowait skipifsilent; Check: not FileExists(ExpandConstant('{app}\electron\electron.exe'))
 
 [UninstallDelete]
 ; 卸载**只删程序**：`app\`（自带那份程序）、`node\`（运行时）、`versions\`（自助更新装下来的那些版本）。
