@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>logo 预览</title>
+<style>
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #0b0b0d; color: #eee; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; }
+  .tile { min-height: 260px; display: flex; align-items: center; justify-content: center; gap: 26px; }
+  .dark { background: #0b0b0d; }
+  .light { background: #f6f5f2; color: #1a1a1a; }
+  .mid { background: #1a1a20; }
+  img.a { height: 118px; }
+  img.b { height: 52px; }
+  .side { display: flex; align-items: center; gap: 9px; font-size: 14px; letter-spacing: .18em; }
+  .cap { position: absolute; margin: 8px; font-size: 11px; opacity: .55; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="tile dark">
+      <span class="cap">深色界面 · 透明白墨</span>
+      <img class="a" src="ling-logo-light.png" />
+      <span class="side"><img class="b" src="ling-logo-light.png" />LINGHAN</span>
+    </div>
+    <div class="tile light">
+      <span class="cap">浅色界面 · 透明深墨</span>
+      <img class="a" src="ling-logo-dark.png" />
+      <span class="side"><img class="b" src="ling-logo-dark.png" />LINGHAN</span>
+    </div>
+    <div class="tile mid">
+      <span class="cap">深色圆角底标记 + favicon</span>
+      <img class="a" src="ling-mark.png" />
+      <img class="b" src="favicon.png" />
+    </div>
+  </div>
+</body>
+</html>

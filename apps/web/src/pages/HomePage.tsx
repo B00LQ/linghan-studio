@@ -63,31 +63,54 @@ export function HomePage({ onCreate, refreshToken }: HomePageProps) {
 
   return (
     <div className="home">
+      {/* 首屏：大留白 + 一团很慢的光。光晕是纯 CSS 的（不跑 JS、不动布局），
+          系统开了「减少动态效果」它就停住 —— 见 styles.css 的 hero-aurora。 */}
       <header className="home-hero">
-        <h1>{site?.brand.name ?? 'Studio'}</h1>
-        <p>{site?.brand.tagline ?? '本地算力的 AI 创作台'}</p>
-        <button
-          type="button"
-          className="home-create"
-          disabled={busy}
-          onClick={() => {
-            setBusy(true)
-            void onCreate().finally(() => { setBusy(false) })
-          }}
-        >
-          <span className="plus">＋</span>
-          <span>{busy ? '正在创建…' : '新建画布创作'}</span>
-        </button>
+        <div className="hero-aurora" aria-hidden="true">
+          <span className="orb gold" />
+          <span className="orb cool" />
+          <span className="veil" />
+        </div>
+        <div className="hero-inner">
+          <img className="hero-logo" src="/ling-mark.png" alt="" />
+          <p className="hero-kicker">LINGHAN</p>
+          <h1>{site?.brand.name ?? 'LHIC'}</h1>
+          <p className="hero-tagline">
+            {site?.brand.tagline ?? '本地算力优先的 AI 创作台：画布、素材与生成历史都留在你自己的机器上。'}
+          </p>
+          <div className="hero-actions">
+            <button
+              type="button"
+              className="home-create"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true)
+                void onCreate().finally(() => { setBusy(false) })
+              }}
+            >
+              <span className="plus">＋</span>
+              <span>{busy ? '正在创建…' : '新建画布创作'}</span>
+            </button>
+            <button type="button" className="hero-ghost" onClick={() => { navigate('/projects') }}>我的画布</button>
+          </div>
+          <p className="hero-foot">
+            {projects.length === 0 ? '还没有画布 —— 从上面那颗按钮开始。' : `已有 ${String(projects.length)} 张画布`}
+          </p>
+        </div>
       </header>
 
-      <section className="home-block">
-        <h2>能力</h2>
-        <div className="capability-row">
+      {/* 能力只留一行小标签：首页要的是**留白**，不是把功能表摊开。
+          想看细节的人把鼠标停上去（title 里有那句说明）。 */}
+      <section className="home-block home-block-tight">
+        <div className="capability-chips">
           {(site?.capabilities ?? []).map((capability) => (
-            <div key={capability.id} className={`capability ${capability.status}`} title={capability.description}>
-              <strong>{capability.title}</strong>
-              <span>{capability.description}</span>
-            </div>
+            <span
+              key={capability.id}
+              className={`cap-chip ${capability.status}`}
+              title={capability.description}
+            >
+              {capability.title}
+            </span>
           ))}
         </div>
       </section>

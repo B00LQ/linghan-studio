@@ -74,8 +74,9 @@ export interface SiteContent {
  */
 export const DEFAULT_SITE: SiteContent = {
   brand: {
-    name: 'Studio',
-    tagline: '本地算力的 AI 创作台',
+    // 首页最大的那行字就是它：产品名 LHIC。印章（伶）是标记，两者各司其职。
+    name: 'LHIC',
+    tagline: '本地算力优先的 AI 创作台：画布、素材与生成历史都留在你自己的机器上。',
   },
   capabilities: [
     { id: 'local-image', title: '本地出图', description: '接你自己的 ComfyUI，热态约 6 秒一张', status: 'ready' },

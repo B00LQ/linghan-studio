@@ -1,15 +1,71 @@
+/* ────────────────────────────────────────────────────────────────────────────
+   主题：**墨 + 金**。
+   深色是「夜里的宣纸」：近黑底、暖白字、一点金；浅色是「白天的宣纸」：
+   暖白纸底、墨字、深金。两套只是同一组 token 的两份取值 —— 组件样式一个字都不改。
+
+   跟随系统由 `data-theme` 决定（`theme.ts` 会把 auto 解析成 light/dark 再写上来），
+   所以这里只需要两份取值，不需要 @media 里再抄一遍。
+   ──────────────────────────────────────────────────────────────────────────── */
 :root {
   color-scheme: dark;
-  --bg: #0b0e14;
-  --panel: #12161f;
-  --panel-2: #171c27;
-  --line: #232a38;
-  --text: #e6ebf5;
-  --muted: #8b97ad;
-  --accent: #4dd0e1;
-  --accent-strong: #2fb6c9;
+  --bg: #0a0b0d;          /* 应用底 */
+  --bg-deep: #07080a;     /* 画布底：比应用底再深一点，让画布像一块台面 */
+  --panel: #121317;
+  --panel-2: #191b20;
+  --panel-3: #212329;
+  --line: #26282e;
+  --line-soft: rgba(255, 255, 255, 0.055);
+  --text: #e9e7e2;        /* 暖白，配宣纸感（纯白会发冷、发硬） */
+  --muted: #918d85;
+  --accent: #d9a441;      /* 金 */
+  --accent-strong: #c08f2e;
+  --accent-ink: #1a1206;  /* 金底上的字色 */
+  --danger: var(--danger);
+  --bad: #e05252;
+  --warn: var(--warn);
+  --ok: #7dd3a0;
+  --info: var(--info);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 24px 60px rgba(0, 0, 0, 0.6);
+  --glass: rgba(18, 19, 23, 0.72);
+  --grid: rgba(217, 164, 65, 0.10);
+  --glow: rgba(217, 164, 65, 0.22);
+  --glow-cool: rgba(90, 130, 255, 0.16);
+  --logo: url('/ling-logo-light.png');
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
+
+/* 浅色：白天的宣纸。 */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f6f5f2;
+  --bg-deep: #efeeea;
+  --panel: #ffffff;
+  --panel-2: #f3f2ee;
+  --panel-3: #e9e8e3;
+  --line: #e3e1db;
+  --line-soft: rgba(20, 18, 12, 0.06);
+  --text: #1b1c1e;
+  --muted: #6f6c66;
+  --accent: #8a6a2a;
+  --accent-strong: #74561d;
+  --accent-ink: #fffaf0;
+  --danger: #b23b30;
+  --bad: #b23b30;
+  --warn: #8a6414;
+  --ok: #1f7a4d;
+  --info: #2b6cb0;
+  --shadow-1: 0 1px 2px rgba(24, 20, 10, 0.08);
+  --shadow-2: 0 10px 28px rgba(24, 20, 10, 0.10);
+  --shadow-3: 0 24px 60px rgba(24, 20, 10, 0.16);
+  --glass: rgba(255, 255, 255, 0.74);
+  --grid: rgba(138, 106, 42, 0.14);
+  --glow: rgba(217, 164, 65, 0.34);
+  --glow-cool: rgba(90, 130, 255, 0.12);
+  --logo: url('/ling-logo-dark.png');
+}
+
 
 * { box-sizing: border-box; }
 
@@ -29,7 +85,7 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--accent); }
-button.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #04121a; font-weight: 600; }
+button.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-ink); font-weight: 600; }
 button:disabled { opacity: 0.5; cursor: default; }
 
 input, select, textarea {
@@ -82,7 +138,7 @@ textarea { min-height: 96px; resize: vertical; }
 .setup-card code { font-size: 12px; }
 .setup-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .setup-steps span { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
-.setup-steps span.active { color: #0b0d12; background: var(--accent); border-color: var(--accent); }
+.setup-steps span.active { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .setup-steps span.done { color: var(--text); border-color: var(--accent); }
 .setup-card label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
 .setup-card label input { font-size: 13px; padding: 7px 9px; }
@@ -120,7 +176,22 @@ textarea { min-height: 96px; resize: vertical; }
   border-right: 1px solid var(--line);
   min-height: 0;
 }
-.studio-nav .brand { font-weight: 700; letter-spacing: 0.16em; color: var(--accent); padding: 0 8px 12px; }
+.studio-nav .brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 6px 14px;
+}
+.studio-nav .brand img { width: 30px; height: 30px; border-radius: 8px; box-shadow: var(--shadow-1); }
+.studio-nav .brand span { font-size: 17px; font-weight: 600; letter-spacing: 0.04em; color: var(--text); }
+.studio-nav .brand em {
+  font-style: normal;
+  font-size: 9.5px;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+  align-self: flex-end;
+  padding-bottom: 3px;
+}
 .studio-nav > button {
   width: 100%;
   text-align: left;
@@ -131,8 +202,143 @@ textarea { min-height: 96px; resize: vertical; }
 .studio-nav > button:hover { color: var(--text); }
 .studio-nav > button.active { background: var(--panel-2); border-color: var(--line); color: var(--text); }
 .studio-nav .nav-spacer { flex: 1; }
-.studio-nav footer { display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
-.studio-nav footer button { width: 100%; }
+.studio-nav footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+.studio-nav footer button { width: 100%; text-align: left; }
+.studio-nav footer .nav-settings { color: var(--muted); }
+.studio-nav footer .nav-settings:hover { color: var(--text); }
+.studio-nav footer .nav-settings.active { background: var(--panel-2); border-color: var(--line); color: var(--text); }
+
+/* ── 设置：一个浮窗，不是一整页 ────────────────────────────────────────────
+   改设置的时候要看的是界面本身（外观、后端、地址），把整页换成设置页
+   就等于把参照物藏起来。所以它是浮在内容之上的窗口：**自己可滚动，后面那页还在**。 */
+.settings-overlay { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 28px; }
+.settings-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(2px); }
+.settings-window {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(940px, 100%);
+  max-height: min(86vh, 900px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+}
+.settings-window-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.settings-window-head .settings-window-logo { width: 22px; height: 22px; border-radius: 6px; }
+.settings-window-head strong { font-size: 13.5px; }
+.settings-window-head .settings-close { margin-left: 6px; font-size: 14px; }
+.settings-window-body { overflow: auto; padding: 4px 18px 22px; }
+/* 设置页在浮窗里就不再自己撑高度了（它本来是给整页写的）。 */
+.settings-window-body .page { padding: 0; height: auto; overflow: visible; }
+
+/* 外观三选一 */
+.theme-choices { margin-left: auto; display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); }
+.theme-choices button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  padding: 4px 11px;
+  border-radius: 999px;
+}
+.theme-choices button:hover { color: var(--text); }
+.theme-choices button.active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+
+/* ── 无限画布：底、小地图、节点上的进度 ──────────────────────────────────── */
+
+/* 画布底的一层流光：比首页克制得多（这是干活的地方，背景只负责"不空"）。
+   压在最底下、不接鼠标事件，节点与连线都在它上面。 */
+.canvas-aurora { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+.canvas-aurora .orb { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.5; }
+.canvas-aurora .orb.gold {
+  right: -12%; bottom: -30%; width: 620px; height: 620px;
+  background: radial-gradient(circle at 50% 50%, var(--glow), transparent 70%);
+  animation: hero-breathe 34s ease-in-out infinite;
+}
+.canvas-aurora .orb.cool {
+  left: -10%; top: -18%; width: 520px; height: 520px;
+  background: radial-gradient(circle at 50% 50%, var(--glow-cool), transparent 72%);
+  animation: hero-drift 46s ease-in-out infinite alternate;
+}
+@media (prefers-reduced-motion: reduce) { .canvas-aurora .orb { animation: none; } }
+/* 画布本体要透明，底下那层光才透得上来。 */
+.studio-body { position: relative; }
+.studio-body .react-flow { background: transparent; }
+/* 网格点跟着主题（React Flow 用属性画点，属性吃不到 CSS 变量，所以这里用 CSS 覆盖）。 */
+.react-flow__background-pattern.dots { fill: var(--grid); }
+.react-flow__background-pattern.lines { stroke: var(--grid); }
+
+/* 小地图：以前是一个默认样式的方块，深色底上几乎看不出哪儿是哪儿。
+   现在给它底、给它边、给它圆角，节点按类型上色（见 minimapColor），
+   遮罩用主题色 —— 「视口在哪儿」一眼可见。 */
+.studio-minimap {
+  width: 192px !important;
+  height: 126px !important;
+  margin: 0 14px 14px 0 !important;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--glass) !important;
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  backdrop-filter: blur(6px);
+}
+.studio-minimap .react-flow__minimap-mask { fill: var(--mm-mask, rgba(10, 11, 13, 0.55)) !important; }
+.studio-minimap .react-flow__minimap-node { rx: 3; ry: 3; }
+:root[data-theme='light'] .studio-minimap { --mm-mask: rgba(246, 245, 242, 0.5); }
+
+/* 节点上的进度：横跨卡片顶部的一条细光带 + 标题栏上的百分比。
+   有步数就按步数走；驱动不报步数时是一条来回扫的光带（**不假装知道多少**）。 */
+.node-run {
+  position: relative;
+  display: block;
+  height: 3px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.node-run > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--glow);
+  transition: width 0.4s ease;
+}
+.node-run.is-unknown::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: node-scan 1.4s linear infinite;
+}
+@keyframes node-scan {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+@media (prefers-reduced-motion: reduce) { .node-run.is-unknown::after { animation: none; width: 100%; opacity: 0.4; } }
+.run-pct {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
 
 /* 工作流库（主页） */
 .workflow-library { display: flex; flex-direction: column; gap: 10px; }
@@ -153,15 +359,15 @@ textarea { min-height: 96px; resize: vertical; }
 .workflow-card header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .workflow-card header strong { font-size: 13px; }
 .workflow-card .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
-.workflow-card .badge.video { color: #ffd28f; }
+.workflow-card .badge.video { color: var(--warn); }
 .workflow-card p { margin: 0; }
-.workflow-card .danger { align-self: flex-start; color: #ff9b9b; border-color: transparent; background: transparent; }
+.workflow-card .danger { align-self: flex-start; color: var(--danger); border-color: transparent; background: transparent; }
 .workflow-models { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .workflow-models li { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workflow-models a { color: var(--accent); }
 .workflow-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .workflow-actions button { font-size: 12px; padding: 4px 10px; }
-.workflow-actions .danger { color: #ff9b9b; border-color: transparent; background: transparent; }
+.workflow-actions .danger { color: var(--danger); border-color: transparent; background: transparent; }
 /* 拖拽导入区 & 粘贴区 */
 .workflow-drop {
   display: flex;
@@ -188,7 +394,7 @@ textarea { min-height: 96px; resize: vertical; }
 .workflow-params code { font-size: 11px; color: var(--muted); }
 .workflow-params p { font-size: 11px; line-height: 1.7; }
 .workflow-missing { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: 8px; background: rgba(255, 210, 143, 0.08); }
-.workflow-missing p { margin: 0; font-size: 11px; line-height: 1.6; color: #ffd28f; }
+.workflow-missing p { margin: 0; font-size: 11px; line-height: 1.6; color: var(--warn); }
 .workflow-missing a { color: inherit; margin-right: 8px; }
 .workflow-missing .muted { color: var(--muted); }
 
@@ -218,7 +424,7 @@ textarea { min-height: 96px; resize: vertical; }
 .workflow-mapping .field em { font-style: normal; font-size: 11px; }
 .workflow-mapping .field select, .workflow-mapping .field input { font-size: 12px; padding: 6px 8px; }
 .workflow-mapping footer { display: flex; justify-content: flex-end; }
-.workflow-warn { margin: 0; padding: 8px 10px; border-radius: 8px; background: rgba(255, 155, 155, 0.1); color: #ff9b9b; font-size: 12px; }
+.workflow-warn { margin: 0; padding: 8px 10px; border-radius: 8px; background: rgba(255, 155, 155, 0.1); color: var(--danger); font-size: 12px; }
 .workflow-ok { margin: 0; font-size: 12px; color: var(--muted); }
 .prompt-window .workflow-select { max-width: 120px; }
 
@@ -302,7 +508,7 @@ textarea { min-height: 96px; resize: vertical; }
 }
 .menu-item:hover { background: var(--panel); }
 .menu-item.active { color: var(--accent); }
-.menu-item.danger:hover { color: #ff9b9b; }
+.menu-item.danger:hover { color: var(--danger); }
 .menu-item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .menu-item-note { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
 .menu-sep { height: 1px; margin: 4px 2px; background: var(--line); }
@@ -333,7 +539,7 @@ textarea { min-height: 96px; resize: vertical; }
 .wall-crumbs .crumb-sep { color: var(--muted); font-size: 13px; }
 .wall-count { font-size: 12px; color: var(--muted); }
 .wall-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.wall-actions .danger { color: #ff9b9b; }
+.wall-actions .danger { color: var(--danger); }
 .wall-actions .danger:disabled { color: var(--muted); }
 .wall-search { min-width: 170px; }
 
@@ -480,39 +686,134 @@ textarea { min-height: 96px; resize: vertical; }
 .cover-choice:hover { border-color: var(--accent); }
 
 /* 主页 ------------------------------------------------------------------- */
-.home { height: 100%; overflow: auto; padding: 28px 32px 60px; display: flex; flex-direction: column; gap: 30px; }
-.home-hero { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; padding: 26px 0 6px; }
-.home-hero h1 { margin: 0; font-size: 26px; letter-spacing: 0.02em; }
-.home-hero p { margin: 0; color: var(--muted); font-size: 13px; }
-.home-create {
-  margin-top: 14px;
-  width: 100%;
-  max-width: 860px;
-  padding: 34px;
-  border-radius: 16px;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-  color: var(--text);
-  font-size: 15px;
-  cursor: pointer;
+.home { height: 100%; overflow: auto; padding: 0 32px 60px; display: flex; flex-direction: column; gap: 30px; }
+
+/* ── 首屏：留白 + 一团很慢的光 ─────────────────────────────────────────────
+   参考的是「近黑底 + 大留白 + 一团缓慢呼吸的暖光 + 白色胶囊按钮」那种高级感。
+   光是**纯 CSS** 的三层：两团大范围柔光（金 + 一点冷色）+ 一层细网格。
+   只用 transform / opacity 做动画，不动布局、不跑 JS —— 首屏不该为了好看掉帧。
+   系统开了「减少动态效果」就整个停住。 */
+.home-hero {
+  position: relative;
+  margin: 0 -32px;
+  padding: 78px 32px 74px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 14px;
+  text-align: center;
+  border-bottom: 1px solid var(--line-soft);
+  overflow: hidden;
+  background: var(--bg);
 }
-.home-create:hover { border-color: var(--accent); }
-.home-create .plus { font-size: 26px; line-height: 1; }
+.hero-aurora { position: absolute; inset: -20% -10% 0; pointer-events: none; }
+.hero-aurora .orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  will-change: transform, opacity;
+}
+.hero-aurora .orb.gold {
+  left: 50%; top: 54%;
+  width: min(78vw, 820px); height: min(78vw, 820px);
+  margin-left: min(-39vw, -410px);
+  background: radial-gradient(circle at 50% 50%, var(--glow), transparent 68%);
+  animation: hero-breathe 26s ease-in-out infinite;
+}
+.hero-aurora .orb.cool {
+  left: 12%; top: -22%;
+  width: min(46vw, 620px); height: min(46vw, 620px);
+  background: radial-gradient(circle at 50% 50%, var(--glow-cool), transparent 70%);
+  animation: hero-drift 38s ease-in-out infinite alternate;
+}
+/* 一层极细的纸纹（网格 + 一点噪点感），让大片留白不至于"空得发假"。 */
+.hero-aurora .veil {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 46px 46px;
+  mask-image: radial-gradient(120% 90% at 50% 42%, #000 0%, transparent 78%);
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 42%, #000 0%, transparent 78%);
+  opacity: 0.55;
+}
+@keyframes hero-breathe {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.85; }
+  50% { transform: translate3d(0, -3%, 0) scale(1.06); opacity: 1; }
+}
+@keyframes hero-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(6%, 5%, 0) scale(1.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-aurora .orb { animation: none; }
+}
+
+.hero-inner { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 720px; }
+.hero-logo { width: 76px; height: 76px; border-radius: 20px; box-shadow: var(--shadow-2); }
+.hero-kicker {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.home-hero h1 { margin: 0; font-size: clamp(30px, 4.4vw, 46px); font-weight: 600; letter-spacing: -0.01em; line-height: 1.15; }
+.hero-tagline { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; max-width: 30em; }
+.hero-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+
+/* 主按钮：胶囊。深色下是金底墨字，浅色下是深金底暖白字 —— 同一句话，两种纸。 */
+.home-create {
+  margin-top: 0;
+  padding: 12px 26px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 14.5px;
+  font-weight: 600;
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+.home-create:hover { filter: brightness(1.06); transform: translateY(-1px); }
+.home-create:active { transform: translateY(0); }
+.home-create:disabled { cursor: default; transform: none; }
+.home-create .plus { font-size: 17px; line-height: 1; }
+.hero-ghost {
+  padding: 12px 20px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+.hero-ghost:hover { border-color: var(--accent); }
+.hero-foot { margin: 6px 0 0; font-size: 11.5px; color: var(--muted); }
+
 .home-block { max-width: 1180px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
 .home-block h2 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; letter-spacing: 0.04em; }
 .home-block-head { display: flex; align-items: center; gap: 12px; }
 .home-block-head h2 { margin-right: auto; }
 
-.capability-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
-.capability { display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-.capability strong { font-size: 13px; }
-.capability span { font-size: 11px; color: var(--muted); line-height: 1.5; }
-.capability.planned { opacity: 0.55; }
-.capability.planned strong::after { content: '待接入'; margin-left: 6px; font-size: 10px; color: var(--muted); }
+.capability-chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.cap-chip {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 4px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--panel);
+  cursor: default;
+}
+.cap-chip:hover { color: var(--text); border-color: var(--line); }
+.cap-chip.planned { opacity: 0.55; }
+.cap-chip.planned::after { content: ' · 待接入'; font-size: 10px; }
+.home-block-tight { align-items: center; }
 
 .project-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
 .project-card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); text-align: left; }
@@ -561,8 +862,8 @@ textarea { min-height: 96px; resize: vertical; }
 .project-list .open { display: flex; align-items: center; gap: 12px; flex: 1; text-align: left; padding: 10px; }
 .project-list .thumb { width: 64px; height: 48px; flex: 0 0 auto; }
 .project-list .meta { display: flex; flex-direction: column; gap: 3px; }
-.project-list .danger { flex: 0 0 auto; color: #ff9b9b; border-color: transparent; background: transparent; }
-.project-list .danger:hover { border-color: #ff9b9b; }
+.project-list .danger { flex: 0 0 auto; color: var(--danger); border-color: transparent; background: transparent; }
+.project-list .danger:hover { border-color: var(--danger); }
 
 /* 资产网格 */
 .asset-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
@@ -597,11 +898,12 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .canvas-topbar .brand-menu .menu-trigger:hover { background: rgba(255, 255, 255, 0.08); }
 .canvas-topbar .brand-menu .mark {
   display: block;
-  width: 15px;
-  height: 15px;
-  border: 2px solid var(--text);
-  border-radius: 3px;
-  transform: rotate(45deg) scale(0.82);
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  /* 印章就是这里的脸：同一个标记在首页、左栏、设置窗、任务栏上用同一份图。 */
+  background: var(--logo) center / contain no-repeat;
+  box-shadow: var(--shadow-1);
 }
 .canvas-topbar .brand-menu .caret { font-size: 10px; color: var(--muted); }
 .canvas-topbar .brand-menu .menu-trigger:hover .caret { color: var(--text); }
@@ -647,7 +949,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 /* 资产库：分类 chip + 搜索 + 卡片墙 + 空状态。 */
 .float-panel .chip { font-size: 12px; padding: 4px 10px; border-radius: 999px; border-color: transparent; background: transparent; color: var(--muted); }
 .float-panel .chip:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
-.float-panel .chip.active { color: #0b0d12; background: var(--accent); }
+.float-panel .chip.active { color: var(--accent-ink); background: var(--accent); }
 .float-panel .side-search { flex: 1; min-width: 140px; font-size: 12px; padding: 5px 8px; }
 /* 资产卡片墙。
    行高必须显式给：只写 aspect-ratio 时，`auto` 轨道在算出列宽之前推不出高度，
@@ -692,7 +994,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   transition: opacity 0.12s;
 }
 .asset-card:hover .pick, .asset-card.is-picked .pick { opacity: 1; }
-.asset-card.is-picked .pick { background: var(--accent); color: #0b0d12; border-color: var(--accent); }
+.asset-card.is-picked .pick { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .asset-wall-more { grid-column: 1 / -1; display: flex; justify-content: center; padding: 8px 0 20px; }
 .asset-wall-more button { font-size: 12px; padding: 6px 16px; }
 
@@ -790,7 +1092,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .asset-browser .asset-tools { border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .asset-browser .chip { font-size: 12px; padding: 4px 10px; border-radius: 999px; border-color: transparent; background: transparent; color: var(--muted); }
 .asset-browser .chip:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
-.asset-browser .chip.active { color: #0b0d12; background: var(--accent); }
+.asset-browser .chip.active { color: var(--accent-ink); background: var(--accent); }
 .asset-browser .chip .chip-count { margin-left: 5px; font-size: 10px; opacity: 0.7; }
 .asset-browser .side-search { flex: 1; min-width: 140px; font-size: 12px; padding: 5px 8px; }
 .asset-browser .asset-sort { font-size: 12px; padding: 5px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
@@ -829,7 +1131,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   color: var(--muted);
 }
 .asset-browser .folder-chip:hover { color: var(--text); border-color: var(--accent); }
-.asset-browser .folder-chip.active { color: #0b0d12; background: var(--accent); border-style: solid; border-color: var(--accent); }
+.asset-browser .folder-chip.active { color: var(--accent-ink); background: var(--accent); border-style: solid; border-color: var(--accent); }
 .asset-browser .folder-chip .folder-glyph { font-size: 9px; opacity: 0.8; }
 .asset-browser .folder-chip-wrap .row-menu { margin-left: -4px; }
 .asset-browser .folder-chip-wrap .row-menu .menu-trigger { border-color: transparent; background: transparent; color: var(--muted); padding: 2px 4px; font-size: 12px; }
@@ -850,11 +1152,11 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .asset-browser .asset-manage .who img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; display: block; cursor: zoom-in; }
 .asset-browser .asset-manage .who .file { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 6px; background: var(--panel-2); color: var(--muted); }
 .asset-browser .asset-manage .who code { font-size: 11px; color: var(--muted); }
-.asset-browser .asset-manage .pick { width: 18px; height: 18px; padding: 0; border-radius: 5px; border: 1px solid var(--line); background: var(--panel-2); color: #0b0d12; font-size: 11px; line-height: 1; }
+.asset-browser .asset-manage .pick { width: 18px; height: 18px; padding: 0; border-radius: 5px; border: 1px solid var(--line); background: var(--panel-2); color: var(--accent-ink); font-size: 11px; line-height: 1; }
 .asset-browser .asset-manage tr.is-picked .pick { background: var(--accent); border-color: var(--accent); }
 .asset-browser .asset-manage .asset-row-folder { font-size: 12px; padding: 3px 4px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
 .asset-browser .asset-manage .danger { border-color: transparent; background: transparent; color: var(--muted); }
-.asset-browser .asset-manage .danger:hover { color: #ff8f8f; }
+.asset-browser .asset-manage .danger:hover { color: var(--danger); }
 .asset-notice {
   margin: 0;
   padding: 8px 12px;
@@ -939,8 +1241,8 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 }
 .side-row .side-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .side-row .side-thumb .glyph { font-size: 15px; color: var(--muted); }
-.side-row .side-thumb.kind-image .glyph { color: #8fd0ff; }
-.side-row .side-thumb.kind-text .glyph { color: #ffd28f; }
+.side-row .side-thumb.kind-image .glyph { color: var(--info); }
+.side-row .side-thumb.kind-text .glyph { color: var(--warn); }
 .side-row .side-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .side-row .side-agent { flex: 0 0 auto; font-size: 10px; color: var(--accent); }
 .side-row .row-menu .menu-trigger { padding: 2px 6px; border-color: transparent; background: transparent; color: var(--muted); }
@@ -969,7 +1271,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .studio-status { margin-left: auto; color: var(--muted); font-size: 12px; }
 /* 保存状态单独占位，不再挤掉生成结果的消息。 */
 .studio-save { font-size: 11px; color: var(--muted); opacity: 0.65; min-width: 48px; text-align: right; }
-.studio-save.error { color: #ff9b9b; opacity: 1; }
+.studio-save.error { color: var(--danger); opacity: 1; }
 .toolbar-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 2px; }
 
 /* 镜头节点在标题栏右侧显示版本数，不点开也知道这个镜头生成了几次。 */
@@ -1017,7 +1319,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   place-items: center;
   width: 100%;
   aspect-ratio: 1 / 1;
-  color: #ff9b9b;
+  color: var(--danger);
   font-size: 11px;
   background: rgba(255, 107, 107, 0.12);
 }
@@ -1096,7 +1398,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 /* 「删掉这一版」是破坏性动作：平时低调，hover 才红 —— 它就在「复现这一版」旁边，
    两者长得一样的话，手快点错就是删掉一版素材。 */
 .prompt-window .take-actions .link.danger { color: var(--muted); opacity: 0.75; }
-.prompt-window .take-actions .link.danger:hover { color: #ff8f8f; opacity: 1; }
+.prompt-window .take-actions .link.danger:hover { color: var(--danger); opacity: 1; }
 .prompt-window .take-actions-note { font-variant-numeric: tabular-nums; opacity: 0.75; }
 
 /* 音频卡：一条播放器，没有画面。它没有 16:9 的框，所以给它自己的宽度。 */
@@ -1164,7 +1466,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   border-radius: 50%;
   border: 1px solid var(--line);
   background: var(--accent);
-  color: #0b0d12;
+  color: var(--accent-ink);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
@@ -1251,7 +1553,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   place-items: center;
   width: 100%;
   height: 100%;
-  color: #ff9b9b;
+  color: var(--danger);
   font-size: 10px;
   background: rgba(255, 107, 107, 0.12);
 }
@@ -1335,7 +1637,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .editor-body header { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .editor-body header .editor-title { font-size: 13px; }
 .editor-body header .editor-steps { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor-error { margin: 0; padding: 6px 12px; color: #ff9b9b; font-size: 12px; }
+.editor-error { margin: 0; padding: 6px 12px; color: var(--danger); font-size: 12px; }
 .editor-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 14px; overflow: auto; }
 /* 框与图等大，指针坐标就只需要除以缩放比——不需要再减去任何偏移。 */
 .editor-frame { position: relative; flex: 0 0 auto; line-height: 0; touch-action: none; }
@@ -1362,8 +1664,8 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .crop-bar .muted { margin-right: auto; }
 .editor-body footer { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 12px; }
 .editor-body footer .muted { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.link.primary-link { border-color: var(--accent); background: var(--accent); color: #0b0d12; padding: 4px 14px; }
-.link.primary-link:hover:not(:disabled) { background: var(--accent-strong); color: #0b0d12; }
+.link.primary-link { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); padding: 4px 14px; }
+.link.primary-link:hover:not(:disabled) { background: var(--accent-strong); color: var(--accent-ink); }
 .link.primary-link:disabled { opacity: 0.4; background: var(--panel-2); color: var(--muted); border-color: var(--line); }
 
 /* ── 对比版本 ────────────────────────────────────────────────── */
@@ -1398,7 +1700,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 }
 .compare-cell.is-shown .compare-frame { border-color: var(--accent); }
 .compare-cell .compare-frame img { width: 100%; height: 100%; object-fit: contain; cursor: zoom-in; display: block; }
-.compare-cell.is-failed .compare-frame { border-color: #ff9b9b; }
+.compare-cell.is-failed .compare-frame { border-color: var(--danger); }
 .compare-badge {
   position: absolute;
   right: 6px;
@@ -1406,7 +1708,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   padding: 1px 8px;
   border-radius: 999px;
   background: var(--accent);
-  color: #0b0d12;
+  color: var(--accent-ink);
   font-size: 10px;
 }
 .compare-cell figcaption { display: flex; align-items: center; gap: 8px; padding-top: 6px; font-size: 11px; }
@@ -1449,7 +1751,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   color: var(--text);
   pointer-events: none;
 }
-.studio-toast.bad { border-color: #ff9b9b; color: #ff9b9b; }
+.studio-toast.bad { border-color: var(--danger); color: var(--danger); }
 
 /* 画布底部居中的浮动条：缩放与整理布局在一起。 */
 .canvas-dock {
@@ -1501,7 +1803,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   cursor: pointer;
 }
 .selection-bar button:hover { background: rgba(255, 255, 255, 0.07); }
-.selection-bar button.danger:hover { color: #ff9b9b; }
+.selection-bar button.danger:hover { color: var(--danger); }
 .selection-bar .dock-sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
 /* 框选矩形本身：默认样式在深色背景上几乎看不见。 */
 .react-flow__selection { background: rgba(122, 162, 255, 0.12); border: 1px solid var(--accent); }
@@ -1671,7 +1973,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .studio-node img { display: block; width: 100%; }
 .studio-node .dot { width: 8px; height: 8px; border-radius: 50%; margin-left: auto; }
 .studio-node .dot.running { background: var(--accent); animation: pulse 1s infinite alternate; }
-.studio-node .dot.failed { background: #ff6b6b; }
+.studio-node .dot.failed { background: var(--danger); }
 .studio-node .take-badge {
   margin-left: auto;
   padding: 1px 6px;
@@ -1725,7 +2027,7 @@ main { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
   place-items: center;
   border-radius: 5px;
   font-size: 11px;
-  color: #ff9b9b;
+  color: var(--danger);
   background: rgba(255, 107, 107, 0.12);
 }
 .studio-takes .take-meta { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }

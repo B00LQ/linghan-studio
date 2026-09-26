@@ -44,6 +44,7 @@ import { transformImage, type EditOps } from './imageEdit.ts'
 import type { BrowserAsset } from '../components/AssetBrowser.tsx'
 import { CANVAS_NODES, canConnect, candidatesFor, initialData, nodeLabel, portKind, producesAudio, producesVideo, specOf, type CanvasNodeKind, type CanvasNodeSpec, type PortKind } from './ports.ts'
 import { describeProgress, formatDuration, type NodeProgress } from './progress.ts'
+import { useThemeResolved } from '../theme.ts'
 
 /** Data carried by every Studio node. */
 export interface StudioNodeData extends Record<string, unknown> {
@@ -302,6 +303,8 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
   const shownIndex = ordered.findIndex((take) => take.id === data.takeId)
   const shown = shownIndex === -1 ? undefined : ordered[shownIndex]
   const running = runningNodeId === id || data.status === 'running'
+  /** 进度一次算好：标题栏的百分比、顶部进度条、下方那一行用的是同一个数。 */
+  const runStatus = statusOf(id)
   // The window follows our own active-node state rather than xyflow's `selected`
   // flag: xyflow owns its selection internally, and marking a node selected by
   // hand did not always take — so the window occasionally appeared on, or
@@ -343,6 +346,11 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
         <span>{labelOf(id) || spec?.title || data.kind}</span>
         {running ? <span className="dot running" /> : null}
         {data.status === 'failed' ? <span className="dot failed" /> : null}
+        {/* 跑的时候把百分比直接印在标题栏上：卡片可能被缩小、被别的节点挡住，
+            而「现在几成」是这一屏最该一眼看到的一件事。 */}
+        {running && runStatus.fraction !== null ? (
+          <span className="run-pct" data-testid="run-pct">{Math.round(runStatus.fraction * 100)}%</span>
+        ) : null}
         {data.kind !== 'text' && typeof data.takeNumber === 'number'
           ? <span className={`take-badge ${data.chosen === true ? 'is-chosen' : ''}`}>
             {data.chosen === true ? '✓ ' : ''}第 {String(data.takeNumber)} 版
@@ -352,6 +360,14 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
           ? <span className="shot-meta">{history.length} {producesVideo(String(data.kind)) ? '条' : '张'}</span>
           : null}
       </header>
+
+      {/* 生成中的进度条：横跨卡片顶部。
+          有步数就按步数走；驱动不报步数时是一条来回扫的光带（**不假装知道多少**）。 */}
+      {running ? (
+        <span className={`node-run${runStatus.fraction === null ? ' is-unknown' : ''}`} data-testid="node-run">
+          <i style={runStatus.fraction === null ? undefined : { width: `${String(Math.round(runStatus.fraction * 100))}%` }} />
+        </span>
+      ) : null}
 
       {data.kind === 'text' ? (
         <div className="body">{data.text ?? ''}</div>
@@ -718,6 +734,23 @@ function normalizeEdges(raw: unknown[], nodes: StudioNode[]): Edge[] {
  * @param props - project id and initial document.
  * @returns the canvas surface.
  */
+/**
+ * 小地图里一个节点的颜色，按**类型**分。
+ *
+ * 中间调（不是主题色）：小地图只有一百多像素宽，太深看不见、太浅糊成一片；
+ * 而它跟卡片配色不一样反而是好事 —— 缩略图上要看的是「哪儿是什么」，
+ * 不是「卡片长什么样」。两套主题下都够清楚，所以不跟着主题变。
+ * @param kind - 节点类型。
+ * @returns a CSS color.
+ */
+function minimapColor(kind: string): string {
+  if (kind === 'image') return '#d9a441'
+  if (kind === 'video' || kind === 'video-trim' || kind === 'video-concat') return '#7aa2ff'
+  if (kind === 'audio') return '#7dd3a0'
+  return '#8b93a5'
+}
+
+/** Application shell for one canvas. */
 export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps) {
   const initialNodes = useMemo<StudioNode[]>(    () => fromDocument(document?.nodes ?? []),
     // The document is the source of truth only on mount; later edits own state.
@@ -836,6 +869,8 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
   const nodeSeq = useRef(0)
   const flowRef = useRef<ReactFlowInstance<StudioNode, Edge> | null>(null)
   const bodyRef = useRef<HTMLDivElement | null>(null)
+  /** React Flow 的 `colorMode` 要具体值（读不到 CSS 变量），所以跟着主题重新渲染。 */
+  const themeMode = useThemeResolved()
   const uploadRef = useRef<HTMLInputElement | null>(null)
   const uploadAtRef = useRef<{ worldX: number; worldY: number } | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
@@ -2436,6 +2471,12 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
     <div className="studio-canvas">
       <div className="studio-main">
       <div className="studio-body" ref={bodyRef}>
+        {/* 画布底：一层很慢的流光（纯 CSS，压在节点下面、不挡鼠标）。
+            比首页那团克制得多 —— 这是干活的地方，背景只负责"不空"。 */}
+        <div className="canvas-aurora" aria-hidden="true">
+          <span className="orb gold" />
+          <span className="orb cool" />
+        </div>
         {/* 左上角悬浮：logo 菜单 + 画布名。画布铺满整屏，不再为它留一列。 */}
         {topBar === undefined ? null : <div className="canvas-topbar-slot">{topBar}</div>}
         <CanvasContext.Provider value={takesContext}>
@@ -2443,6 +2484,9 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
+            // React Flow 自己有明暗两套（连线、手柄、缩略图底色、署名）。
+            // 跟着我们的主题走，否则浅色界面里会露出它那套深色默认值。
+            colorMode={themeMode}
             onInit={(instance) => { flowRef.current = instance }}
             onNodesChange={(changes) => { markDirty(); onNodesChange(changes) }}
             onEdgesChange={(changes) => { markDirty(); onEdgesChange(changes) }}
@@ -2537,7 +2581,17 @@ export function StudioCanvas({ projectId, document, topBar }: StudioCanvasProps)
             proOptions={{ hideAttribution: true }}
           >
             <Background />
-            <MiniMap pannable zoomable />
+            {/* 小地图：以前只有一个默认样式的缩略方块，深色底上几乎看不出哪儿是哪儿。
+                现在按**节点类型**上色（图=金、视频=蓝、音频=绿、文本=灰），
+                底色/边框/遮罩交给 CSS 跟着主题走 —— 一眼就能看出"我在画面的哪个位置、
+                哪一块是刚生成的那几张"。 */}
+            <MiniMap
+              pannable
+              zoomable
+              className="studio-minimap"
+              nodeColor={(node) => minimapColor(String((node.data as { kind?: unknown } | undefined)?.kind ?? ''))}
+              nodeStrokeWidth={0}
+            />
             {/* 框选之后：选中的这一批能做什么。单选用节点自己的提示词窗口，
                 多选只有这里能操作，所以工具条只在「选了 2 个以上」时出现——
                 它一出现就说明「你现在操作的是这一批」。 */}

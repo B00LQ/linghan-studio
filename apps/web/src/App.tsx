@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { createCanvas, fetchSession, login, logout, type SessionInfo } from './api.ts'
+import { ThemeSwitch } from './components/ThemeSwitch.tsx'
 import { AssetsPage } from './pages/AssetsPage.tsx'
 import { CanvasPage } from './pages/CanvasPage.tsx'
 import { HomePage } from './pages/HomePage.tsx'
@@ -25,9 +26,33 @@ export function App() {
   const [busy, setBusy] = useState(false)
   /** Bumped whenever data changed elsewhere, so a page can reload its list. */
   const [refreshToken, setRefreshToken] = useState(0)
+  /**
+   * 设置是个**浮层**，不是一个页面。
+   *
+   * 理由：改设置的时候要看的是「界面本身变没变」（外观、后端、代理地址），
+   * 把整页换成设置页就等于把参照物藏起来了。它自己的入口在左栏**最下面**
+   * （和「退出」一起），因为那是「关于这套软件的杂事」，不属于日常五个入口。
+   * `/settings` 这条路由仍然有效（深链接、老书签），只是打开的是同一个浮层。
+   */
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const route = useRoute()
 
   const refresh = useCallback(() => { setRefreshToken((value) => value + 1) }, [])
+
+  /** 设置浮层：左栏那颗按钮与 `/settings` 深链接都打开它。 */
+  const showSettings = settingsOpen || route.name === 'settings'
+  const closeSettings = useCallback((): void => {
+    setSettingsOpen(false)
+    if (route.name === 'settings') navigate('/')
+  }, [route.name])
+
+  // Esc 关掉设置：它是个窗口，窗口就该能用 Esc 关。
+  useEffect(() => {
+    if (!showSettings) return
+    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') closeSettings() }
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('keydown', onKey) }
+  }, [showSettings, closeSettings])
 
   useEffect(() => {
     void (async () => {
@@ -129,6 +154,26 @@ export function App() {
     </button>
   )
 
+  /** 设置浮层的 JSX（状态与 Esc 处理在上面）。 */
+  const settingsOverlay = showSettings
+    ? (
+      <div className="settings-overlay" role="dialog" aria-label="设置" data-testid="settings-window">
+        <div className="settings-scrim" onClick={closeSettings} />
+        <section className="settings-window">
+          <header className="settings-window-head">
+            <img className="settings-window-logo" src="/ling-mark.png" alt="" />
+            <strong>设置</strong>
+            <ThemeSwitch />
+            <button type="button" className="link settings-close" title="关闭（Esc）" onClick={closeSettings}>✕</button>
+          </header>
+          <div className="settings-window-body">
+            <SettingsPage refreshToken={refreshToken} />
+          </div>
+        </section>
+      </div>
+    )
+    : null
+
   // 画布是独立页面：它自带一整列左栏（logo 菜单 + 画布名 + 列表），
   // 所以这里不再给它套全局导航条——两条左导航会互相抢「我在哪、怎么走」这个问题。
   if (route.name === 'canvas') {
@@ -144,14 +189,26 @@ export function App() {
   return (
     <div className="shell">
       <nav className="studio-nav">
-        <div className="brand">Studio</div>
+        <div className="brand">
+          <img src="/ling-mark.png" alt="" />
+          <span>LHIC</span>
+          <em>伶</em>
+        </div>
         {navItem('/', '首页', route.name === 'home')}
         {navItem('/projects', '项目', route.name === 'projects')}
         {navItem('/assets', '资产', route.name === 'assets')}
         {navItem('/workflows', '工作流', route.name === 'workflows')}
-        {navItem('/settings', '设置', route.name === 'settings')}
         <span className="nav-spacer" />
+        {/* 杂事都在下面这一格：设置与退出。日常那五个入口在上面，互不打扰。 */}
         <footer>
+          <button
+            type="button"
+            className={`nav-settings${showSettings ? ' active' : ''}`}
+            data-testid="nav-settings"
+            onClick={() => { setSettingsOpen(true) }}
+          >
+            设置
+          </button>
           <span className="muted">本地算力 · {session.driver}</span>
           <button type="button" onClick={() => { void logout().then(() => { setSession(null) }) }}>退出</button>
         </footer>
@@ -161,7 +218,6 @@ export function App() {
         {route.name === 'projects' ? <ProjectsPage refreshToken={refreshToken} onChanged={refresh} /> : null}
         {route.name === 'assets' ? <AssetsPage refreshToken={refreshToken} /> : null}
         {route.name === 'workflows' ? <WorkflowsPage refreshToken={refreshToken} onChanged={refresh} /> : null}
-        {route.name === 'settings' ? <SettingsPage refreshToken={refreshToken} /> : null}
         {route.name === 'notFound' ? (
           <div className="page">
             <h1>页面不存在</h1>
@@ -170,6 +226,7 @@ export function App() {
           </div>
         ) : null}
       </main>
+      {settingsOverlay}
     </div>
   )
 }

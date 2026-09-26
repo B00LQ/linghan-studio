@@ -141,8 +141,13 @@ const run = async () => {
   // 判据按**标签**来，不写死个数：导航在长（工作流、设置都是后加的），
   // 而这条要证的是「五个入口都在」，不是「正好四个按钮」。
   const navLabels = await s.evaluate(`[...document.querySelectorAll('.studio-nav > button')].map((b) => b.textContent.trim())`)
-  check('左侧导航出现', ['首页', '项目', '资产', '工作流', '设置'].every((label) => navLabels.includes(label)),
+  check('左侧导航出现', ['首页', '项目', '资产', '工作流'].every((label) => navLabels.includes(label)),
     navLabels.join('/'))
+  // 「设置」从导航中间挪到了左栏**最下面**（和退出一起），而且点开是浮窗不是整页 ——
+  // 它属于「关于这套软件的杂事」，不属于日常那四个入口。
+  const footerLabels = await s.evaluate(`[...document.querySelectorAll('.studio-nav footer button')].map((b) => b.textContent.trim())`)
+  check('设置在最下面的那一格', footerLabels.includes('设置'), footerLabels.join('/'))
+  check('设置不在日常入口里', !navLabels.includes('设置'), navLabels.join('/'))
   check('显示主页', (await s.evaluate(`document.querySelectorAll('.home').length`)) === 1)
 
   log('② 主页各区块（图4 的框架）')
@@ -151,9 +156,9 @@ const run = async () => {
     tagline: document.querySelector('.home-hero p')?.textContent ?? '',
     create: document.querySelector('.home-create')?.textContent ?? '',
     sections: [...document.querySelectorAll('.home-block h2')].map((h) => h.textContent),
-    capabilities: document.querySelectorAll('.capability').length,
-    planned: document.querySelectorAll('.capability.planned').length,
-    ready: document.querySelectorAll('.capability.ready').length,
+    capabilities: document.querySelectorAll('.cap-chip').length,
+    planned: document.querySelectorAll('.cap-chip.planned').length,
+    ready: document.querySelectorAll('.cap-chip.ready').length,
     highlights: document.querySelectorAll('.highlight-card').length,
     categories: document.querySelectorAll('.category-tabs button').length,
     showcaseItems: document.querySelectorAll('.showcase-card').length,
@@ -166,8 +171,9 @@ const run = async () => {
   const showcaseHeading = home.sections.includes('展示')
   check('展示区没有内容时不渲染', home.showcaseItems > 0 ? showcaseHeading : !showcaseHeading,
     `站点内容里 ${String(home.showcaseItems)} 条展示项，标题${showcaseHeading ? '出现' : '未出现'}：${home.sections.join(' / ')}`)
-  check('核心区块齐备（能力 / 最近画布 / 为什么用它）',
-    ['能力', '最近画布', '为什么用它'].every((name) => home.sections.includes(name)), home.sections.join(' / '))
+  // 首页要的是留白：能力不再是一排大卡片，而是一行小标签（说明放在 title 里）。
+  check('核心区块齐备（最近画布 / 为什么用它）',
+    ['最近画布', '为什么用它'].every((name) => home.sections.includes(name)), home.sections.join(' / '))
   check('能力入口渲染', home.capabilities >= 6, `${home.capabilities} 个`)
   // 期望值来自站点内容本身，不写死数字：视频那条从 planned 变成 ready 时
   // 「>= 4」就假失败了 —— 而真正要守的是「界面上标成待接入的，正好是内容里标 planned 的那些」。
