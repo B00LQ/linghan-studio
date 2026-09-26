@@ -61,10 +61,19 @@ const PAYLOAD = [
 
 if (!has('skip-build')) {
   log('构建前端…')
-  // 命令写成**一整条字符串**：`shell: true` 配上参数数组会触发 Node 的 DEP0190
-  // （"args 不会被转义，只会被拼接"）。它只是警告，却会把 stderr 弄脏 ——
-  // 而「打包脚本 stderr 里有东西」会让自动化以为它失败了。
-  execFileSync('pnpm --filter @studio/web build', { cwd: repo, stdio: 'inherit', shell: true })
+  /**
+   * Windows 上**故意走 `cmd /c`，不走 `shell: true`**。
+   *
+   * `shell: true` 会让 Node 用 cmd 拉 `pnpm.cmd`，但 PowerShell 用户手动跑这个脚本时
+   * 命中的是 `pnpm.ps1` —— 那个 shim 会把每条脚本行（`$ vite build`）**回显到 stderr**，
+   * 于是一个每次都成功的打包命令，在「stderr 有内容就算失败」的自动化里变成 exit 1。
+   * 打包脚本的 stderr 必须是干净的：它是「这次打包到底成没成」的唯一信号。
+   */
+  if (process.platform === 'win32') {
+    execFileSync('cmd', ['/c', 'pnpm --filter @studio/web build'], { cwd: repo, stdio: 'inherit' })
+  } else {
+    execFileSync('pnpm', ['--filter', '@studio/web', 'build'], { cwd: repo, stdio: 'inherit' })
+  }
 }
 if (!existsSync(join(repo, 'apps', 'web', 'dist', 'index.html'))) {
   console.error('[pack] 没有前端构建产物（apps/web/dist）。去掉 --skip-build 再跑一次。')
