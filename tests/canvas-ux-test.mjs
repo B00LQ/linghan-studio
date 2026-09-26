@@ -234,7 +234,7 @@ const run = async () => {
     return true;
   })()`)
   await sleep(600)
-  const cards = () => s.evaluate(`document.querySelectorAll('.react-flow__node.selected .studio-node > img').length`)
+  const cards = () => s.evaluate(`document.querySelectorAll('.react-flow__node.selected .studio-node > .node-media > img').length`)
   const beforeGen = await cards()
   check('点窗口里的 ↑', await s.evaluate(`(() => { const b = document.querySelector('.prompt-window .send'); if (!b || b.disabled) return false; b.click(); return true })()`))
   let afterGen = beforeGen

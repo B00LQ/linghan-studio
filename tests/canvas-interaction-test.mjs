@@ -248,7 +248,7 @@ const run = async () => {
   for (let i = 0; i < 20; i += 1) {
     await sleep(600)
     uploadUrl = await s.evaluate(`(() => {
-      const el = [...document.querySelectorAll(".studio-node[data-kind='image'] > img")].find((img) => (img.getAttribute('src') || '').startsWith('/api/assets/'));
+      const el = [...document.querySelectorAll(".studio-node[data-kind='image'] > .node-media > img")].find((img) => (img.getAttribute('src') || '').startsWith('/api/assets/'));
       return el ? el.getAttribute('src') : null;
     })()`)
     if (uploadUrl !== null) break

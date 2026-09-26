@@ -46,16 +46,15 @@ export function isGroup(node: { data?: { kind?: unknown } }): boolean {
 }
 
 /** Gap between siblings and between columns. */
-const GAP_Y = 36
-const GAP_X = 160
-
-/** Column origins. */
-const COLUMN = { text: 0, image: 460 }
+const GAP_Y = 22
+const GAP_X = 72
 
 /** A node as the layout code needs to see it. */
 interface Placed {
   position: { x: number; y: number }
   data?: { kind?: unknown }
+  /** React Flow 量出来的真实尺寸（渲染之后才有）。 */
+  measured?: { width?: number; height?: number } | undefined
 }
 
 /** Read a node's kind defensively. */
@@ -63,9 +62,29 @@ function kindOf(node: { data?: { kind?: unknown } }): string {
   return typeof node.data?.kind === 'string' ? node.data.kind : ''
 }
 
-/** Rectangle for one node, using its kind's footprint. */
+/**
+ * 一个节点实际占多大。
+ *
+ * **优先用 React Flow 量出来的真实尺寸**，没有才退到类型占位值。
+ * 这条是「整理完节点之间离得太远」的根因：占位值按"卡片装满图、下面还挂着
+ * 提示词窗口"来估（图片 320×430），而一张空卡片、一段短文本根本没那么高 ——
+ * 于是每次整理都按最坏情况留空，十来个节点就散成一整屏。
+ * @param node - the node.
+ * @returns its footprint in world units.
+ */
+export function sizeOf(node: Placed): Footprint {
+  const fallback = footprintOf(kindOf(node))
+  const width = node.measured?.width
+  const height = node.measured?.height
+  return {
+    w: typeof width === 'number' && width > 0 ? width : fallback.w,
+    h: typeof height === 'number' && height > 0 ? height : fallback.h,
+  }
+}
+
+/** Rectangle for one node, using its real size when we have it. */
 export function nodeRect(node: Placed): { x: number; y: number; w: number; h: number } {
-  const size = footprintOf(kindOf(node))
+  const size = sizeOf(node)
   return { x: node.position.x, y: node.position.y, w: size.w, h: size.h }
 }
 
@@ -97,7 +116,11 @@ export function findFreeSlot(nodes: Placed[], preferred: { x: number; y: number 
     for (let row = 0; row < 30; row += 1) {
       const candidate = { x, y, w: size.w, h: size.h }
       if (!occupied.some((rect) => rectsOverlap(candidate, rect, 12))) return { x, y }
-      y += size.h + GAP_Y
+      // 按**遇到的那个节点多高**往下让，而不是按自己多高：一个矮节点挡在前面时，
+      // 从前那版会白让出一整张图的高度。
+      const blocking = occupied.filter((rect) => rectsOverlap(candidate, rect, 12))
+      const next = Math.max(y + size.h + GAP_Y, ...blocking.map((rect) => rect.y + rect.h + GAP_Y))
+      y = next
     }
     x += size.w + GAP_X
   }
@@ -124,26 +147,31 @@ export function findOverlaps(nodes: ({ id: string } & Placed)[]): { a: string; b
 
 /**
  * Re-arrange every node into two readable columns.
+ *
+ * 两列的间距**按真实宽度算**（左列最宽的那个 + 一个固定的呼吸位），
+ * 竖向也按每个节点自己的高度叠 —— 见 {@link sizeOf} 里那段说明。
  * @param nodes - current nodes.
  * @returns the same nodes with new positions.
  */
 export function arrangeLayout<T extends Node>(nodes: T[]): T[] {
   const moved = new Map<string, { x: number; y: number }>()
 
-  const stack = (list: T[], x: number, size: Footprint): number => {
-    let y = 0
-    for (const node of list) {
-      moved.set(node.id, { x, y })
-      y += size.h + GAP_Y
-    }
-    return y
-  }
-
   const content = nodes.filter((node) => !isGroup(node))
   const texts = content.filter((node) => kindOf(node) !== 'image')
   const images = content.filter((node) => kindOf(node) === 'image')
-  stack(texts, COLUMN.text, TEXT)
-  stack(images, COLUMN.image, IMAGE)
+
+  /** 逐列往下叠，每叠一个用**它自己的高度**。 */
+  const stack = (list: T[], x: number): void => {
+    let y = 0
+    for (const node of list) {
+      moved.set(node.id, { x, y })
+      y += sizeOf(node).h + GAP_Y
+    }
+  }
+
+  const textWidth = texts.reduce((widest, node) => Math.max(widest, sizeOf(node).w), 0)
+  stack(texts, 0)
+  stack(images, textWidth === 0 ? 0 : textWidth + GAP_X)
 
   return nodes.map((node) => {
     const position = moved.get(node.id)
@@ -176,12 +204,17 @@ export function arrangeSubset<T extends Node>(nodes: T[], ids: string[]): T[] {
   ]
 
   const moved = new Map<string, { x: number; y: number }>()
-  const cursors: { text: number; image: number } = { text: anchorY, image: anchorY }
+  /** 每一列各自往下叠（用每个节点自己的高度）。 */
+  const cursors = { text: anchorY, image: anchorY }
+  /** 右列的起点按**选中这批里最宽的那个非图片节点**算，不再用写死的 460。 */
+  const textWidth = chosen
+    .filter((node) => kindOf(node) !== 'image')
+    .reduce((widest, node) => Math.max(widest, sizeOf(node).w), 0)
+  const originX = { text: anchorX, image: anchorX + (textWidth === 0 ? 0 : textWidth + GAP_X) }
   for (const node of ordered) {
     const column: 'text' | 'image' = kindOf(node) === 'image' ? 'image' : 'text'
-    const size = footprintOf(column)
-    moved.set(node.id, { x: anchorX + COLUMN[column], y: cursors[column] })
-    cursors[column] += size.h + GAP_Y
+    moved.set(node.id, { x: originX[column], y: cursors[column] })
+    cursors[column] += sizeOf(node).h + GAP_Y
   }
 
   return nodes.map((node) => {

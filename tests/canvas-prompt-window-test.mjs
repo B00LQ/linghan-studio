@@ -274,7 +274,7 @@ const run = async () => {
   const typed = await s.evaluate(`document.querySelector('.prompt-window textarea').value`)
   check('提示词已写入节点', typed === PROMPT, typed.slice(0, 20))
 
-  const images = () => s.evaluate(`document.querySelectorAll(".studio-node[data-kind='image'] > img").length`)
+  const images = () => s.evaluate(`document.querySelectorAll(".studio-node[data-kind='image'] > .node-media > img").length`)
   const before = await images()
   check('点击窗口里的 ↑', await s.evaluate(`(() => { const b = document.querySelector('.prompt-window .send'); if (!b || b.disabled) return false; b.click(); return true })()`))
   // 首次等待必须覆盖 ComfyUI 的**冷启动**（搬 11 GB 权重进显存，约 80–90 秒）。
@@ -302,7 +302,7 @@ const run = async () => {
   check('卡片角标显示当前是第几版', /第 \d+ 版/.test(badge), badge)
 
   log('⑧ 点旧版本 → 卡片切换显示，并标记为选用')
-  const beforeUrl = await s.evaluate(`document.querySelector(".studio-node[data-kind='image'] > img").getAttribute('src')`)
+  const beforeUrl = await s.evaluate(`document.querySelector(".studio-node[data-kind='image'] > .node-media > img").getAttribute('src')`)
   check('点击第一个版本', await s.evaluate(`(() => { const c = document.querySelector('.prompt-window .history-cell'); if (!c) return false; c.click(); return true })()`))
   // 选用标记要等两件事：把选用写回服务端，再把这份历史读回来。
   // 固定 sleep 在机器忙的时候会偶发失败，所以这里轮询到出现为止。
@@ -312,7 +312,7 @@ const run = async () => {
     chosen = await s.evaluate(`document.querySelectorAll('.prompt-window .history-cell.is-chosen').length`)
     if (chosen === 1) break
   }
-  const afterUrl = await s.evaluate(`document.querySelector(".studio-node[data-kind='image'] > img").getAttribute('src')`)
+  const afterUrl = await s.evaluate(`document.querySelector(".studio-node[data-kind='image'] > .node-media > img").getAttribute('src')`)
   check('卡片显示的画面已切换', beforeUrl !== afterUrl, `${beforeUrl?.slice(-8)} -> ${afterUrl?.slice(-8)}`)
   check('被点击的版本标了选用', chosen === 1, `${chosen} 个`)
   await s.shot('prompt-window-selected.png')

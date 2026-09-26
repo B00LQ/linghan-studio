@@ -161,7 +161,7 @@ const main = async () => {
 
   // 项目是复用的，画布上还留着上一轮跑出来的画面。所以必须比较「生成前后的差值」——
   // 用 images > 0 当成功条件的话，它在什么都没生成时就已经成立了。
-  const countImages = () => s.evaluate(`document.querySelectorAll('.studio-node > img').length`)
+  const countImages = () => s.evaluate(`document.querySelectorAll('.studio-node > .node-media > img').length`)
   const attempts = Number(process.env.GEN_ATTEMPTS || 60)
   const waitForImages = async (target) => {
     for (let i = 0; i < attempts; i += 1) {
@@ -216,7 +216,7 @@ const main = async () => {
   log('⑦ 点旧版本 → 卡片切换显示，并标记为选用')
   // 必须是**当前选中**的那个节点：项目是复用的，画布上还有历史节点，
   // 用 .studio-node[data-kind=image] 会取到第一个，断言就测了别的节点。
-  const cardImage = `document.querySelector('.react-flow__node.selected .studio-node > img')?.getAttribute('src') ?? ''`
+  const cardImage = `document.querySelector('.react-flow__node.selected .studio-node > .node-media > img')?.getAttribute('src') ?? ''`
   const beforeUrl = await s.evaluate(cardImage)
   const clicked = await s.evaluate(`(() => { const c = document.querySelector('.prompt-window .history-cell'); if (!c) return false; c.click(); return true })()`)
   const picked = await waitForCount(`document.querySelectorAll('.prompt-window .history-cell.is-chosen').length`, 1)

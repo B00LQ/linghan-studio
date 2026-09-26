@@ -313,7 +313,7 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
 
   return (
     <div
-      className={`studio-node ${selected ? 'is-selected' : ''}${data.disabled === true ? ' is-disabled' : ''}`}
+      className={`studio-node ${selected ? 'is-selected' : ''}${data.disabled === true ? ' is-disabled' : ''}${running ? ' is-running' : ''}`}
       data-kind={data.kind}
     >
       {/* 被禁用的节点：卡片本身变灰，右上角挂一个「已禁用」——
@@ -374,12 +374,25 @@ function StudioNodeView({ id, data, selected }: NodeProps<StudioNode>) {
       ) : typeof data.url === 'string' && data.url !== '' ? (
         // 视频用真正的播放器：MiniMax H3 出的 mp4 里带音轨，
         // 「有没有声音」是这个模型的一半卖点，用静音缩略图糊弄过去等于藏了一半。
-        producesVideo(String(data.kind))
-          ? <video className="node-video" src={data.url} controls playsInline preload="metadata" />
-          // 音频用播放条：它没有画面，摆一张占位图等于骗人。
-          : producesAudio(String(data.kind))
-            ? <audio className="node-audio" src={data.url} controls preload="metadata" />
-            : <img src={data.url} alt={data.text ?? '生成结果'} />
+        <div className="node-media">
+          {producesVideo(String(data.kind))
+            ? <video className="node-video" src={data.url} controls playsInline preload="metadata" />
+            // 音频用播放条：它没有画面，摆一张占位图等于骗人。
+            : producesAudio(String(data.kind))
+              ? <audio className="node-audio" src={data.url} controls preload="metadata" />
+              : <img src={data.url} alt={data.text ?? '生成结果'} />}
+          {/* 在已有的画面上重跑：盖一层来回扫的光。**不遮住画面**（那就是把作品藏起来了），
+              只加一层"正在重做"的动静。 */}
+          {running ? <span className="media-scan" aria-hidden="true" /> : null}
+        </div>
+      ) : running ? (
+        /* 还没有画面 + 正在生成：一张会呼吸的骨架，而不是那段「尝试：…」的说明 ——
+           正在跑的时候，用户要的是"它在动"，不是"你可以输入提示词"。 */
+        <div className="node-skeleton" data-testid="node-skeleton" aria-label="正在生成">
+          <span className="bars" aria-hidden="true" />
+          <span className="sweep" aria-hidden="true" />
+          <em>{runStatus.text === '' ? '正在生成…' : runStatus.text}</em>
+        </div>
       ) : (
         <div className="empty-card">
           <div className="placeholder" />

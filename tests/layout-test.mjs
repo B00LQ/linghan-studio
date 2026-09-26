@@ -68,6 +68,21 @@ check('同列节点竖向排开', pos('text-a').y !== pos('text-b').y && pos('im
   `文本 ${pos('text-a').y}/${pos('text-b').y} 图片 ${pos('image-a').y}/${pos('image-b').y}`)
 check('所有节点都被安排（数量不变）', tidy.length === messy.length)
 
+console.log('\n=== 真实尺寸优先（这条是「整理完节点离得太远」的回归）===')
+// 从前每一步都按**类型占位值**往下叠（图片 430 高），而一张空卡片只有两百来像素，
+// 于是十来个节点就散成一整屏。现在优先用 React Flow 量出来的真实尺寸。
+const compact = [
+  { id: 't', type: 'studio', position: { x: 0, y: 0 }, data: { kind: 'text' }, measured: { width: 240, height: 90 } },
+  { id: 'i', type: 'studio', position: { x: 0, y: 0 }, data: { kind: 'image' }, measured: { width: 300, height: 210 } },
+  { id: 'i2', type: 'studio', position: { x: 0, y: 0 }, data: { kind: 'image' }, measured: { width: 300, height: 210 } },
+]
+const tight = arrangeLayout(compact)
+const yOf = (id) => tight.find((n) => n.id === id).position.y
+const xOf = (id) => tight.find((n) => n.id === id).position.x
+check('按真实高度叠（两张矮卡片之间只有一个呼吸位）', yOf('i2') - yOf('i') === 210 + 22, `${String(yOf('i'))} → ${String(yOf('i2'))}`)
+check('右列起点按左列真实宽度 + 呼吸位算', xOf('i') === 240 + 72, String(xOf('i')))
+check('真实尺寸下也不重叠', findOverlaps(tight).length === 0)
+
 console.log('\n=== 尺寸假定 ===')
 const fp = ['text', 'image'].map((k) => `${k}=${footprintOf(k).w}x${footprintOf(k).h}`)
 check('两种节点都有明确的占位尺寸', fp.length === 2, fp.join(' '))

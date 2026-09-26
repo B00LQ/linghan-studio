@@ -340,6 +340,81 @@ textarea { min-height: 96px; resize: vertical; }
   font-variant-numeric: tabular-nums;
 }
 
+/* ── 生成中的卡片：让它「活起来」 ─────────────────────────────────────────
+   参考的是 LibLib 那一类工具的做法：点下去之后画面不是静止的等待，
+   而是有东西在动。三层，都不影响读数：
+   ① 卡片描边跟着呼吸（一眼看出"这一个在跑"）；
+   ② 还没出图时是一张会扫光的骨架，而不是「尝试：…」的说明书；
+   ③ 已经有画面在重跑时，画面上过一层**不遮住画面**的扫光。
+   全部只用 transform / opacity / box-shadow，且尊重「减少动态效果」。 */
+.studio-node.is-running {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  animation: node-breathe 2.8s ease-in-out infinite;
+}
+@keyframes node-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent), 0 0 26px var(--glow); }
+}
+
+.node-skeleton {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  height: 150px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
+    var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+.node-skeleton .bars {
+  width: 58%;
+  height: 30px;
+  border-radius: 5px;
+  background: repeating-linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--text) 22%, transparent) 0 4px,
+    transparent 4px 12px
+  );
+  opacity: 0.5;
+}
+/* 扫光：一条斜着的亮带从左到右慢慢过（用 transform，不动布局） */
+.node-skeleton .sweep {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 28%, var(--glow) 50%, transparent 72%);
+  transform: translateX(-100%);
+  animation: skeleton-sweep 2.2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+@keyframes skeleton-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.node-skeleton em {
+  font-style: normal;
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+/* 已有画面在重跑：一层扫光盖在画面上（**不给画面加暗**，作品不该被藏起来）。 */
+.node-media { position: relative; display: block; }
+.media-scan {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 34%, color-mix(in srgb, var(--accent) 26%, transparent) 50%, transparent 66%);
+  transform: translateX(-100%);
+  animation: skeleton-sweep 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-node.is-running { animation: none; box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); }
+  .node-skeleton .sweep, .media-scan { animation: none; opacity: 0.35; transform: none; }
+}
+
 /* 工作流库（主页） */
 .workflow-library { display: flex; flex-direction: column; gap: 10px; }
 .workflow-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
