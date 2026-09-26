@@ -61,7 +61,10 @@ const PAYLOAD = [
 
 if (!has('skip-build')) {
   log('构建前端…')
-  execFileSync('pnpm', ['--filter', '@studio/web', 'build'], { cwd: repo, stdio: 'inherit', shell: true })
+  // 命令写成**一整条字符串**：`shell: true` 配上参数数组会触发 Node 的 DEP0190
+  // （"args 不会被转义，只会被拼接"）。它只是警告，却会把 stderr 弄脏 ——
+  // 而「打包脚本 stderr 里有东西」会让自动化以为它失败了。
+  execFileSync('pnpm --filter @studio/web build', { cwd: repo, stdio: 'inherit', shell: true })
 }
 if (!existsSync(join(repo, 'apps', 'web', 'dist', 'index.html'))) {
   console.error('[pack] 没有前端构建产物（apps/web/dist）。去掉 --skip-build 再跑一次。')
@@ -113,7 +116,7 @@ if (WITH_ELECTRON) {
     mkdirSync(cache, { recursive: true })
     writeFileSync(join(cache, 'package.json'), '{"name":"electron-download","private":true}\n', 'utf8')
     try {
-      execFileSync('npm', ['install', `electron@${ELECTRON_VERSION}`, '--no-audit', '--no-fund', '--loglevel=error'], {
+      execFileSync(`npm install electron@${ELECTRON_VERSION} --no-audit --no-fund --loglevel=error`, {
         cwd: cache,
         stdio: 'inherit',
         shell: true,

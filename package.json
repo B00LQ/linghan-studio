@@ -15,6 +15,7 @@
     "dev:web": "pnpm --filter @studio/web dev",
     "build": "pnpm --filter @studio/web build",
     "start": "pnpm --filter @studio/server start",
+    "test": "node tests/run-regression.mjs",
     "typecheck": "pnpm -r typecheck"
   }
 }
