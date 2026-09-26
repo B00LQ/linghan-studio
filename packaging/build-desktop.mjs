@@ -1,26 +1,41 @@
 /**
- * 打绿色包（Windows x64）与自助更新包。
+ * 打发布包（Windows x64）与自助更新包。
  *
  * 用法：
- *   node packaging/build-desktop.mjs                     # 构建前端 → 打绿色包 + 更新包
- *   node packaging/build-desktop.mjs --node <node.exe>   # 指定要捆进包里的 Node
- *   node packaging/build-desktop.mjs --url <更新包地址>  # 写进 update.json 的下载地址
- *   node packaging/build-desktop.mjs --skip-build        # 前端已经构建过，省一步
+ *   node packaging/build-desktop.mjs                        # 构建前端 → 打包 + 更新包
+ *   node packaging/build-desktop.mjs --node <node.exe>      # 指定要捆进包里的 Node
+ *   node packaging/build-desktop.mjs --url <更新包地址>      # 写进 update.json 的下载地址
+ *   node packaging/build-desktop.mjs --default-password xxx # 安装版预置的访问密码（默认 admin）
+ *   node packaging/build-desktop.mjs --skip-build           # 前端已经构建过，省一步
  *
  * 产出（都在 `dist-desktop/` 下）：
- * - `LINGHAN-Studio/`：可以直接双击运行的目录（自带 Node，不需要装任何东西）。
- * - `LINGHAN-Studio-<版本>-win-x64.zip`：整个目录的压缩包，发给别人用。
- * - `LINGHAN-Studio-<版本>-update.zip`：**更新包**，只有程序本身（没有 Node 与启动器）。
- *   自助更新装的就是它 —— 换 Node 运行时不该是更新的一部分。
- * - `update.json`：更新源清单（version / url / sha256 / notes）。把它放到一个
- *   HTTPS 地址上，配置 `STUDIO_UPDATE_URL` 指向它，绿色包就能自助更新了。
- * - 如果装了 Inno Setup（`ISCC.exe`），顺带编译出安装程序 `LINGHAN-Studio-<版本>-setup.exe`。
+ * - `LHIC/`：可以直接双击运行的目录（自带 Node + Electron，不需要装任何东西）。
+ * - `LHIC-<版本>-win-x64.zip`：整个目录的压缩包，发给别人用。
+ * - `LHIC-<版本>-update.zip`：**更新包**，只有程序本身（没有 Node 与启动器）。
+ * - `update.json`：更新源清单（version / url / sha256 / notes）。
+ * - 装了 Inno Setup（`ISCC.exe`）还会编译出 `LHIC-<版本>-setup.exe`。
  *
- * **为什么不捆绑 ComfyUI**（这一条是许可问题，不是技术问题）：ComfyUI 是 GPL-3.0。
- * 把它的代码/二进制打进安装包里，整个安装包的再分发就要按 GPL 走 —— 而这份产品是
- * 专有许可（见 LICENSE）。所以安装包**只装 Studio 自己**，出图后端由用户在首启向导里
- * 指向他自己那份 ComfyUI（页面只填一个地址，不复制、不分发它的任何文件）。
- * 这条界线同时也是**体积**上的常识：ComfyUI 加模型动辄几十 GB，那是用户自己的算力。
+ * ## 为什么服务端要**打包压缩成一个文件**（而不是直接发 `.ts` 源码）
+ *
+ * 这一版开始的规矩：**包里不含可读源码**。服务端用 esbuild 打成 `app/server.mjs`
+ * （minify、不带 sourcemap），前端本来就是构建产物。原因很直白：绿色包解压出来
+ * 就是一堆 `.ts` 文件的话，任何人拷走就能改个名字当自己的产品发。
+ *
+ * 说清边界：这**不是加密**，也不可能是 —— 程序要在用户机器上跑，密钥就得跟着包走，
+ * 谁都能逆向。它只是把门槛从"拷走就能改"抬到"得逆向一个压缩包"，配合专有许可（LICENSE）
+ * 就是这类产品的常规做法。
+ *
+ * 两个连带的约束：
+ * 1. 内置工作流是**运行时读的 JSON**（`apps/server/src/comfyui/*.json`，靠
+ *    `import.meta.dirname` 找），所以它们要单独拷到 `app/comfyui/` —— 打包之后
+ *    `import.meta.dirname` 就是 `app/`。
+ * 2. `launch.mjs` 与 Electron 外壳要**两种布局都认**（打包版 `server.mjs`、
+ *    老版本 `apps/server/src/index.ts`）：更新时 `app/` 整份换掉，而它们不在更新范围内，
+ *    不认老布局就会把老用户锁在门外。
+ *
+ * **为什么不捆绑 ComfyUI**（许可问题，不是技术问题）：ComfyUI 是 GPL-3.0，
+ * 把它的代码/二进制打进安装包，整个包的再分发就要按 GPL 走 —— 而这份产品是专有许可。
+ * 所以包里只有 LHIC 自己；出图后端由用户在首启向导里指向他自己那份 ComfyUI。
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -28,47 +43,39 @@ import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
-import { writeIcon } from './make-icon.mjs'
+import { writeIcon, writeIco } from './make-icon.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
+/** 取一个参数：`--name value` 与 `--name=value` 两种写法都认（空值也算数）。 */
 const flag = (name, fallback) => {
+  const inline = args.find((item) => item.startsWith(`--${name}=`))
+  if (inline !== undefined) return inline.slice(name.length + 3)
   const at = args.indexOf(`--${name}`)
   return at === -1 ? fallback : (args[at + 1] ?? fallback)
 }
 const has = (name) => args.includes(`--${name}`)
 
-const NAME = flag('name', 'LINGHAN-Studio')
+const PRODUCT = flag('name', 'LHIC')
 const OUT = resolve(repo, flag('out', 'dist-desktop'))
-const UPDATE_URL = flag('url', 'https://example.invalid/linghan-studio-<version>-update.zip')
+const UPDATE_URL = flag('url', 'https://github.com/B00LQ/linghan-studio/releases/download/v<version>/LHIC-<version>-update.zip')
 const NOTES = flag('notes', '')
+/** 安装版预置的访问密码：下载 → 双击 → 点一下登录就能用。空串 = 不预置（走首启向导）。 */
+const DEFAULT_PASSWORD = flag('default-password', 'admin')
 /** 打不打 Electron（默认打：桌面端要是**应用窗口**，不是浏览器窗口）。 */
 const WITH_ELECTRON = !has('no-electron')
 const ELECTRON_VERSION = flag('electron-version', '33.4.11')
 const mirror = process.env.ELECTRON_MIRROR ?? 'https://registry.npmmirror.com/-/binary/electron/'
 const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
 const VERSION = pkg.version
-const bundle = join(OUT, NAME)
+const bundle = join(OUT, PRODUCT)
 
 const log = (message) => { console.log(`[pack] ${message}`) }
 
-/** 要拷进包里的（**程序本身**：服务端源码 + 前端构建产物 + package.json）。 */
-const PAYLOAD = [
-  { from: 'apps/server/src', to: join('app', 'apps', 'server', 'src') },
-  { from: 'apps/web/dist', to: join('app', 'apps', 'web', 'dist') },
-  { from: 'package.json', to: join('app', 'package.json') },
-]
-
 if (!has('skip-build')) {
   log('构建前端…')
-  /**
-   * Windows 上**故意走 `cmd /c`，不走 `shell: true`**。
-   *
-   * `shell: true` 会让 Node 用 cmd 拉 `pnpm.cmd`，但 PowerShell 用户手动跑这个脚本时
-   * 命中的是 `pnpm.ps1` —— 那个 shim 会把每条脚本行（`$ vite build`）**回显到 stderr**，
-   * 于是一个每次都成功的打包命令，在「stderr 有内容就算失败」的自动化里变成 exit 1。
-   * 打包脚本的 stderr 必须是干净的：它是「这次打包到底成没成」的唯一信号。
-   */
+  // Windows 上**故意走 `cmd /c`，不走 `shell: true`**：PowerShell 的 pnpm shim 会把
+  // 每条脚本行回显到 stderr，而「打包脚本 stderr 里有内容」会让自动化误判成失败。
   if (process.platform === 'win32') {
     execFileSync('cmd', ['/c', 'pnpm --filter @studio/web build'], { cwd: repo, stdio: 'inherit' })
   } else {
@@ -84,27 +91,78 @@ log(`清理 ${bundle}`)
 rmSync(bundle, { recursive: true, force: true })
 mkdirSync(bundle, { recursive: true })
 
-/** 拷贝时排掉的东西：测试、类型定义、编辑器产物 —— 包里不需要。 */
-const skip = (source) => /(^|[\\/])(node_modules|__pycache__)([\\/]|$)/u.test(source)
-  || /\.test\.[cm]?[jt]s$/u.test(source)
+const appDir = join(bundle, 'app')
+mkdirSync(appDir, { recursive: true })
 
-for (const entry of PAYLOAD) {
-  const from = join(repo, entry.from)
-  if (!existsSync(from)) {
-    console.error(`[pack] 缺少 ${entry.from}`)
+/**
+ * 用 esbuild 把服务端打成一个文件。
+ *
+ * `--platform=node` 让 `node:` 内置模块保持外置（它们本来就该外置：Node 自己提供）；
+ * `--format=esm` 是因为源码就是 ESM（有 top-level await）；`--minify` 是这一版的
+ * **目的之一**（见文件头那段说明）。
+ */
+function bundleServer() {
+  /**
+   * 直接跑 esbuild 的 **JS 入口**，不走 `node_modules/.bin/esbuild.cmd`。
+   *
+   * Node 从 18.20/20.12 起**拒绝**在没有 `shell: true` 的情况下 spawn `.cmd`/`.bat`
+   * （EINVAL，防命令注入）；而配上 `shell: true` 又会把 stderr 弄脏（见上面那段说明）。
+   * 用 `node <pkg>/bin/esbuild` 两个问题都没有：没有 shell，也没有 .cmd。
+   */
+  const esbuild = join(repo, 'node_modules', 'esbuild', 'bin', 'esbuild')
+  if (!existsSync(esbuild)) {
+    console.error('[pack] 找不到 esbuild。先 `pnpm install`（它是打包用的开发依赖）。')
     process.exit(1)
   }
-  cpSync(from, join(bundle, entry.to), { recursive: true, filter: (source) => !skip(source) })
-  log(`拷入 ${entry.from} → ${entry.to}`)
+  const common = ['--bundle', '--platform=node', '--format=esm', '--target=node24', '--minify', '--legal-comments=none']
+  const run = (entry, outfile) => {
+    log(`打包 ${entry} → ${outfile}`)
+    execFileSync(process.execPath, [
+      esbuild,
+      join(repo, 'apps', 'server', 'src', entry),
+      ...common,
+      `--outfile=${join(appDir, outfile)}`,
+    ], { cwd: repo, stdio: 'inherit' })
+  }
+  run('index.ts', 'server.mjs')
+  // 启动器与 Electron 外壳要用版本指针那几个函数（`activeVersionDir` / `installedVersions`）。
+  // 单独打一份小包，好过在三个地方各抄一遍五行逻辑。
+  run('update.ts', 'update.mjs')
+}
+bundleServer()
+
+// 内置工作流是运行时读的 JSON（靠 import.meta.dirname 找），打包后要在 app/ 旁边。
+cpSync(join(repo, 'apps', 'server', 'src', 'comfyui'), join(appDir, 'comfyui'), { recursive: true })
+log('内置工作流已就位（app/comfyui）')
+// 前端构建产物：打包布局下服务端认 `app/web`（见 index.ts 的 findWebDist）。
+cpSync(join(repo, 'apps', 'web', 'dist'), join(appDir, 'web'), { recursive: true })
+log('前端产物已就位（app/web）')
+cpSync(join(repo, 'package.json'), join(appDir, 'package.json'))
+
+/**
+ * 安装版预置值。
+ *
+ * 只预置两件事：访问密码，以及「这个密码是预置的」这个事实（服务端据此在
+ * 本机请求里把密码告诉登录页，让它预填）。用户改过密码之后服务端就不再下发它。
+ */
+if (DEFAULT_PASSWORD !== '') {
+  writeFileSync(join(appDir, '.env'), [
+    '# 安装版的预置值。改这里等于改默认密码；界面上改过之后以界面为准。',
+    `STUDIO_PASSWORD=${DEFAULT_PASSWORD}`,
+    `STUDIO_DEFAULT_PASSWORD=${DEFAULT_PASSWORD}`,
+    '',
+  ].join('\n'), 'utf8')
+  log(`已预置访问密码（${DEFAULT_PASSWORD}）：装完点一下「进入」就能用`)
 }
 
 // 启动器放在包根目录（它是**不会被更新**的那一层：更新换的是 app/ 那一份）。
 cpSync(join(repo, 'packaging', 'launch.mjs'), join(bundle, 'launch.mjs'))
-// 桌面窗口外壳（Electron 主进程 + 端口探测）也放在不会被更新的那一层。
+// 桌面窗口外壳（Electron 主进程 + 端口探测 + .env 读取）也放在不会被更新的那一层。
 cpSync(join(repo, 'packaging', 'desktop'), join(bundle, 'desktop'), { recursive: true })
-// 图标：任务栏与安装程序里那张脸。
+// 图标：任务栏、快捷方式与安装程序里那张脸（.ico 是 Windows 那些地方唯一认的格式）。
 writeIcon(join(bundle, 'icon.png'))
-log('桌面外壳与图标已就位（desktop/、icon.png）')
+writeIco(join(bundle, 'icon.ico'))
+log('桌面外壳与图标已就位（desktop/、icon.png、icon.ico）')
 
 /**
  * Electron：**独立应用窗口**要用它（没有地址栏、没有标签页、任务栏上是自己）。
@@ -112,9 +170,6 @@ log('桌面外壳与图标已就位（desktop/、icon.png）')
  * 它只做窗口，服务端仍由自带的 `node/node.exe` 跑 —— 因为 Electron 的 Node
  * **没有** `node:sqlite`（实测 Electron 33 / Node 20：`No such built-in module`），
  * 服务端搬不进去。代价是包大一倍多，换来的是它看起来、用起来都是一个应用。
- *
- * 二进制走镜像下载（`ELECTRON_MIRROR`）：这里直连 GitHub Releases 不通，
- * 而 npm 包本身装了也没有二进制。下不下来就**明说跳过**，退到浏览器窗口模式。
  */
 if (WITH_ELECTRON) {
   const cache = join(OUT, '.electron')
@@ -158,13 +213,13 @@ log(`捆入 Node：${nodeSource} → node/${nodeTarget.split(/[\\/]/u).pop()}`)
 
 // 双击就能跑。**故意保留这个控制台窗口**：它是日志与报错唯一的出口，
 // 藏起来的话「启动失败」就变成「什么都没发生」。
-const launcherName = process.platform === 'win32' ? '启动 Studio.cmd' : 'start-studio.sh'
+const launcherName = process.platform === 'win32' ? `启动 ${PRODUCT}.cmd` : 'start-studio.sh'
 if (process.platform === 'win32') {
   writeFileSync(join(bundle, launcherName), [
     '@echo off',
     'chcp 65001 >nul',
     'cd /d "%~dp0"',
-    'title LINGHAN Studio',
+    `title ${PRODUCT}`,
     '"%~dp0node\\node.exe" "%~dp0launch.mjs"',
     'echo.',
     'echo 已退出。按任意键关闭这个窗口。',
@@ -176,7 +231,7 @@ if (process.platform === 'win32') {
 }
 
 writeFileSync(join(bundle, 'version.json'), `${JSON.stringify({
-  name: NAME,
+  name: PRODUCT,
   version: VERSION,
   builtAt: new Date().toISOString(),
   node: process.version,
@@ -184,10 +239,13 @@ writeFileSync(join(bundle, 'version.json'), `${JSON.stringify({
 }, null, 2)}\n`, 'utf8')
 
 writeFileSync(join(bundle, '使用说明.txt'), [
-  `${NAME} ${VERSION}`,
+  `${PRODUCT} ${VERSION}`,
   '',
-  '双击「' + launcherName + '」就会启动，浏览器会自动打开界面。',
-  '第一次启动会有一个三步向导：设访问密码、选出图后端（可以先跳过）。',
+  `双击「${launcherName}」就会启动，应用窗口会自动打开。`,
+  DEFAULT_PASSWORD === ''
+    ? '第一次启动会有一个向导：设访问密码、选出图后端（可以先跳过）。'
+    : `第一次打开会让你输访问密码：已经预置好了（${DEFAULT_PASSWORD}），登录页会自动填上，点「进入」即可。`,
+  DEFAULT_PASSWORD === '' ? '' : '想换成自己的密码：进设置页改（改完之后预置的那个就失效了）。',
   '',
   '数据（画布、生成的图、上传的素材）都在这个文件夹的 data\\ 里：',
   '  · 想搬家/备份 → 整个文件夹拷走；',
@@ -200,7 +258,7 @@ writeFileSync(join(bundle, '使用说明.txt'), [
   '',
   '端口默认 8080，被占用时会自动往后找一个；窗口里会打印实际地址。',
   '',
-].join('\r\n'), 'utf8')
+].filter((line) => line !== undefined).join('\r\n'), 'utf8')
 
 /** 打 zip：Windows 用 Compress-Archive，其它平台用 zip。 */
 function archive(sourcePath, zipPath, insideFolder) {
@@ -216,15 +274,14 @@ function archive(sourcePath, zipPath, insideFolder) {
   return statSync(zipPath).size
 }
 
-log('打绿色包…')
-const portableZip = join(OUT, `${NAME}-${VERSION}-win-x64.zip`)
+log('打发布包…')
+const portableZip = join(OUT, `${PRODUCT}-${VERSION}-win-x64.zip`)
 const portableBytes = archive(bundle, portableZip, true)
 
 // 更新包：只有 app/ 那一份（单层根目录，服务端解包时会自动剥掉）。
 log('打更新包…')
-const payloadRoot = join(bundle, 'app')
-const updateZip = join(OUT, `${NAME}-${VERSION}-update.zip`)
-const updateBytes = archive(payloadRoot, updateZip, false)
+const updateZip = join(OUT, `${PRODUCT}-${VERSION}-update.zip`)
+const updateBytes = archive(appDir, updateZip, false)
 
 const sha256 = createHash('sha256').update(readFileSync(updateZip)).digest('hex')
 const manifestPath = join(OUT, 'update.json')
@@ -247,11 +304,13 @@ if (iscc !== undefined) {
   log('编译安装程序（Inno Setup）…')
   execFileSync(iscc, [
     `/DAppVersion=${VERSION}`,
+    `/DProduct=${PRODUCT}`,
     `/DSourceDir=${bundle}`,
     `/DOutputDir=${OUT}`,
-    join(repo, 'packaging', 'linghan-studio.iss'),
+    `/DLangDir=${join(repo, 'packaging', 'languages')}`,
+    join(repo, 'packaging', 'lhic.iss'),
   ], { stdio: 'inherit' })
-  installer = join(OUT, `${NAME}-${VERSION}-setup.exe`)
+  installer = join(OUT, `${PRODUCT}-${VERSION}-setup.exe`)
 } else {
   log('没找到 Inno Setup（ISCC.exe），跳过安装程序。')
   log('想生成 setup.exe：装 https://jrsoftware.org/isdl.php 之后重跑这个脚本，')
@@ -264,4 +323,6 @@ log(`  绿色包    ${portableZip}  ${(portableBytes / 1024 / 1024).toFixed(1)} 
 log(`  更新包    ${updateZip}  ${(updateBytes / 1024 / 1024).toFixed(1)} MB`)
 log(`  更新清单  ${manifestPath}`)
 log(`            sha256 ${sha256.slice(0, 16)}…`)
-if (installer !== '') log(`  安装程序  ${installer}`)
+if (installer !== '') {
+  log(`  安装程序  ${installer}  ${(statSync(installer).size / 1024 / 1024).toFixed(1)} MB`)
+}

@@ -29,12 +29,28 @@ const dataDir = process.env.STUDIO_DATA_DIR && process.env.STUDIO_DATA_DIR !== '
 const bundledApp = join(home, 'app')
 const nodeExe = join(home, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
 
+/**
+ * 一个安装目录里的程序入口，**两种布局都认**。
+ *
+ * 发布包里服务端是被打包压缩成一个文件的（`server.mjs`），老版本是 TS 源码。
+ * 升级时 `app/` 整份换掉，而这个外壳不在更新范围内 —— 所以它必须两种都认。
+ * @param {string} dir - 程序目录。
+ * @returns {{ path: string, strip: boolean } | null} 入口与要不要开类型剥离。
+ */
+function entryOf(dir) {
+  const packed = join(dir, 'server.mjs')
+  if (existsSync(packed)) return { path: packed, strip: false }
+  const source = join(dir, 'apps', 'server', 'src', 'index.ts')
+  if (existsSync(source)) return { path: source, strip: true }
+  return null
+}
+
 /** `current.txt` 指着哪个版本就跑哪个；没有就跑自带的 `app/`。 */
 function activeAppDir() {
   try {
     const version = readFileSync(join(home, 'current.txt'), 'utf8').trim()
     const versioned = join(home, 'versions', version)
-    if (version !== '' && existsSync(join(versioned, 'apps', 'server', 'src', 'index.ts'))) return versioned
+    if (version !== '' && entryOf(versioned) !== null) return versioned
   } catch { /* 没更新过就是正常的 */ }
   return bundledApp
 }
@@ -75,7 +91,8 @@ let quitting = false
 
 async function startServer() {
   const appDir = activeAppDir()
-  if (!existsSync(join(appDir, 'apps', 'server', 'src', 'index.ts'))) {
+  const entry = entryOf(appDir)
+  if (entry === null) {
     dialog.showErrorBox('安装不完整', `找不到程序文件：\n${appDir}\n\n重新解压一次完整包，或删掉 current.txt 退回自带版本。`)
     app.exit(1)
     return ''
@@ -85,13 +102,18 @@ async function startServer() {
     app.exit(1)
     return ''
   }
+  // 安装版的预置值（默认访问密码等）：`.env` 只填没设过的环境变量。
+  const { loadEnvFile } = await import(pathToFileURL(join(home, 'desktop', 'env.mjs')).href)
+  const env = { ...process.env }
+  loadEnvFile(join(bundledApp, '.env'), env)
+  if (appDir !== bundledApp) loadEnvFile(join(appDir, '.env'), env)
   // 端口探测与启动器共用一份（见 desktop/ports.mjs 里那段「为什么不能只绑一下试试」）。
   const { freePort } = await import(pathToFileURL(join(home, 'desktop', 'ports.mjs')).href)
   const port = await freePort(Number.parseInt(process.env.PORT ?? '8080', 10) || 8080)
   const url = `http://127.0.0.1:${String(port)}`
-  server = spawn(nodeExe, ['--experimental-strip-types', join(appDir, 'apps', 'server', 'src', 'index.ts')], {
+  server = spawn(nodeExe, [...(entry.strip ? ['--experimental-strip-types'] : []), entry.path], {
     cwd: appDir,
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', STUDIO_HOME: home, STUDIO_DATA_DIR: dataDir },
+    env: { ...env, PORT: String(port), HOST: '127.0.0.1', STUDIO_HOME: home, STUDIO_DATA_DIR: dataDir },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
@@ -122,9 +144,12 @@ async function createWindow(url) {
     minHeight: 680,
     show: false,
     autoHideMenuBar: true, // 菜单栏（文件/编辑…）对本地工具没意义，按 Alt 才出现
-    backgroundColor: '#0b0d12',
-    title: 'LINGHAN Studio',
-    ...(existsSync(join(home, 'icon.png')) ? { icon: join(home, 'icon.png') } : {}),
+    backgroundColor: '#0a0b0d',
+    title: 'LHIC',
+    // Windows 的任务栏/窗口图标只认 .ico；没有就退回 png。
+    ...(existsSync(join(home, 'icon.ico'))
+      ? { icon: join(home, 'icon.ico') }
+      : existsSync(join(home, 'icon.png')) ? { icon: join(home, 'icon.png') } : {}),
     webPreferences: {
       // 只加载本机服务，不需要 Node 能力进页面：关掉是安全默认值。
       nodeIntegration: false,

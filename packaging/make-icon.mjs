@@ -1,46 +1,69 @@
 /**
- * 生成应用图标（`icon.png`）。
+ * 应用图标（`icon.png` + `icon.ico`）。
  *
- * 用服务端那个零依赖 PNG 编码器直接画像素，而不是塞一个来路不明的图：
- * 图标是这个应用在任务栏与安装程序里唯一的脸，而它只有几十行。
+ * 源图就是产品标记本身：`apps/web/public/ling-mark.png`（深色圆角底 + 白色印章）。
+ * **不再自己画一个**：界面上、任务栏里、安装程序里、开始菜单里应该是同一张脸，
+ * 各画一版迟早会有一版忘了改。
  *
- * 画的是：深色圆角底 + 一条亮蓝色的斜带（和界面里的强调色同一个色号）。
- * 简单、可复现、看得出是有意为之 —— 比 Electron 默认那个原子图标强。
+ * 为什么还要 `.ico`：Windows 的任务栏、快捷方式与 Inno Setup 只认 `.ico`
+ * （`SetupIconFile` 收 PNG 会直接报 "Icon file is invalid"）。ICO 从 Vista 起
+ * 可以内嵌 PNG，所以这里把源图缩成几种尺寸再按 ICO 的目录结构拼起来 ——
+ * 几十行、零依赖，用的是服务端那个 PNG 编解码器。
  */
-import { writeFileSync } from 'node:fs'
-import { encodePng } from '../apps/server/src/png.ts'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { decodePng, downscale, encodePng } from '../apps/server/src/png.ts'
 
-/** 圆角矩形的覆盖率（0–1），用来做抗锯齿的 alpha。 */
-function coverage(x, y, size, radius) {
-  // 到最近圆角圆心的距离（超出核心矩形时才算圆角区）
-  const cx = Math.min(Math.max(x, radius), size - radius)
-  const cy = Math.min(Math.max(y, radius), size - radius)
-  const distance = Math.hypot(x - cx, y - cy)
-  return Math.max(0, Math.min(1, radius - distance + 0.5))
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+/** 产品标记（界面上那份）。 */
+export const MARK_PNG = join(REPO, 'apps', 'web', 'public', 'ling-mark.png')
+
+/** ICO 里放哪几种尺寸；Windows 会在不同场合各取一种（16 是任务栏小图标，256 是超大图标）。 */
+const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
+
+/**
+ * 写一张 PNG 图标。
+ * @param path - 输出路径。
+ * @param size - 边长（方形）。
+ */
+export function writeIcon(path, size = 256) {
+  const raster = decodePng(readFileSync(MARK_PNG))
+  writeFileSync(path, encodePng(downscale(raster, size)))
 }
 
 /**
- * 画一张图标并写盘。
- * @param path - where to write the PNG.
- * @param size - edge length in pixels (Square icons only; 256 is what Windows wants).
+ * 写一个 Windows `.ico`（内嵌 PNG）。
+ * @param path - 输出路径。
+ * @param sourcePng - 源图；默认用产品标记。
+ * @param sizes - 要放进去的尺寸。
  */
-export function writeIcon(path, size = 256) {
-  const data = Buffer.alloc(size * size * 4)
-  const radius = size * 0.22
-  const accent = [122, 162, 255]
-  const base = [11, 13, 18]
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const at = (y * size + x) * 4
-      // 斜带：|x + y - size| 落在带宽里就是亮色（左下到右上）。
-      const band = Math.abs(x + (size - y) - size) < size * 0.13
-      const inner = Math.abs(x + (size - y) - size) < size * 0.06
-      const color = band ? (inner ? [180, 205, 255] : accent) : base
-      data[at] = color[0]
-      data[at + 1] = color[1]
-      data[at + 2] = color[2]
-      data[at + 3] = Math.round(255 * coverage(x + 0.5, y + 0.5, size, radius))
-    }
-  }
-  writeFileSync(path, encodePng({ width: size, height: size, channels: 4, data }))
+export function writeIco(path, sourcePng = MARK_PNG, sizes = ICO_SIZES) {
+  const raster = decodePng(readFileSync(sourcePng))
+  const images = sizes.map((size) => ({ size, bytes: encodePng(downscale(raster, size)) }))
+
+  // ICONDIR：保留位 0、类型 1（图标）、条目数。
+  const header = Buffer.alloc(6)
+  header.writeUInt16LE(0, 0)
+  header.writeUInt16LE(1, 2)
+  header.writeUInt16LE(images.length, 4)
+
+  // 每个条目 16 字节；图像数据紧跟在目录之后。
+  let offset = 6 + images.length * 16
+  const entries = images.map((image) => {
+    const entry = Buffer.alloc(16)
+    // 宽高各一字节：256 写 0（那一格放不下 256）。
+    entry[0] = image.size >= 256 ? 0 : image.size
+    entry[1] = image.size >= 256 ? 0 : image.size
+    entry[2] = 0 // 调色板数（真彩色为 0）
+    entry[3] = 0 // 保留
+    entry.writeUInt16LE(1, 4) // 色彩平面
+    entry.writeUInt16LE(32, 6) // 位深
+    entry.writeUInt32LE(image.bytes.length, 8)
+    entry.writeUInt32LE(offset, 12)
+    offset += image.bytes.length
+    return entry
+  })
+
+  writeFileSync(path, Buffer.concat([header, ...entries, ...images.map((image) => image.bytes)]))
 }

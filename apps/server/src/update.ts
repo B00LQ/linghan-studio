@@ -66,13 +66,22 @@ export interface UpdateInfo {
 
 /** 运行中的版本，来自 package.json（**单一来源**，不在代码里再写一份）。 */
 export function runningVersion(): string {
-  try {
-    const raw = readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')
-    const parsed = JSON.parse(raw) as { version?: unknown }
-    return typeof parsed.version === 'string' ? parsed.version : '0.0.0'
-  } catch {
-    return '0.0.0'
+  /**
+   * 两个位置都试，因为程序有两种布局：
+   * - 打包布局：`app/server.mjs` 旁边就有 `app/package.json`（`./`）；
+   * - 源码布局：`apps/server/src/update.ts` 往上三层才是仓库根的 package.json。
+   *
+   * 顺序不能反：打包版从 `app/server.mjs` 往上三层会走到安装目录**外面**
+   * （甚至撞上构建机仓库根那份 package.json），于是「更新完了还是老版本号」。
+   */
+  const candidates = [new URL('./package.json', import.meta.url), new URL('../../../package.json', import.meta.url)]
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as { version?: unknown }
+      if (typeof parsed.version === 'string' && parsed.version !== '') return parsed.version
+    } catch { /* 换下一个位置 */ }
   }
+  return '0.0.0'
 }
 
 /**
@@ -284,7 +293,10 @@ export async function applyUpdate(
  * @returns whether self-update can be offered here.
  */
 export function isPortableHome(home: string): boolean {
-  return home !== '' && existsSync(join(home, 'app', 'apps', 'server', 'src', 'index.ts'))
+  if (home === '') return false
+  // 两种布局都算绿色包：打包版（app/server.mjs）与老版本（app/apps/server/src/index.ts）。
+  return existsSync(join(home, 'app', 'server.mjs'))
+    || existsSync(join(home, 'app', 'apps', 'server', 'src', 'index.ts'))
 }
 
 /**

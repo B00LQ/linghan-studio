@@ -17,5 +17,8 @@
     "start": "pnpm --filter @studio/server start",
     "test": "node tests/run-regression.mjs",
     "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

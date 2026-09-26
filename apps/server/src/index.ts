@@ -8,6 +8,7 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,8 +36,28 @@ import { deleteWorkflow, isBuiltIn, loadWorkflows, readWorkflow, resetWorkflow, 
 import { makeZip, type ZipEntry } from './zip.ts'
 import { applyUpdate, checkForUpdate, installedVersions, isPortableHome, runningVersion } from './update.ts'
 
-/** Web bundle directory, resolved relative to this file. */
-const WEB_DIST = fileURLToPath(new URL('../../web/dist', import.meta.url))
+/**
+ * 前端构建产物在哪。
+ *
+ * 两种布局都要认，因为**发布出去的服务端是被打包成一个文件的**（`app/server.mjs`），
+ * 而源码里它躺在 `apps/server/src/` 下面 —— 同一个 `import.meta.url` 推出来的相对路径
+ * 差着两层。做法是挑第一个真的存在 `index.html` 的候选，而不是猜一个。
+ */
+function findWebDist(): string {
+  const candidates = [
+    // 源码布局：apps/server/src/index.ts → apps/web/dist
+    fileURLToPath(new URL('../../web/dist', import.meta.url)),
+    // 打包布局：app/server.mjs 旁边就是 app/web（`./`，不是 `../`）
+    fileURLToPath(new URL('./web', import.meta.url)),
+  ]
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, 'index.html'))) return candidate
+  }
+  return candidates[0] as string
+}
+
+/** Web bundle directory. */
+const WEB_DIST = findWebDist()
 
 /** Content types served from the web bundle. */
 const MIME: Record<string, string> = {
@@ -872,6 +893,19 @@ function parseJson(text: string): Record<string, unknown> {
   }
 }
 
+/**
+ * 这次请求是不是从**本机**来的。
+ *
+ * 只认回环地址（`127.0.0.1` / `::1` / `::ffff:127.0.0.1`）。用来决定
+ * 「安装版预置密码」能不能下发 —— 它只该给坐在这台机器前面的人。
+ * @param remote - socket 的对端地址。
+ * @returns 是不是本机。
+ */
+function isLoopback(remote: string | undefined): boolean {
+  if (remote === undefined) return false
+  return remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
+}
+
 /** Serve one file from the web bundle, falling back to the SPA entry. */
 async function serveStatic(res: ServerResponse, pathname: string): Promise<void> {
   const relative = normalize(pathname).replace(/^([/\\])+/u, '')
@@ -1684,6 +1718,17 @@ const server = createServer((req, res) => {
           version: runningVersion(),
           // 数据目录只在向导里给：那时还没登录，而向导要告诉人「东西存在哪」。
           ...(setupNeeded() ? { dataDir: config.dataDir } : {}),
+          /**
+           * 安装版预置的访问密码：**只在从本机回环来的时候**给出去。
+           *
+           * 这条是「下载 → 双击 → 点一下登录就能用」的关键。它不是秘密（包装好就写着），
+           * 所以给出去本身没问题；但也没有任何理由发给局域网里的别人 —— 判据就是
+           * 这条请求是不是从本机发起的。两个条件都要满足：值存在，且它真的就是当前密码
+           * （不然用户改过密码之后，登录页还会预填一个已经不对的旧值）。
+           */
+          ...(isLoopback(req.socket.remoteAddress) && config.defaultPassword !== '' && config.defaultPassword === config.password
+            ? { defaultPassword: config.defaultPassword }
+            : {}),
         })
         return
       }

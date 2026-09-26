@@ -17,7 +17,7 @@
  */
 import { createServer } from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -30,7 +30,7 @@ const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
 const STAMP = Date.now().toString().slice(-6)
 const scratch = join(tmpdir(), `studio-desktop-${STAMP}`)
 const dataDir = join(scratch, 'data')
-const bundle = join(repo, 'dist-desktop', 'LINGHAN-Studio')
+const bundle = join(repo, 'dist-desktop', 'LHIC')
 const NEW_VERSION = '9.9.9'
 const PASSWORD = 'desktop-test-pw'
 /** 这一条要真开一个浏览器（向导是界面功能），端口避开别的用例。 */
@@ -106,21 +106,40 @@ const run = async () => {
   rmSync(scratch, { recursive: true, force: true })
   mkdirSync(scratch, { recursive: true })
 
-  log('① 打一个绿色包出来')
-  execFileSync('node', ['packaging/build-desktop.mjs'], { cwd: repo, stdio: 'inherit' })
+  log('① 打一个发布包出来')
+  // **故意不带预置密码**：这一条测的是「首启向导」那条路（没有预置值的部署）。
+  // 预置密码那条路在 ④b 单独测（下载 → 点一下登录就能用）。
+  execFileSync('node', ['packaging/build-desktop.mjs', '--default-password', ''], { cwd: repo, stdio: 'inherit' })
   const nodeExe = join(bundle, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
   check('包里有自带的 Node', existsSync(nodeExe), nodeExe)
   check('包里有启动器', existsSync(join(bundle, 'launch.mjs')))
-  check('包里有服务端源码', existsSync(join(bundle, 'app', 'apps', 'server', 'src', 'index.ts')))
-  check('包里有前端构建产物', existsSync(join(bundle, 'app', 'apps', 'web', 'dist', 'index.html')))
+  // 这一版开始：**包里不发源码**。服务端是一个压缩过的 server.mjs，
+  // 前端本来就是构建产物 —— 解压出来看不到可读的 TypeScript。
+  check('包里有打包好的服务端', existsSync(join(bundle, 'app', 'server.mjs')))
+  check('包里有版本管理模块（启动器要用）', existsSync(join(bundle, 'app', 'update.mjs')))
+  check('包里没有 TypeScript 源码',
+    (() => {
+      const found = []
+      const walk = (dir) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name)
+          if (entry.isDirectory()) walk(full)
+          else if (entry.name.endsWith('.ts')) found.push(full)
+        }
+      }
+      walk(join(bundle, 'app'))
+      return found.length === 0
+    })())
+  check('包里有前端构建产物', existsSync(join(bundle, 'app', 'web', 'index.html')))
+  check('包里有内置工作流（运行时读的 JSON）', existsSync(join(bundle, 'app', 'comfyui')))
   check('包里有 package.json（版本号的单一来源）', existsSync(join(bundle, 'app', 'package.json')))
-  check('包里有双击入口', existsSync(join(bundle, process.platform === 'win32' ? '启动 Studio.cmd' : 'start-studio.sh')))
+  check('包里有双击入口', existsSync(join(bundle, process.platform === 'win32' ? '启动 LHIC.cmd' : 'start-studio.sh')))
   check('包里有使用说明', existsSync(join(bundle, '使用说明.txt')))
   const manifest = JSON.parse(readFileSync(join(repo, 'dist-desktop', 'update.json'), 'utf8'))
   check('更新清单里带着 sha256 与版本', /^[0-9a-f]{64}$/u.test(manifest.sha256) && manifest.version === pkg.version,
     `${manifest.version} ${manifest.sha256.slice(0, 12)}…`)
   check('更新包里没有 Node 运行时（更新不该换运行时）',
-    !readFileSync(join(repo, 'dist-desktop', `LINGHAN-Studio-${pkg.version}-update.zip`)).toString('latin1').includes('node/node.exe'))
+    !readFileSync(join(repo, 'dist-desktop', `LHIC-${pkg.version}-update.zip`)).toString('latin1').includes('node/node.exe'))
 
   log('② 用包里自带的 Node 跑起来（不碰用户的数据目录）')
   const port = await freePort()
@@ -199,6 +218,54 @@ const run = async () => {
   check('全程没有 JS 报错', browser.consoleErrors.length === 0, browser.consoleErrors.slice(0, 2).join(' | '))
   browser.kill()
 
+  log('④b 安装版那条路：预置了密码 → 打开就能点一下登录（不用走向导）')
+  // 安装包（setup.exe）装出来的是带 `.env` 的包：密码预置好，首启向导那一步不再问。
+  // 这里不重打整个包，直接把那个文件补上再起一次 —— 测的是**机制**，不是打包。
+  const presetDir = join(scratch, 'preset-data')
+  writeFileSync(join(bundle, 'app', '.env'), 'STUDIO_PASSWORD=admin\nSTUDIO_DEFAULT_PASSWORD=admin\n', 'utf8')
+  const presetPort = await freePort()
+  const presetBase = `http://127.0.0.1:${String(presetPort)}`
+  const preset = start(nodeExe, [join(bundle, 'launch.mjs')], {
+    cwd: bundle,
+    env: {
+      ...process.env,
+      PORT: String(presetPort),
+      HOST: '127.0.0.1',
+      STUDIO_DATA_DIR: presetDir,
+      STUDIO_NO_BROWSER: '1',
+      // 真实环境变量压得住 .env —— 这里清掉，让它读包里的预置值。
+      STUDIO_PASSWORD: '',
+      STUDIO_DEFAULT_PASSWORD: '',
+    },
+  })
+  const presetUp = await until(async () => {
+    try {
+      const response = await fetch(`${presetBase}/api/health`)
+      return response.ok ? await response.json() : null
+    } catch { return null }
+  }, 40_000)
+  check('带预置值的包能起来', presetUp !== null, presetUp === null ? preset.output.join('').slice(-400) : '')
+  if (presetUp !== null) {
+    const presetApi = client(presetBase)
+    const info = (await presetApi.call('/api/session')).json
+    check('不再要求走首启向导', info.setupNeeded === false, JSON.stringify(info))
+    check('登录门仍然在（要密码）', info.requiresPassword === true)
+    check('把预置密码告诉本机登录页（好让它预填）', info.defaultPassword === 'admin', String(info.defaultPassword))
+    const enteredByDefault = await presetApi.call('/api/login', { method: 'POST', body: JSON.stringify({ password: 'admin' }) })
+    check('用预置密码能直接登进来', enteredByDefault.status === 200, JSON.stringify(enteredByDefault.json))
+
+    const loginWindow = await startSession({ port: CDP_PORT + 1, width: 1200, height: 800 })
+    await loginWindow.goto(presetBase, 5000)
+    const prefilled = await loginWindow.evaluate(`document.querySelector('input[type=password]')?.value ?? ''`)
+    check('登录页把预置密码填好了（用户只需点一下）', prefilled === 'admin', JSON.stringify(prefilled))
+    check('页面上说明了这是预置密码、可以改',
+      (await loginWindow.evaluate(`document.body.textContent`)).includes('设置'))
+    loginWindow.kill()
+  }
+  preset.child.kill()
+  await sleep(600)
+  rmSync(join(bundle, 'app', '.env'), { force: true })
+
   log('④ 向导写过的东西真的生效了（并且那个接口就此关门）')
   const after = (await api.call('/api/session')).json
   check('配过之后不再引导', after.setupNeeded === false, JSON.stringify(after))
@@ -268,9 +335,9 @@ const run = async () => {
   check('安装成功', applied.status === 200 && applied.json.version === NEW_VERSION, JSON.stringify(applied.json))
   check('明确说了要重启才生效', String(applied.json.note ?? '').includes('重启'), String(applied.json.note))
   const versioned = join(bundle, 'versions', NEW_VERSION)
-  check('新版本落在 versions/<版本>/ 里', existsSync(join(versioned, 'UPDATED.txt')) && existsSync(join(versioned, 'apps', 'server', 'src', 'index.ts')))
+  check('新版本落在 versions/<版本>/ 里', existsSync(join(versioned, 'UPDATED.txt')) && existsSync(join(versioned, 'server.mjs')))
   check('current.txt 指向新版本', readFileSync(join(bundle, 'current.txt'), 'utf8').trim() === NEW_VERSION)
-  check('老程序还在（回退只要改指针）', existsSync(join(bundle, 'app', 'apps', 'server', 'src', 'index.ts')))
+  check('老程序还在（回退只要改指针）', existsSync(join(bundle, 'app', 'server.mjs')))
 
   log('⑥ 重启一次：它必须真的跑在新版本上')
   first.child.kill()

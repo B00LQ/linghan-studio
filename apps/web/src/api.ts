@@ -12,6 +12,13 @@ export interface SessionInfo {
   version?: string
   /** 数据目录；只在首启向导里给（那时还没登录，也没什么可藏的）。 */
   dataDir?: string
+  /**
+   * 安装版预置的访问密码（只在**本机**请求时下发）。
+   *
+   * 登录页把它预填进输入框：下载 → 双击 → 点一下「进入」就能用。
+   * 用户改过密码之后服务端就不再下发它了（值对不上）。
+   */
+  defaultPassword?: string
 }
 
 /**

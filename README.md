@@ -1,4 +1,4 @@
-# LINGHAN Studio
+# LHIC
 
 A self-hosted AI creation canvas: **one infinite canvas that is yours**.
 The model layer talks to a local ComfyUI instance or to a cloud API, and canvases, assets and
@@ -59,9 +59,13 @@ generation history all stay on your own machine. Local compute first, your work 
 
 ## Download
 
-Grab `LINGHAN-Studio-<version>-win-x64.zip` from [Releases](https://github.com/B00LQ/linghan-studio/releases).
+Grab `LHIC-<version>-win-x64.zip` — or the installer `LHIC-<version>-setup.exe` — from
+[Releases](https://github.com/B00LQ/linghan-studio/releases).
 
-- Windows x64: extract it anywhere, then double-click the launcher `启动 Studio.cmd` (Start Studio.cmd)
+- **Installer (recommended)**: run it, launch LHIC from the Start menu, and click 进入 — the
+  access password is preset (`admin`) and already filled in on the login page. Change it in Settings.
+  It installs per-user (no administrator rights), and uninstalling never touches your work.
+- **Portable zip**: extract it anywhere, then double-click the launcher `启动 LHIC.cmd` (Start LHIC.cmd)
 - Nothing to install first — the bundle carries its own Node and Electron
 - **No models and no ComfyUI are included** (ComfyUI is GPL software and is not redistributed with this product). For image generation, point the wizard or Settings at your own ComfyUI instance, or paste an Ark API key
 - Everything lives in the `data\` folder next to the launcher: copy the folder to move or back it up, delete it to uninstall

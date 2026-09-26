@@ -59,6 +59,10 @@ export function App() {
       try {
         const info = await fetchSession()
         setSession(info)
+        // 安装版预置了访问密码：直接填好，用户点一下「进入」就行（他也可以改）。
+        if (!info.authenticated && info.defaultPassword !== undefined && info.defaultPassword !== '') {
+          setPassword(info.defaultPassword)
+        }
       } catch (problem) {
         setError(problem instanceof Error ? problem.message : '初始化失败')
       }
@@ -123,8 +127,8 @@ export function App() {
               .finally(() => { setBusy(false) })
           }}
         >
-          <h1>Studio</h1>
-          <p>AI 创作台 · 请输入访问密码</p>
+          <h1>LHIC</h1>
+          <p>本地 AI 画布 · 请输入访问密码</p>
           <input
             type="password"
             value={password}
@@ -132,6 +136,9 @@ export function App() {
             placeholder="访问密码"
             onChange={(event) => { setPassword(event.target.value) }}
           />
+          {session.defaultPassword === undefined ? null : (
+            <p className="gate-hint">安装版默认密码已填好（{session.defaultPassword}），点「进入」即可；登录后可在设置里改。</p>
+          )}
           <button type="submit" disabled={busy}>{busy ? '登录中…' : '进入'}</button>
           {error !== '' ? <span className="error">{error}</span> : null}
         </form>

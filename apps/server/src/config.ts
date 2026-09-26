@@ -97,6 +97,15 @@ export interface StudioConfig {
    * 它要能自己找到你，而不是等你某天打开设置页才发现站点早就只读了。
    */
   alertWebhook: string
+  /**
+   * 安装版预置的访问密码（`STUDIO_DEFAULT_PASSWORD`）。
+   *
+   * 为什么要有它：安装版希望"下载 → 双击 → 点一下登录就能用"。预置密码之后
+   * 首启向导那一步不会再问，登录页把这个值**预填**进去，点一下就进来了。
+   * 它只在**本机回环请求**里下发（见 index.ts 的 `/api/session`）—— 它本来就是个
+   * 摆在门口的钥匙，不是秘密，但也没必要发给局域网里的别人。
+   */
+  defaultPassword: string
 }
 
 /** 运行模式。 */
@@ -260,6 +269,7 @@ export function loadConfig(overrides: Record<string, string> = {}, previous?: St
     moderationKey: pick('MODERATION_KEY'),
     moderationFailClosed: flag(pick('MODERATION_FAIL_CLOSED')),
     alertWebhook: pick('STUDIO_ALERT_WEBHOOK'),
+    defaultPassword: pick('STUDIO_DEFAULT_PASSWORD'),
   }
 }
 
